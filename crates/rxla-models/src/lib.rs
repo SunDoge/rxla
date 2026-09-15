@@ -1,0 +1,376 @@
+//! Functional Stable Diffusion building blocks using scoped parameter effects.
+
+use rxla_core::{Conv2dOptions, DType, Tensor};
+use rxla_nn::{Cx, Error, Result};
+
+mod unet;
+pub use unet::{UnetConfig, unet};
+mod clip;
+pub use clip::{ClipTextConfig, clip_text_encoder};
+mod vae;
+pub use vae::{AutoencoderKlDecoderConfig, autoencoder_kl_decoder};
+mod scheduler;
+pub use scheduler::{PndmSampleSource, PndmScheduler, PndmStep};
+mod taesd;
+pub use taesd::taesd_decoder;
+mod qwen3_5;
+pub use qwen3_5::{Qwen3_5Config, qwen3_5};
+pub mod pp_ocr_v6;
+
+/// Learned two-layer projection for a sinusoidal timestep embedding.
+/// The input width is inferred at the point of use.
+pub fn timestep_embedding(cx: &mut Cx, input: &Tensor, output_width: i64) -> Result<Tensor> {
+    let hidden = cx.named("linear_1")?.linear(output_width).apply(input)?;
+    cx.named("linear_2")?
+        .linear(output_width)
+        .apply(&hidden.silu()?)
+}
+
+/// Static choices for a Diffusers-compatible `ResnetBlock2D`.
+#[derive(Clone, Copy, Debug)]
+pub struct Resnet2dOptions {
+    out_channels: i64,
+    groups: i64,
+    epsilon: f32,
+}
+
+impl Resnet2dOptions {
+    pub fn new(out_channels: i64) -> Self {
+        Self {
+            out_channels,
+            groups: 32,
+            epsilon: 1e-5,
+        }
+    }
+
+    pub fn groups(mut self, groups: i64) -> Self {
+        self.groups = groups;
+        self
+    }
+
+    pub fn epsilon(mut self, epsilon: f32) -> Self {
+        self.epsilon = epsilon;
+        self
+    }
+}
+
+/// Diffusers-compatible additive-timestep ResNet block.
+///
+/// The caller supplies the block's lexical scope. Nested paths are exactly
+/// `norm1`, `conv1`, `time_emb_proj`, `norm2`, `conv2`, and, when channels
+/// change, `conv_shortcut`.
+pub fn resnet2d(
+    cx: &mut Cx,
+    input: &Tensor,
+    timestep_embedding: &Tensor,
+    options: Resnet2dOptions,
+) -> Result<Tensor> {
+    if input.shape().len() != 4 || timestep_embedding.shape().len() != 2 {
+        return Err(Error::InvalidDefinition {
+            message: "stable diffusion ResNet expects NHWC input and rank-two timestep embedding"
+                .into(),
+        });
+    }
+    if input.shape()[0] != timestep_embedding.shape()[0] {
+        return Err(Error::InvalidDefinition {
+            message: "stable diffusion ResNet input and timestep batches must match".into(),
+        });
+    }
+    let convolution = Conv2dOptions {
+        padding: [[1, 1], [1, 1]],
+        ..Default::default()
+    };
+    let normalized = cx
+        .named("norm1")?
+        .group_norm(options.groups)
+        .epsilon(options.epsilon)
+        .apply(input)?;
+    let mut hidden = cx
+        .named("conv1")?
+        .conv2d(options.out_channels, [3, 3])
+        .options(convolution)
+        .apply(&normalized.silu()?)?;
+    let time = cx
+        .named("time_emb_proj")?
+        .linear(options.out_channels)
+        .apply(&timestep_embedding.silu()?)?
+        .reshape(&[timestep_embedding.shape()[0], 1, 1, options.out_channels])?
+        .broadcast_to(hidden.shape())?;
+    hidden = hidden.add(&time)?;
+    let normalized = cx
+        .named("norm2")?
+        .group_norm(options.groups)
+        .epsilon(options.epsilon)
+        .apply(&hidden)?;
+    hidden = cx
+        .named("conv2")?
+        .conv2d(options.out_channels, [3, 3])
+        .options(convolution)
+        .apply(&normalized.silu()?)?;
+    let residual = if input.shape()[3] == options.out_channels {
+        input.clone()
+    } else {
+        cx.named("conv_shortcut")?
+            .conv2d(options.out_channels, [1, 1])
+            .apply(input)?
+    };
+    Ok(hidden.add(&residual)?)
+}
+
+/// Static choices for a Diffusers-compatible spatial transformer.
+#[derive(Clone, Copy, Debug)]
+pub struct SpatialTransformerOptions {
+    head_dim: i64,
+    layers: usize,
+    groups: i64,
+}
+
+impl SpatialTransformerOptions {
+    pub fn new(head_dim: i64) -> Self {
+        Self {
+            head_dim,
+            layers: 1,
+            groups: 32,
+        }
+    }
+
+    pub fn layers(mut self, layers: usize) -> Self {
+        self.layers = layers;
+        self
+    }
+
+    pub fn groups(mut self, groups: i64) -> Self {
+        self.groups = groups;
+        self
+    }
+}
+
+fn cross_attention(cx: &mut Cx, query: &Tensor, context: &Tensor, head_dim: i64) -> Result<Tensor> {
+    if query.shape().len() != 3
+        || context.shape().len() != 3
+        || query.shape()[0] != context.shape()[0]
+    {
+        return Err(Error::InvalidDefinition {
+            message: "cross attention expects rank-three query/context with equal batches".into(),
+        });
+    }
+    let [batch, query_length, width] = query.shape() else {
+        unreachable!("rank checked above")
+    };
+    if head_dim <= 0 || *width <= 0 || width % head_dim != 0 {
+        return Err(Error::InvalidDefinition {
+            message: "attention width must be divisible by positive head_dim".into(),
+        });
+    }
+    let heads = width / head_dim;
+    let context_length = context.shape()[1];
+    let q = cx
+        .named("to_q")?
+        .linear(*width)
+        .bias(false)
+        .apply(query)?
+        .reshape(&[*batch, *query_length, heads, head_dim])?
+        .transpose(&[0, 2, 1, 3])?;
+    let k = cx
+        .named("to_k")?
+        .linear(*width)
+        .bias(false)
+        .apply(context)?
+        .reshape(&[*batch, context_length, heads, head_dim])?
+        .transpose(&[0, 2, 1, 3])?;
+    let v = cx
+        .named("to_v")?
+        .linear(*width)
+        .bias(false)
+        .apply(context)?
+        .reshape(&[*batch, context_length, heads, head_dim])?
+        .transpose(&[0, 2, 1, 3])?;
+    let hidden = q
+        .scaled_dot_product_attention(&k, &v, None, None)?
+        .transpose(&[0, 2, 1, 3])?
+        .reshape(&[*batch, *query_length, *width])?;
+    cx.scope("to_out", |cx| cx.named("0")?.linear(*width).apply(&hidden))
+}
+
+fn feed_forward(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+    let width = *input
+        .shape()
+        .last()
+        .ok_or_else(|| Error::InvalidDefinition {
+            message: "feed-forward input must have a feature dimension".into(),
+        })?;
+    let hidden = width
+        .checked_mul(4)
+        .ok_or_else(|| Error::InvalidDefinition {
+            message: "GEGLU hidden width overflow".into(),
+        })?;
+    let projected = hidden
+        .checked_mul(2)
+        .ok_or_else(|| Error::InvalidDefinition {
+            message: "GEGLU projected width overflow".into(),
+        })?;
+    let projected = cx.scope("net", |cx| {
+        cx.scope("0", |cx| cx.named("proj")?.linear(projected).apply(input))
+    })?;
+    let parts = projected.split(projected.shape().len() - 1, &[hidden, hidden])?;
+    let gated = parts[0].mul(&parts[1].gelu()?)?;
+    cx.scope("net", |cx| cx.named("2")?.linear(width).apply(&gated))
+}
+
+fn transformer_block(
+    cx: &mut Cx,
+    input: &Tensor,
+    context: &Tensor,
+    head_dim: i64,
+) -> Result<Tensor> {
+    let normalized = cx.named("norm1")?.layer_norm(1).apply(input)?;
+    let hidden = input.add(&cx.scope("attn1", |cx| {
+        cross_attention(cx, &normalized, &normalized, head_dim)
+    })?)?;
+    let normalized = cx.named("norm2")?.layer_norm(1).apply(&hidden)?;
+    let hidden = hidden.add(&cx.scope("attn2", |cx| {
+        cross_attention(cx, &normalized, context, head_dim)
+    })?)?;
+    let normalized = cx.named("norm3")?.layer_norm(1).apply(&hidden)?;
+    Ok(hidden.add(&cx.scope("ff", |cx| feed_forward(cx, &normalized))?)?)
+}
+
+/// Diffusers `Transformer2DModel` for NHWC activations and `[B,T,C]` context.
+pub fn spatial_transformer(
+    cx: &mut Cx,
+    input: &Tensor,
+    context: &Tensor,
+    options: SpatialTransformerOptions,
+) -> Result<Tensor> {
+    if input.shape().len() != 4
+        || context.shape().len() != 3
+        || input.shape()[0] != context.shape()[0]
+        || options.layers == 0
+    {
+        return Err(Error::InvalidDefinition {
+            message:
+                "spatial transformer expects NHWC input, rank-three context, equal batches and layers"
+                    .into(),
+        });
+    }
+    let [batch, height, width, channels] = input.shape() else {
+        unreachable!("rank checked above")
+    };
+    let normalized = cx
+        .named("norm")?
+        .group_norm(options.groups)
+        .epsilon(1e-6)
+        .apply(input)?;
+    let mut hidden = cx
+        .named("proj_in")?
+        .conv2d(*channels, [1, 1])
+        .apply(&normalized)?
+        .reshape(&[*batch, height * width, *channels])?;
+    for layer in 0..options.layers {
+        hidden = cx.scope("transformer_blocks", |cx| {
+            cx.scope(&layer.to_string(), |cx| {
+                transformer_block(cx, &hidden, context, options.head_dim)
+            })
+        })?;
+    }
+    let hidden = hidden.reshape(&[*batch, *height, *width, *channels])?;
+    Ok(cx
+        .named("proj_out")?
+        .conv2d(*channels, [1, 1])
+        .apply(&hidden)?
+        .add(input)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rxla_nn::{apply, init};
+
+    fn model(cx: &mut Cx) -> Result<Tensor> {
+        let image = cx.input(&[2, 16, 12, 32])?;
+        let timestep = cx.input(&[2, 128])?;
+        cx.scope("block", |cx| {
+            resnet2d(cx, &image, &timestep, Resnet2dOptions::new(64))
+        })
+    }
+
+    #[test]
+    fn timestep_mlp_infers_input_width() {
+        let (schema, output) = init(|cx| {
+            let input = cx.input(&[2, 32])?;
+            cx.scope("time_embedding", |cx| timestep_embedding(cx, &input, 128))
+        })
+        .unwrap();
+        assert_eq!(output.shape(), [2, 128]);
+        assert_eq!(
+            schema
+                .get("time_embedding.linear_1.weight")
+                .unwrap()
+                .shape(),
+            [128, 32]
+        );
+        assert_eq!(
+            schema
+                .get("time_embedding.linear_2.weight")
+                .unwrap()
+                .shape(),
+            [128, 128]
+        );
+    }
+
+    #[test]
+    fn resnet_infers_shapes_and_diffusers_paths() {
+        let (schema, output) = init(model).unwrap();
+        assert_eq!(output.shape(), [2, 16, 12, 64]);
+        assert_eq!(schema.parameters().len(), 12);
+        for path in [
+            "block.norm1.weight",
+            "block.conv1.weight",
+            "block.time_emb_proj.weight",
+            "block.norm2.bias",
+            "block.conv2.weight",
+            "block.conv_shortcut.bias",
+        ] {
+            assert!(schema.get(path).is_some(), "missing {path}");
+        }
+        let applied = apply(&schema, model).unwrap();
+        assert_eq!(applied.prepare().unwrap().input_count(), 14);
+    }
+
+    #[test]
+    fn equal_width_resnet_omits_shortcut_parameters() {
+        let (schema, output) = init(|cx| {
+            let image = cx.input(&[1, 8, 8, 32])?;
+            let timestep = cx.input(&[1, 128])?;
+            resnet2d(cx, &image, &timestep, Resnet2dOptions::new(32))
+        })
+        .unwrap();
+        assert_eq!(output.shape(), [1, 8, 8, 32]);
+        assert_eq!(schema.parameters().len(), 10);
+        assert!(schema.get("conv_shortcut.weight").is_none());
+    }
+
+    #[test]
+    fn spatial_transformer_infers_width_and_diffusers_paths() {
+        let model = |cx: &mut Cx| {
+            let image = cx.input(&[2, 8, 6, 64])?;
+            let context = cx.input(&[2, 77, 32])?;
+            spatial_transformer(cx, &image, &context, SpatialTransformerOptions::new(8))
+        };
+        let (schema, output) = init(model).unwrap();
+        assert_eq!(output.shape(), [2, 8, 6, 64]);
+        assert_eq!(schema.parameters().len(), 26);
+        for path in [
+            "norm.weight",
+            "proj_in.weight",
+            "transformer_blocks.0.attn1.to_q.weight",
+            "transformer_blocks.0.attn2.to_k.weight",
+            "transformer_blocks.0.ff.net.0.proj.weight",
+            "transformer_blocks.0.ff.net.2.bias",
+            "proj_out.bias",
+        ] {
+            assert!(schema.get(path).is_some(), "missing {path}");
+        }
+        apply(&schema, model).unwrap().prepare().unwrap();
+    }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "rxla-onnx"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+description = "ONNX import into the RXLA intermediate representation"
+
+[dependencies]
+onnx-ir = { version = "=0.22.0-pre.3", default-features = false }
+protobuf = "3.7.2"
+rxla-ir = { path = "../rxla-ir", version = "=0.1.0-alpha.1" }
+rxla-pjrt = { path = "../rxla-pjrt", version = "=0.1.0-alpha.1" }
+snafu.workspace = true
+
+[dev-dependencies]
+clap.workspace = true
+rxla-core = { path = "../rxla-core", version = "=0.1.0-alpha.1" }
+rxla-safetensors = { path = "../rxla-safetensors", version = "=0.1.0-alpha.1" }

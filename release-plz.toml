@@ -1,0 +1,55 @@
+[workspace]
+changelog_update = false
+dependencies_update = false
+git_release_enable = false
+git_tag_enable = false
+git_release_type = "auto"
+git_release_latest = false
+semver_check = false
+
+[[package]]
+name = "rxla"
+version_group = "rxla"
+git_release_enable = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+
+[[package]]
+name = "rxla-cache"
+version_group = "rxla"
+
+[[package]]
+name = "rxla-safetensors"
+version_group = "rxla"
+
+[[package]]
+name = "rxla-core"
+version_group = "rxla"
+
+[[package]]
+name = "rxla-ir"
+version_group = "rxla"
+
+[[package]]
+name = "rxla-models"
+version_group = "rxla"
+
+[[package]]
+name = "rxla-nn"
+version_group = "rxla"
+
+[[package]]
+name = "rxla-onnx"
+version_group = "rxla"
+
+[[package]]
+name = "rxla-pjrt"
+version_group = "rxla"
+
+[[package]]
+name = "rxla-train"
+version_group = "rxla"
+
+[[package]]
+name = "rxla-xla-proto"
+version_group = "rxla"

@@ -1,0 +1,11 @@
+# Opt-in Cargo configuration for repeated model runs during development.
+# Usage from the standalone repository root:
+# cargo --config fast-load.toml run -p rxla-checkpoint --example tinyllama -- ...
+# Optimize only this package (including its examples); retain debug assertions,
+# debug information and normal dev settings for the other workspace crates.
+# This trades a slower rebuild of rxla-checkpoint for faster host weight conversion.
+[profile.dev.package.rxla-checkpoint]
+opt-level = 2
+
+[profile.test.package.rxla-checkpoint]
+opt-level = 2

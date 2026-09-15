@@ -1,0 +1,27 @@
+[package]
+name = "rxla-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tensor tracing, autodiff, compilation, and execution core for RXLA"
+
+[dependencies]
+blake3 = { version = "1", optional = true }
+dlpark = { workspace = true }
+half = { workspace = true }
+prost = "0.14"
+rxla-pjrt = { path = "../rxla-pjrt", version = "=0.1.0-alpha.1" }
+rxla-ir = { path = "../rxla-ir", version = "=0.1.0-alpha.1" }
+rxla-xla-proto = { path = "../rxla-xla-proto", version = "=0.1.0-alpha.1" }
+rxla-cache = { path = "../rxla-cache", version = "=0.1.0-alpha.1", optional = true }
+smallvec = "=2.0.0-alpha.13"
+snafu = { workspace = true }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+image = { workspace = true }
+tempfile = "3"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "registry"] }
+
+[features]
+disk-cache = ["dep:blake3", "dep:rxla-cache"]

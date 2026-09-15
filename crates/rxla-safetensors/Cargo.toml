@@ -1,0 +1,53 @@
+[package]
+name = "rxla-safetensors"
+version.workspace = true
+edition.workspace = true
+description = "Weight loading, schema binding, and export for RXLA"
+license.workspace = true
+
+[[example]]
+name = "taesd_decode_bench"
+required-features = ["model"]
+
+[[example]]
+name = "stable_diffusion_unet_bench"
+required-features = ["model"]
+
+[[example]]
+name = "stable_diffusion"
+required-features = ["model"]
+
+[[example]]
+name = "qwen3_5_bench"
+required-features = ["model"]
+
+[dependencies]
+half = { workspace = true }
+rxla-core = { path = "../rxla-core", version = "=0.1.0-alpha.1", default-features = false, optional = true }
+rxla-nn = { path = "../rxla-nn", version = "=0.1.0-alpha.1", optional = true }
+rxla-pjrt = { path = "../rxla-pjrt", version = "=0.1.0-alpha.1" }
+safetensors = { version = "0.8.0", default-features = false, features = ["std"] }
+serde_json = "1.0.151"
+snafu = { workspace = true }
+tempfile = { version = "3.27.0", optional = true }
+
+[dev-dependencies]
+blake3 = "1"
+clap = { workspace = true }
+image = { workspace = true, features = ["png"] }
+rand = "0.9.2"
+rand_chacha = "0.9.0"
+rand_distr = "0.5.1"
+regex = "1.12.3"
+rxla-core = { path = "../rxla-core", version = "=0.1.0-alpha.1" }
+rxla-models = { path = "../rxla-models", version = "=0.1.0-alpha.1" }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
+[features]
+default = ["export"]
+disk-cache = ["rxla-core/disk-cache"]
+export = ["dep:tempfile"]
+model = ["dep:rxla-nn"]

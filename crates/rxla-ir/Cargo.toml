@@ -1,0 +1,13 @@
+[package]
+name = "rxla-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed SSA intermediate representation and StableHLO lowering for RXLA"
+
+[dependencies]
+cranelift-entity = { workspace = true }
+half = { workspace = true }
+pliron = "=0.17.0"
+rxla-pjrt = { path = "../rxla-pjrt", version = "=0.1.0-alpha.1" }
+snafu = { workspace = true }

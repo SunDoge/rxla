@@ -1,0 +1,52 @@
+use rxla_pjrt::Client;
+
+#[test]
+#[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+fn real_host_staged_copy_preserves_scalars_empty_shapes_and_payloads() {
+    let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
+    let float = client.buffer(&[], &[-0.]).unwrap();
+    let integer = client.buffer(&[2], &[i32::MIN, i32::MAX]).unwrap();
+    let bf16 = client
+        .buffer_bf16_bits(&[4], &[0x8000, 0x7fc1, 0xff80, 1])
+        .unwrap();
+    let empty = client.buffer::<f32>(&[2, 0, 3], &[]).unwrap();
+    for (source, bytes) in [(float, 4), (integer, 8), (bf16, 8), (empty, 0)] {
+        if bytes > 0 {
+            for limit in [0, bytes - 1] {
+                let error = match source.copy_to_client_via_host_with_limit(&client, limit) {
+                    Ok(_) => panic!("accepted transfer above host limit"),
+                    Err(error) => error,
+                };
+                assert!(error.to_string().contains("exceeds limit"));
+            }
+        }
+        let copy = source
+            .copy_to_client_via_host_with_limit(&client, bytes)
+            .unwrap();
+        assert!(copy.belongs_to(&client));
+        assert_eq!(copy.dimensions().unwrap(), source.dimensions().unwrap());
+        assert_eq!(copy.dtype().unwrap(), source.dtype().unwrap());
+        match source.dtype().unwrap() {
+            rxla_pjrt::DType::F32 => {
+                assert_eq!(
+                    copy.to_vec::<f32>().unwrap()[0].to_bits(),
+                    (-0f32).to_bits()
+                )
+            }
+            rxla_pjrt::DType::I32 => {
+                assert_eq!(
+                    copy.to_vec::<i32>().unwrap(),
+                    source.to_vec::<i32>().unwrap()
+                )
+            }
+            rxla_pjrt::DType::BF16 => assert_eq!(
+                copy.to_vec_bf16_bits().unwrap(),
+                source.to_vec_bf16_bits().unwrap()
+            ),
+            dtype => panic!("unsupported test dtype {dtype:?}"),
+        }
+        drop(source);
+        // Destination remains usable independently of the source handle.
+        assert!(copy.dtype().is_ok());
+    }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "rxla-models"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reference vision and language model definitions for RXLA"
+
+[dependencies]
+image = { workspace = true }
+rayon = "1.11.0"
+rxla-nn = { path = "../rxla-nn", version = "=0.1.0-alpha.1" }
+rxla-core = { path = "../rxla-core", version = "=0.1.0-alpha.1", default-features = false }
+snafu = { workspace = true }
+
+[dev-dependencies]
+clap = { workspace = true }

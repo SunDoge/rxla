@@ -1,0 +1,11 @@
+[package]
+name = "rxla-train"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Functional training transforms for RXLA parameter-effect models"
+
+[dependencies]
+rxla-nn = { path = "../rxla-nn", version = "=0.1.0-alpha.1" }
+rxla-core = { path = "../rxla-core", version = "=0.1.0-alpha.1", default-features = false }
+snafu = { workspace = true }

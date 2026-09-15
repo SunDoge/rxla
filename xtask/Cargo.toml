@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bindgen = "0.73"
+clap = { workspace = true }
+prost-build = "0.14"
+protoc-bin-vendored = "3"
+tempfile = "3.27.0"

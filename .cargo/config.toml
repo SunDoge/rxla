@@ -1,0 +1,5 @@
+[alias]
+# Cargo aliases are local to this workspace, so `cargo xtask check` dispatches
+# to the private maintainer binary without requiring a globally installed
+# `cargo-xtask` executable.
+xtask = "run --package xtask --"
