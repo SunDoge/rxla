@@ -46,7 +46,7 @@ pub(super) fn emit_convolution(emission: &mut OperationEmission<'_>) -> Result<b
         );
         writeln!(
             emission.body,
-            "    {} = stablehlo.convolution({}, {}) dim_numbers = [b, 0, 1, f]x[0, 1, o, i]->[b, 0, 1, f], window = {{stride = [1, 1], pad = [{padding}], lhs_dilate = [{}], rhs_dilate = [{}], reverse = [true, true]}} {{batch_group_count = 1 : i64, feature_group_count = 1 : i64, precision_config = [#stablehlo<precision DEFAULT>, #stablehlo<precision DEFAULT>]}} : ({lhs_type}, {rhs_type}) -> {}",
+            "    {} = stablehlo.convolution({}, {}) dim_numbers = [b, 0, 1, f]x[0, 1, o, i]->[b, 0, 1, f], window = {{stride = [1, 1], pad = [{padding}], lhs_dilate = [{}], rhs_dilate = [{}], reverse = [true, true]}} {{batch_group_count = 1 : i64, feature_group_count = 1 : i64, precision_config = [#stablehlo<precision HIGHEST>, #stablehlo<precision HIGHEST>]}} : ({lhs_type}, {rhs_type}) -> {}",
             emission.name,
             emission.operands[0],
             emission.operands[1],
@@ -76,7 +76,7 @@ fn emit_forward_convolution(
     );
     writeln!(
             emission.body,
-            "    {} = stablehlo.convolution({}, {}) dim_numbers = [b, 0, 1, f]x{kernel_dimensions}->[b, 0, 1, f], window = {{stride = [{}], pad = [{padding}], lhs_dilate = [1, 1], rhs_dilate = [{}], reverse = [false, false]}} {{batch_group_count = 1 : i64, feature_group_count = {} : i64, precision_config = [#stablehlo<precision DEFAULT>, #stablehlo<precision DEFAULT>]}} : ({lhs_type}, {rhs_type}) -> {}",
+            "    {} = stablehlo.convolution({}, {}) dim_numbers = [b, 0, 1, f]x{kernel_dimensions}->[b, 0, 1, f], window = {{stride = [{}], pad = [{padding}], lhs_dilate = [1, 1], rhs_dilate = [{}], reverse = [false, false]}} {{batch_group_count = 1 : i64, feature_group_count = {} : i64, precision_config = [#stablehlo<precision HIGHEST>, #stablehlo<precision HIGHEST>]}} : ({lhs_type}, {rhs_type}) -> {}",
             emission.name,
             emission.operands[0],
             emission.operands[1],
