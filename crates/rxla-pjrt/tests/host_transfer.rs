@@ -29,8 +29,17 @@ fn real_host_staged_copy_preserves_scalars_empty_shapes_and_payloads() {
         match source.dtype().unwrap() {
             rxla_pjrt::DType::F32 => {
                 assert_eq!(
-                    copy.to_vec::<f32>().unwrap()[0].to_bits(),
-                    (-0f32).to_bits()
+                    copy.to_vec::<f32>()
+                        .unwrap()
+                        .into_iter()
+                        .map(f32::to_bits)
+                        .collect::<Vec<_>>(),
+                    source
+                        .to_vec::<f32>()
+                        .unwrap()
+                        .into_iter()
+                        .map(f32::to_bits)
+                        .collect::<Vec<_>>()
                 )
             }
             rxla_pjrt::DType::I32 => {
