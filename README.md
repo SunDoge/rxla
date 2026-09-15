@@ -1,5 +1,7 @@
 # RXLA
 
+[![CI](https://github.com/SunDoge/rxla/actions/workflows/ci.yml/badge.svg)](https://github.com/SunDoge/rxla/actions/workflows/ci.yml)
+
 RXLA is an experimental Rust tensor and compiler stack built around Pliron,
 StableHLO, XLA, and PJRT. It aims for an MLX-like lazy tensor experience while
 keeping tracing, compilation, placement, state, and execution explicit enough
