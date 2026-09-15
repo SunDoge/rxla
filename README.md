@@ -99,6 +99,12 @@ The complete check script covers formatting, workspace targets, tests, and
 Clippy. Native CPU/CUDA checks require an explicitly trusted PJRT plugin; see
 [CUDA validation](docs/CUDA-validation.md).
 
+Run the same real CPU execution smoke tests used by CI with:
+
+```sh
+PJRT_CPU_PLUGIN_PATH=/path/to/libzml_cpu.so sh scripts/check-cpu.sh --offline
+```
+
 Python reference and benchmark scripts use the locked uv environment:
 
 ```sh
