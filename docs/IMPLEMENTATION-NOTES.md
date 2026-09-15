@@ -1173,7 +1173,7 @@ and zero gradients: factoring this case into an empty sum times the other operan
 would incorrectly produce NaNs. This does not promise identical nonfinite behavior
 for every nonempty algebraic rearrangement or backend optimization.
 
-[`train_bilinear`](../crates/rxla-train/examples/train_bilinear.rs) demonstrates a user-defined
+The former `train_bilinear` example demonstrated a user-defined
 trainable operator assembled entirely in Rust:
 
 ```rust,ignore
@@ -1487,7 +1487,7 @@ The complete TinyLlama Chat FP32 example generates through EOS on CPU and CUDA,
 with all 21 greedy tokens matching Transformers for one fixed prompt. The CUDA
 RTX 5080 run has first-eight-step full-vocabulary maximum error 1.24e-5 after
 explicitly requesting HIGHEST matmul operand precision. See the
-[reproduction protocol and limitations](../benchmarks/rust-xla-tinyllama-results.md).
+historical reproduction protocol and limitations recorded at the time.
 This validates the model path, not general LLM performance or model compatibility.
 For repeated model runs, the opt-in `--config fast-load.toml` profile and a
 trusted executable cache are validated on CUDA too: one observed run reduced
@@ -1495,7 +1495,7 @@ loading/building from 10.36 s to 1.26 s with identical recorded outputs. This
 optimizes only `rxla-weights` (including examples), not the full dev workspace;
 see the linked report for rebuild tradeoffs and timing limitations.
 
-The [restricted real OCR graph validation](../benchmarks/rust-xla-vision-status.md)
+The restricted real OCR graph validation
 also executes all 242 nodes of the local PP-OCRv6 detector through Rust/PJRT.
 Two synthetic 64×64 input cases match ONNX Runtime CPU tensor outputs with a
 strict per-element tolerance; this does not validate OCR text accuracy or speed.
@@ -3971,7 +3971,7 @@ share fixed weight ownership while retaining independent mutable state. Invalid
 input shapes leave both state slots unchanged, and execution remains valid after
 caller-owned graph/program/compiler/client/weight handles are dropped.
 
-The separate [TinyLlama cache validation](../benchmarks/rust-xla-tinyllama-results.md)
+The separate historical TinyLlama cache validation
 also exercises complete-model restoration with zero backend compile attempts
 and unchanged generated tokens/logits. A cache hit still requires graph construction and lowering
 to obtain the key; it skips backend compilation, not all frontend work. State
@@ -4773,7 +4773,7 @@ preserve the proposed cursor; reduce validity and commit explicitly, using the
 returned acceptance for other state writes. Boundary/crossing tests cover both
 axes, invalid source distributions, and state rejection/advancement. This API
 has not yet been connected to the TinyLlama CLI. A separate
-[32,000-class sampling diagnostic](../benchmarks/xla-sampling-results.md) compares
+An historical 32,000-class sampling diagnostic compares
 top-k and top-p on the same RTX 5080: medians were about 0.140 and 0.185 ms,
 respectively, including scalar downloads but excluding RNG/model computation.
 A longer ordered-sample run found roughly 6 ms outliers in both modes. Phase
