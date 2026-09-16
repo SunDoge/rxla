@@ -139,6 +139,21 @@ pub enum Error {
         expected: DType,
         actual: DType,
     },
+    #[snafu(display("program is missing metadata for input {index}"))]
+    MissingProgramInputSpec { index: usize },
+    #[snafu(display(
+        "runtime input {index} belongs to another PJRT client, expected backend {backend:?}"
+    ))]
+    RuntimeInputClient { index: usize, backend: String },
+    #[snafu(display(
+        "runtime input {index} is on device ordinal {actual}, expected {expected} for backend {backend:?}"
+    ))]
+    RuntimeInputDevice {
+        index: usize,
+        backend: String,
+        expected: usize,
+        actual: usize,
+    },
     #[snafu(display(
         "sharded execution device {device} returned {actual} outputs, expected {expected}"
     ))]

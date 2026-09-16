@@ -266,6 +266,43 @@ impl Program {
         self.lowered.output_spec(index)
     }
 
+    fn validate_input_count(&self, actual: usize) -> Result<()> {
+        if actual != self.input_count() {
+            return Err(Error::ExecutableInputCount {
+                expected: self.input_count(),
+                actual,
+            });
+        }
+        Ok(())
+    }
+
+    fn required_input_spec(&self, index: usize) -> Result<InputSpec<'_>> {
+        self.input_spec(index)
+            .ok_or(Error::MissingProgramInputSpec { index })
+    }
+
+    fn validate_tensor_inputs(&self, inputs: &[&Tensor]) -> Result<()> {
+        self.validate_input_count(inputs.len())?;
+        for (index, input) in inputs.iter().enumerate() {
+            let expected = self.required_input_spec(index)?;
+            if input.shape() != expected.shape {
+                return Err(Error::ExecutableInputShape {
+                    index,
+                    expected: expected.shape.to_vec(),
+                    actual: input.shape().to_vec(),
+                });
+            }
+            if input.dtype() != expected.dtype {
+                return Err(Error::ExecutableInputDType {
+                    index,
+                    expected: expected.dtype,
+                    actual: input.dtype(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Inspect the verified backend-neutral compilation artifact.
     pub fn lowered_program(&self) -> &LoweredProgram {
         &self.lowered
@@ -785,19 +822,18 @@ impl Runtime {
         program: &Program,
         inputs: &[&[f32]],
     ) -> Result<Vec<Vec<f32>>> {
-        if inputs.len() != program.input_count() {
-            return Err(err("input count mismatch"));
-        }
+        program.validate_input_count(inputs.len())?;
         let client = self.client_on(device)?.clone();
         let buffers = inputs
             .iter()
             .enumerate()
             .map(|(index, values)| {
-                let spec = program
-                    .input_spec(index)
-                    .expect("program input count matches input specs");
+                let spec = program.required_input_spec(index)?;
                 if spec.dtype != DType::F32 {
-                    return Err(err("non-F32 inputs require run_buffers"));
+                    return Err(Error::F32InputRequired {
+                        index,
+                        dtype: spec.dtype,
+                    });
                 }
                 Ok(client.buffer_on_device(device.ordinal(), spec.shape, values)?)
             })
@@ -821,12 +857,23 @@ impl Runtime {
         program: &Program,
         inputs: &[&Buffer],
     ) -> Result<Vec<Buffer>> {
+        program.validate_input_count(inputs.len())?;
         let client = self.client_on(device)?.clone();
         for (index, buffer) in inputs.iter().enumerate() {
-            if !buffer.belongs_to(&client) || buffer.device_index()? != device.ordinal() {
-                return Err(err(format!(
-                    "input {index} is not resident on runtime device {device:?}"
-                )));
+            if !buffer.belongs_to(&client) {
+                return Err(Error::RuntimeInputClient {
+                    index,
+                    backend: device.backend().to_owned(),
+                });
+            }
+            let actual = buffer.device_index()?;
+            if actual != device.ordinal() {
+                return Err(Error::RuntimeInputDevice {
+                    index,
+                    backend: device.backend().to_owned(),
+                    expected: device.ordinal(),
+                    actual,
+                });
             }
         }
         self.compile_on(device, program)?.execute_replicated(inputs)
@@ -843,17 +890,7 @@ impl Runtime {
         program: &Program,
         inputs: &[&Tensor],
     ) -> Result<Vec<Tensor>> {
-        if inputs.len() != program.input_count() {
-            return Err(err("input count mismatch"));
-        }
-        for (index, input) in inputs.iter().enumerate() {
-            let expected = program
-                .input_spec(index)
-                .expect("program input count matches input specs");
-            if input.shape() != expected.shape || input.dtype() != expected.dtype {
-                return Err(err(format!("input {index}: tensor metadata mismatch")));
-            }
-        }
+        program.validate_tensor_inputs(inputs)?;
         let client = self.client_on(device)?.clone();
         let buffers = inputs
             .iter()
@@ -1124,6 +1161,44 @@ mod tests {
     fn runtime_can_be_owned_by_a_worker_thread() {
         fn assert_send<T: Send>() {}
         assert_send::<Runtime>();
+    }
+
+    #[test]
+    fn program_tensor_input_validation_is_structured_without_a_runtime() {
+        let tracer = Tracer::new();
+        let float = tracer.input(&[2]).unwrap();
+        let integer = tracer.input_i32(&[1]).unwrap();
+        let program = tracer
+            .program(vec![float.clone(), integer.clone()])
+            .unwrap();
+
+        assert!(matches!(
+            program.validate_tensor_inputs(&[&float]),
+            Err(Error::ExecutableInputCount {
+                expected: 2,
+                actual: 1,
+            })
+        ));
+
+        let wrong_shape = Tensor::from_slice([3], DType::F32, [1., 2., 3.]).unwrap();
+        assert!(matches!(
+            program.validate_tensor_inputs(&[&wrong_shape, &integer]),
+            Err(Error::ExecutableInputShape {
+                index: 0,
+                expected,
+                actual,
+            }) if expected == [2] && actual == [3]
+        ));
+
+        let wrong_dtype = Tensor::from_slice([2], DType::I32, [1, 2]).unwrap();
+        assert!(matches!(
+            program.validate_tensor_inputs(&[&wrong_dtype, &integer]),
+            Err(Error::ExecutableInputDType {
+                index: 0,
+                expected: DType::F32,
+                actual: DType::I32,
+            })
+        ));
     }
 
     #[test]
