@@ -94,7 +94,7 @@ pub fn taesd_decoder(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rxla_nn::{apply, init};
+    use rxla_nn::Model;
 
     fn tiny(cx: &mut Cx) -> Result<Tensor> {
         let latent = cx.input(&[1, 8, 12, 4])?;
@@ -103,8 +103,9 @@ mod tests {
 
     #[test]
     fn canonical_decoder_has_checkpoint_schema_and_lowers() {
-        let (schema, output) = init(tiny).unwrap();
-        assert_eq!(output.shape(), [1, 64, 96, 3]);
+        let model = Model::new(tiny).trace().unwrap();
+        let schema = model.schema();
+        assert_eq!(model.outputs()[0].shape(), [1, 64, 96, 3]);
         assert_eq!(schema.parameters().len(), 67);
         for name in [
             "decoder.layers.0.weight",
@@ -118,15 +119,16 @@ mod tests {
             assert!(schema.get(name).is_some(), "missing {name}");
         }
         assert!(schema.get("decoder.layers.6.bias").is_none());
-        apply(&schema, tiny).unwrap().prepare().unwrap();
+        model.prepare().unwrap();
     }
 
     #[test]
     fn rejects_non_latent_channels() {
-        let error = init(|cx| {
+        let error = Model::new(|cx: &mut Cx| {
             let image = cx.input(&[1, 8, 8, 3])?;
             taesd_decoder(cx, &image)
-        });
+        })
+        .trace();
         assert!(error.is_err());
     }
 }

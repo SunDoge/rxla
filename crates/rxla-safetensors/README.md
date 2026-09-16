@@ -81,9 +81,8 @@ path-to-identical-path; use `load_parameter_schema_with_mapping` for a renamed
 checkpoint.
 
 ```rust,ignore
-let (schema, _) = rxla_nn::init(model)?;
-let applied = rxla_nn::apply(&schema, model)?;
-let weights = checkpoint.load_parameter_schema(&client, &schema)?;
+let applied = rxla_nn::Model::new(model).trace()?;
+let weights = checkpoint.load_parameter_schema(&client, applied.schema())?;
 let compiled = applied.compile(&mut compiler)?;
 let model = compiled.bind_parameters(weights.bindings())?;
 let output: Buffer = model.run(&input)?;

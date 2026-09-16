@@ -260,7 +260,7 @@ pub fn unet(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rxla_nn::{apply, init};
+    use rxla_nn::Model;
 
     fn tiny(cx: &mut Cx) -> Result<Tensor> {
         let sample = cx.input(&[1, 8, 8, 4])?;
@@ -271,8 +271,9 @@ mod tests {
 
     #[test]
     fn tiny_unet_builds_from_dataflow_shapes_and_lowers() {
-        let (schema, output) = init(tiny).unwrap();
-        assert_eq!(output.shape(), [1, 8, 8, 4]);
+        let model = Model::new(tiny).trace().unwrap();
+        let schema = model.schema();
+        assert_eq!(model.outputs()[0].shape(), [1, 8, 8, 4]);
         for path in [
             "conv_in.weight",
             "time_embedding.linear_1.weight",
@@ -284,6 +285,6 @@ mod tests {
         ] {
             assert!(schema.get(path).is_some(), "missing {path}");
         }
-        apply(&schema, tiny).unwrap().prepare().unwrap();
+        model.prepare().unwrap();
     }
 }

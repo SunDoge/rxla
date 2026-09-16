@@ -237,7 +237,7 @@ pub fn autoencoder_kl_decoder(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rxla_nn::{apply, init};
+    use rxla_nn::Model;
 
     fn tiny(cx: &mut Cx) -> Result<Tensor> {
         let latent = cx.input(&[1, 8, 6, 4])?;
@@ -246,24 +246,26 @@ mod tests {
 
     #[test]
     fn tiny_decoder_has_stable_schema_and_lowers() {
-        let (schema, output) = init(tiny).unwrap();
-        assert_eq!(output.shape(), [1, 16, 12, 3]);
+        let model = Model::new(tiny).trace().unwrap();
+        let schema = model.schema();
+        assert_eq!(model.outputs()[0].shape(), [1, 16, 12, 3]);
         assert_eq!(schema.parameters().len(), 70);
         assert_eq!(
             schema.get("decoder.conv_in.weight").unwrap().shape(),
             [64, 4, 3, 3]
         );
         assert!(schema.get("decoder.conv_out.bias").is_some());
-        apply(&schema, tiny).unwrap().prepare().unwrap();
+        model.prepare().unwrap();
     }
 
     #[test]
     fn stable_diffusion_decoder_has_expected_shape() {
-        let (_, output) = init(|cx| {
+        let model = Model::new(|cx: &mut Cx| {
             let latent = cx.input(&[1, 8, 8, 4])?;
             autoencoder_kl_decoder(cx, &latent, &AutoencoderKlDecoderConfig::stable_diffusion())
         })
+        .trace()
         .unwrap();
-        assert_eq!(output.shape(), [1, 64, 64, 3]);
+        assert_eq!(model.outputs()[0].shape(), [1, 64, 64, 3]);
     }
 }

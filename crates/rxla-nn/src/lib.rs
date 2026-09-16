@@ -1,8 +1,8 @@
 //! Scoped parameter effects for tensor tracing.
 //!
-//! A [`Cx`] is deliberately not a global variable store. `init` and `apply`
-//! interpret the same `param` calls differently, so model code is written once
-//! without making parameter identity depend on call order.
+//! A [`Cx`] is deliberately not a global variable store. [`Model`] explicitly
+//! interprets the same parameter effects for schema discovery and application,
+//! so model code is written once without hidden call-order state.
 
 use rxla_core::{DType, StateGraph, StateSlot, Tensor};
 use snafu::{OptionExt, Snafu, ensure};
@@ -271,8 +271,9 @@ enum ParamMode {
 
 /// The explicit interpreter for scoped parameter effects.
 ///
-/// Model functions receive this same type during [`init`] and [`apply`]. The
-/// mode is selected by the caller, never inferred from prior invocations.
+/// Model functions receive this same type during [`Model::init`] and
+/// [`Model::apply`]. The mode is selected explicitly, never inferred from prior
+/// invocations.
 pub struct Cx {
     graph: StateGraph,
     scope: Vec<String>,
@@ -881,7 +882,7 @@ fn validate_name(name: &str) -> Result<()> {
 }
 
 /// Interpret parameter effects as declarations and return the frozen schema.
-pub fn init<T>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ParamSchema, T)> {
+fn init<T>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ParamSchema, T)> {
     let mut cx = Cx::init();
     let result = body(&mut cx)?;
     cx.finish_rngs()?;
@@ -910,7 +911,7 @@ fn trace_once<T: ModelOutputs>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Resul
 }
 
 /// Interpret parameter effects as reads from `schema` and retain traced outputs.
-pub fn apply<T: ModelOutputs>(
+fn apply<T: ModelOutputs>(
     schema: &ParamSchema,
     body: impl FnOnce(&mut Cx) -> Result<T>,
 ) -> Result<AppliedModel> {
@@ -918,7 +919,7 @@ pub fn apply<T: ModelOutputs>(
 }
 
 /// Interpret selected parameters as resident state rather than ABI inputs.
-pub fn apply_resident<T: ModelOutputs>(
+fn apply_resident<T: ModelOutputs>(
     schema: &ParamSchema,
     selection: &ParameterSelection,
     body: impl FnOnce(&mut Cx) -> Result<T>,

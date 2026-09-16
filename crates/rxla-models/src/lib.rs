@@ -292,7 +292,7 @@ pub fn spatial_transformer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rxla_nn::{apply, init};
+    use rxla_nn::Model;
 
     fn model(cx: &mut Cx) -> Result<Tensor> {
         let image = cx.input(&[2, 16, 12, 32])?;
@@ -303,13 +303,15 @@ mod tests {
 
     #[test]
     fn timestep_mlp_infers_input_width() {
-        let (schema, output) = init(|cx| {
+        let model = Model::new(|cx: &mut Cx| {
             let input = cx.input(&[2, 32])?;
             let mut scope = cx.scope("time_embedding")?;
             timestep_embedding(&mut scope, &input, 128)
         })
+        .trace()
         .unwrap();
-        assert_eq!(output.shape(), [2, 128]);
+        let schema = model.schema();
+        assert_eq!(model.outputs()[0].shape(), [2, 128]);
         assert_eq!(
             schema
                 .get("time_embedding.linear_1.weight")
@@ -328,8 +330,9 @@ mod tests {
 
     #[test]
     fn resnet_infers_shapes_and_diffusers_paths() {
-        let (schema, output) = init(model).unwrap();
-        assert_eq!(output.shape(), [2, 16, 12, 64]);
+        let model = Model::new(model).trace().unwrap();
+        let schema = model.schema();
+        assert_eq!(model.outputs()[0].shape(), [2, 16, 12, 64]);
         assert_eq!(schema.parameters().len(), 12);
         for path in [
             "block.norm1.weight",
@@ -341,19 +344,20 @@ mod tests {
         ] {
             assert!(schema.get(path).is_some(), "missing {path}");
         }
-        let applied = apply(&schema, model).unwrap();
-        assert_eq!(applied.prepare().unwrap().input_count(), 14);
+        assert_eq!(model.prepare().unwrap().input_count(), 14);
     }
 
     #[test]
     fn equal_width_resnet_omits_shortcut_parameters() {
-        let (schema, output) = init(|cx| {
+        let model = Model::new(|cx: &mut Cx| {
             let image = cx.input(&[1, 8, 8, 32])?;
             let timestep = cx.input(&[1, 128])?;
             resnet2d(cx, &image, &timestep, Resnet2dOptions::new(32))
         })
+        .trace()
         .unwrap();
-        assert_eq!(output.shape(), [1, 8, 8, 32]);
+        let schema = model.schema();
+        assert_eq!(model.outputs()[0].shape(), [1, 8, 8, 32]);
         assert_eq!(schema.parameters().len(), 10);
         assert!(schema.get("conv_shortcut.weight").is_none());
     }
@@ -365,8 +369,9 @@ mod tests {
             let context = cx.input(&[2, 77, 32])?;
             spatial_transformer(cx, &image, &context, SpatialTransformerOptions::new(8))
         };
-        let (schema, output) = init(model).unwrap();
-        assert_eq!(output.shape(), [2, 8, 6, 64]);
+        let model = Model::new(model).trace().unwrap();
+        let schema = model.schema();
+        assert_eq!(model.outputs()[0].shape(), [2, 8, 6, 64]);
         assert_eq!(schema.parameters().len(), 26);
         for path in [
             "norm.weight",
@@ -379,6 +384,6 @@ mod tests {
         ] {
             assert!(schema.get(path).is_some(), "missing {path}");
         }
-        apply(&schema, model).unwrap().prepare().unwrap();
+        model.prepare().unwrap();
     }
 }

@@ -182,7 +182,7 @@ pub fn clip_text_encoder(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rxla_nn::{apply, init};
+    use rxla_nn::Model;
 
     fn tiny(cx: &mut Cx) -> Result<Tensor> {
         let ids = cx.input_dtype(&[2, 77], DType::I32)?;
@@ -191,8 +191,9 @@ mod tests {
 
     #[test]
     fn tiny_clip_has_stable_schema_and_lowers() {
-        let (schema, output) = init(tiny).unwrap();
-        assert_eq!(output.shape(), [2, 77, 32]);
+        let model = Model::new(tiny).trace().unwrap();
+        let schema = model.schema();
+        assert_eq!(model.outputs()[0].shape(), [2, 77, 32]);
         assert_eq!(schema.parameters().len(), 84);
         assert_eq!(
             schema
@@ -206,6 +207,6 @@ mod tests {
                 .get("text_model.encoder.layers.1.mlp.fc2.bias")
                 .is_some()
         );
-        apply(&schema, tiny).unwrap().prepare().unwrap();
+        model.prepare().unwrap();
     }
 }

@@ -134,13 +134,13 @@ parameter declaration. The immutable schema provides typed parameter identities
 and deterministic, scope-based selections instead:
 
 ```rust
-# use rxla::{Tensor, nn::{Cx, Result, init}};
+# use rxla::{Tensor, nn::{Cx, Model, Result}};
 # fn apply(cx: &mut Cx) -> Result<Tensor> {
 #     let x = cx.input(&[2, 4])?;
 #     cx.layer("head")?.linear(3).apply(&x)
 # }
-let (schema, _) = init(apply)?;
-let trainable = schema.select_under("head");
+let model = Model::new(apply).trace()?;
+let trainable = model.schema().select_under("head");
 for (id, parameter) in trainable.parameters() {
     println!("{id:?}: {}", parameter.path());
 }
