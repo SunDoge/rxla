@@ -39,6 +39,24 @@ pub struct ModelSessionBuilder<'a> {
     overrides: BTreeMap<String, Buffer>,
 }
 
+/// One optimizer/transform-owned resident state slot appended after model tracing.
+pub struct TransformState {
+    path: String,
+    slot: StateSlot,
+    value: Tensor,
+}
+
+impl TransformState {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Start-of-step symbolic value used to construct a transformation.
+    pub fn value(&self) -> &Tensor {
+        &self.value
+    }
+}
+
 impl<'a> ModelArguments<'a> {
     pub fn as_slice(&self) -> &[&'a Buffer] {
         &self.values
@@ -112,6 +130,38 @@ impl AppliedModel {
     /// binding contract. This is suitable for optimizer state, not model data.
     pub fn transform_input(&self, shape: &[i64], dtype: DType) -> Result<Tensor> {
         Ok(self.graph.input_dtype(shape, dtype)?)
+    }
+
+    /// Append named resident state owned by a graph transformation.
+    ///
+    /// Unlike a model `Cx::state` effect, this does not modify `ParamSchema` or
+    /// require changing the model body. It becomes part of this applied model's
+    /// stateful program and session layout immediately.
+    pub fn transform_state(
+        &mut self,
+        path: impl Into<String>,
+        shape: &[i64],
+        dtype: DType,
+    ) -> Result<TransformState> {
+        let path = path.into();
+        ensure!(
+            !self.states.iter().any(|(existing, _)| existing == &path),
+            DuplicateTransformStateSnafu { path: path.clone() }
+        );
+        let slot = self.state_graph.state_named(&path, shape, dtype)?;
+        let value = self.state_graph.read(&slot)?;
+        self.states.push((path.clone(), slot.clone()));
+        Ok(TransformState { path, slot, value })
+    }
+
+    /// Atomically record next values for transform-owned state.
+    pub fn write_transform_states(&mut self, updates: &[(&TransformState, &Tensor)]) -> Result<()> {
+        Ok(self.state_graph.write_many(
+            &updates
+                .iter()
+                .map(|(state, value)| (&state.slot, *value))
+                .collect::<Vec<_>>(),
+        )?)
     }
 
     /// Lower model outputs while preserving the frozen schema ABI exactly.

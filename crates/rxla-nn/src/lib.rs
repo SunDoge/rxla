@@ -9,7 +9,9 @@ use snafu::{OptionExt, Snafu, ensure};
 use std::collections::{BTreeMap, HashSet};
 
 mod applied;
-pub use applied::{AppliedModel, BoundParameters, ModelArguments, ModelSessionBuilder};
+pub use applied::{
+    AppliedModel, BoundParameters, ModelArguments, ModelSessionBuilder, TransformState,
+};
 mod layers;
 pub use layers::{
     Conv2d, Embedding, GroupNorm, LayerNorm, Linear, Named, QuantizedLinear, RmsNorm,
@@ -91,6 +93,8 @@ pub enum Error {
     InvalidDefinition { message: String },
     #[snafu(display("state declaration for {path:?} is incompatible with the schema"))]
     IncompatibleState { path: String },
+    #[snafu(display("transform state {path:?} is already declared"))]
+    DuplicateTransformState { path: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -929,6 +933,25 @@ mod tests {
         let prepared = applied.prepare_stateful().unwrap();
         let (_, steps) = applied.states().next().unwrap();
         assert_eq!(prepared.state_type(steps).unwrap(), (DType::I32, vec![]));
+    }
+
+    #[test]
+    fn transforms_append_named_resident_state() {
+        let (_, mut applied) = Model::new(|cx: &mut Cx| cx.input(&[2])).trace().unwrap();
+        let moment = applied
+            .transform_state("__transform.moment", &[2], DType::F32)
+            .unwrap();
+        let next = moment.value().add_scalar(1.0).unwrap();
+        applied.write_transform_states(&[(&moment, &next)]).unwrap();
+
+        assert_eq!(moment.path(), "__transform.moment");
+        assert!(matches!(
+            applied.transform_state("__transform.moment", &[2], DType::F32),
+            Err(Error::DuplicateTransformState { .. })
+        ));
+        let prepared = applied.prepare_stateful().unwrap();
+        let (_, slot) = applied.states().next().unwrap();
+        assert_eq!(prepared.state_type(slot).unwrap(), (DType::F32, vec![2]));
     }
 
     #[test]

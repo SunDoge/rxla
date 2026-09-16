@@ -1,13 +1,9 @@
 //! Functional Adam for parameter-effect models.
 
-use rxla_core::{
-    Buffer, Client, Compiler, DType, Executable, LoweredProgram, PreparedStateGraph, StateProgram,
-    Tensor,
-};
-use rxla_nn::{AppliedModel, ParameterId, ParameterSelection};
+use rxla_core::{Buffer, Compiler, DType, PreparedStateGraph, StateProgram, Tensor};
+use rxla_nn::{AppliedModel, ParameterId, ParameterSelection, TransformState};
 use snafu::{Snafu, ensure};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AdamOptions {
@@ -48,49 +44,27 @@ pub enum ModelAdamError {
     },
     #[snafu(display("model Adam parameter store is missing {path:?}"))]
     MissingParameter { path: String },
-    #[snafu(display("model Adam moment store is missing {path:?}"))]
-    MissingMoments { path: String },
-    #[snafu(display("model Adam moment element count overflows usize for {path:?}"))]
-    MomentSizeOverflow { path: String },
     #[snafu(transparent)]
     Model { source: rxla_nn::Error },
     #[snafu(transparent)]
     Tensor { source: rxla_core::Error },
-    #[snafu(transparent)]
-    Pjrt { source: rxla_core::PjrtError },
 }
 
 pub type ModelAdamResult<T, E = ModelAdamError> = std::result::Result<T, E>;
 
-/// Graph inputs holding one parameter's first and second moments.
+/// Resident first and second moments for one parameter.
 pub struct ModelAdamState {
-    first_moment: Tensor,
-    second_moment: Tensor,
-}
-
-/// Resident first and second moments for one selected parameter.
-pub struct ModelAdamMoments {
-    first: Buffer,
-    second: Buffer,
-}
-
-impl ModelAdamMoments {
-    pub fn first(&self) -> &Buffer {
-        &self.first
-    }
-
-    pub fn second(&self) -> &Buffer {
-        &self.second
-    }
+    first_moment: TransformState,
+    second_moment: TransformState,
 }
 
 impl ModelAdamState {
     pub fn first_moment(&self) -> &Tensor {
-        &self.first_moment
+        self.first_moment.value()
     }
 
     pub fn second_moment(&self) -> &Tensor {
-        &self.second_moment
+        self.second_moment.value()
     }
 }
 
@@ -127,12 +101,12 @@ impl ModelAdamUpdate {
 
 /// One fused forward/backward/Adam program.
 ///
-/// Runtime arguments are the ordinary model arguments followed by each state's
-/// `(first_moment, second_moment)` pair and finally a scalar F32 step number.
-/// Outputs repeat `(parameter, first_moment, second_moment)` per selection entry.
+/// Parameters remain explicit model inputs and replacements remain visible
+/// outputs. Moments and the step counter are resident state committed by the
+/// same state transaction as model state and RNG effects.
 pub struct ModelAdamStep {
     states: Vec<ModelAdamState>,
-    step: Tensor,
+    step: TransformState,
     updates: Vec<ModelAdamUpdate>,
 }
 
@@ -148,7 +122,7 @@ impl ModelAdamStep {
         &self.states
     }
 
-    pub fn step_input(&self) -> &Tensor {
+    pub fn step_state(&self) -> &TransformState {
         &self.step
     }
 
@@ -159,13 +133,7 @@ impl ModelAdamStep {
     pub fn outputs(&self) -> Vec<Tensor> {
         self.updates
             .iter()
-            .flat_map(|update| {
-                [
-                    update.parameter.clone(),
-                    update.first_moment.clone(),
-                    update.second_moment.clone(),
-                ]
-            })
+            .map(|update| update.parameter.clone())
             .collect()
     }
 
@@ -176,72 +144,6 @@ impl ModelAdamStep {
             tensors,
             visible: visible.len(),
         }
-    }
-
-    /// Allocate zero moments in selection order, keyed by stable parameter path.
-    pub fn zero_moments(
-        &self,
-        client: &Client,
-    ) -> ModelAdamResult<BTreeMap<String, ModelAdamMoments>> {
-        self.updates
-            .iter()
-            .map(|update| {
-                let count = update
-                    .parameter
-                    .shape()
-                    .iter()
-                    .try_fold(1_usize, |count, &dimension| {
-                        usize::try_from(dimension)
-                            .ok()
-                            .and_then(|dimension| count.checked_mul(dimension))
-                    })
-                    .ok_or_else(|| ModelAdamError::MomentSizeOverflow {
-                        path: update.path.clone(),
-                    })?;
-                let first = client.buffer(update.parameter.shape(), &vec![0.0_f32; count])?;
-                let second = client.buffer(update.parameter.shape(), &vec![0.0_f32; count])?;
-                Ok((update.path.clone(), ModelAdamMoments { first, second }))
-            })
-            .collect()
-    }
-
-    /// Append optimizer inputs to an already bound model argument list.
-    ///
-    /// Moment ordering is derived from the selection; callers provide only the
-    /// named store and the explicit scalar F32 step buffer.
-    pub fn bind_optimizer_inputs<'buffer>(
-        &self,
-        model_arguments: impl IntoIterator<Item = &'buffer Buffer>,
-        moments: &'buffer BTreeMap<String, ModelAdamMoments>,
-        step: &'buffer Buffer,
-    ) -> ModelAdamResult<Vec<&'buffer Buffer>> {
-        for update in &self.updates {
-            ensure!(
-                moments.contains_key(update.path()),
-                MissingMomentsSnafu {
-                    path: update.path().to_owned(),
-                }
-            );
-        }
-        let mut arguments = model_arguments.into_iter().collect::<Vec<_>>();
-        for update in &self.updates {
-            let state = &moments[update.path()];
-            arguments.extend([state.first(), state.second()]);
-        }
-        arguments.push(step);
-        Ok(arguments)
-    }
-
-    pub fn prepare(&self, model: &AppliedModel) -> ModelAdamResult<LoweredProgram> {
-        Ok(model.prepare_tensors(&self.outputs())?)
-    }
-
-    pub fn compile(
-        &self,
-        model: &AppliedModel,
-        compiler: &mut Compiler,
-    ) -> ModelAdamResult<Arc<Executable>> {
-        Ok(model.compile_tensors(compiler, &self.outputs())?)
     }
 
     /// Prepare Adam replacements and model state transitions together.
@@ -269,18 +171,6 @@ impl ModelAdamOutputPlan<'_> {
         self.visible
     }
 
-    pub fn prepare(&self, model: &AppliedModel) -> ModelAdamResult<LoweredProgram> {
-        Ok(model.prepare_tensors(self.tensors())?)
-    }
-
-    pub fn compile(
-        &self,
-        model: &AppliedModel,
-        compiler: &mut Compiler,
-    ) -> ModelAdamResult<Arc<Executable>> {
-        Ok(model.compile_tensors(compiler, self.tensors())?)
-    }
-
     pub fn prepare_stateful(&self, model: &AppliedModel) -> ModelAdamResult<PreparedStateGraph> {
         Ok(model.prepare_stateful_tensors(self.tensors())?)
     }
@@ -293,12 +183,11 @@ impl ModelAdamOutputPlan<'_> {
         Ok(model.compile_stateful_tensors(compiler, self.tensors())?)
     }
 
-    /// Atomically install every parameter and moment replacement.
+    /// Validate and install every parameter replacement.
     pub fn commit(
         &self,
         mut outputs: Vec<Buffer>,
         parameters: &mut BTreeMap<String, Buffer>,
-        moments: &mut BTreeMap<String, ModelAdamMoments>,
     ) -> ModelAdamResult<Vec<Buffer>> {
         let expected = self.tensors.len();
         ensure!(
@@ -307,7 +196,7 @@ impl ModelAdamOutputPlan<'_> {
                 actual: outputs.len(),
                 expected,
                 visible: self.visible,
-                updates: self.step.updates.len() * 3,
+                updates: self.step.updates.len(),
             }
         );
         for update in &self.step.updates {
@@ -317,20 +206,11 @@ impl ModelAdamOutputPlan<'_> {
                     path: update.path().to_owned(),
                 }
             );
-            ensure!(
-                moments.contains_key(update.path()),
-                MissingMomentsSnafu {
-                    path: update.path().to_owned(),
-                }
-            );
         }
         let mut replacements = outputs.split_off(self.visible).into_iter();
         for update in &self.step.updates {
             let parameter = replacements.next().expect("validated Adam output ABI");
-            let first = replacements.next().expect("validated Adam output ABI");
-            let second = replacements.next().expect("validated Adam output ABI");
             parameters.insert(update.path().to_owned(), parameter);
-            moments.insert(update.path().to_owned(), ModelAdamMoments { first, second });
         }
         Ok(outputs)
     }
@@ -338,7 +218,7 @@ impl ModelAdamOutputPlan<'_> {
 
 /// Differentiate `loss` and append a bias-corrected Adam update to the model IR.
 pub fn prepare_model_adam(
-    model: &AppliedModel,
+    model: &mut AppliedModel,
     selection: &ParameterSelection<'_>,
     loss: &Tensor,
     options: AdamOptions,
@@ -362,18 +242,28 @@ pub fn prepare_model_adam(
 
     let parameters = model.parameter_tensors(selection)?;
     let gradients = loss.grad(&parameters)?;
-    let states = parameters
-        .iter()
-        .map(|parameter| {
+    let states = selection
+        .parameters()
+        .zip(&parameters)
+        .map(|((_id, spec), parameter)| {
             Ok(ModelAdamState {
-                first_moment: model.transform_input(parameter.shape(), DType::F32)?,
-                second_moment: model.transform_input(parameter.shape(), DType::F32)?,
+                first_moment: model.transform_state(
+                    format!("__optimizer.adam.{}.first_moment", spec.path()),
+                    parameter.shape(),
+                    DType::F32,
+                )?,
+                second_moment: model.transform_state(
+                    format!("__optimizer.adam.{}.second_moment", spec.path()),
+                    parameter.shape(),
+                    DType::F32,
+                )?,
             })
         })
         .collect::<ModelAdamResult<Vec<_>>>()?;
-    let step = model.transform_input(&[], DType::F32)?;
-    let beta1_power = step.mul_scalar(options.beta1.ln())?.exp()?;
-    let beta2_power = step.mul_scalar(options.beta2.ln())?.exp()?;
+    let step = model.transform_state("__optimizer.adam.step", &[], DType::F32)?;
+    let next_step = step.value().add_scalar(1.0)?;
+    let beta1_power = next_step.mul_scalar(options.beta1.ln())?.exp()?;
+    let beta2_power = next_step.mul_scalar(options.beta2.ln())?.exp()?;
     let correction1 = beta1_power.mul_scalar(-1.0)?.add_scalar(1.0)?;
     let correction2 = beta2_power.mul_scalar(-1.0)?.add_scalar(1.0)?;
 
@@ -382,11 +272,11 @@ pub fn prepare_model_adam(
         .zip(parameters.iter().zip(gradients).zip(&states))
         .map(|((id, spec), ((parameter, gradient), state))| {
             let first_moment = state
-                .first_moment
+                .first_moment()
                 .mul_scalar(options.beta1)?
                 .add(&gradient.mul_scalar(1.0 - options.beta1)?)?;
             let second_moment = state
-                .second_moment
+                .second_moment()
                 .mul_scalar(options.beta2)?
                 .add(&gradient.square()?.mul_scalar(1.0 - options.beta2)?)?;
             let corrected_first =
@@ -405,6 +295,14 @@ pub fn prepare_model_adam(
             })
         })
         .collect::<ModelAdamResult<Vec<_>>>()?;
+
+    let mut state_updates = Vec::with_capacity(states.len() * 2 + 1);
+    for (state, update) in states.iter().zip(&updates) {
+        state_updates.push((&state.first_moment, &update.first_moment));
+        state_updates.push((&state.second_moment, &update.second_moment));
+    }
+    state_updates.push((&step, &next_step));
+    model.write_transform_states(&state_updates)?;
 
     Ok(ModelAdamStep {
         states,
@@ -427,31 +325,46 @@ mod tests {
 
     #[test]
     fn adam_lowers_parameter_and_moment_updates_together() {
-        let (schema, model) = Model::new(linear_loss).trace().unwrap();
+        let (schema, mut model) = Model::new(linear_loss).trace().unwrap();
         let selection = schema.select_under("linear");
-        let step = prepare_model_adam(
-            &model,
-            &selection,
-            &model.outputs()[0],
-            AdamOptions::default(),
-        )
-        .unwrap();
+        let loss = model.outputs()[0].clone();
+        let step =
+            prepare_model_adam(&mut model, &selection, &loss, AdamOptions::default()).unwrap();
 
         assert_eq!(step.states().len(), 1);
         assert_eq!(step.updates().len(), 1);
         assert_eq!(step.updates()[0].path(), "linear.weight");
-        assert_eq!(step.outputs().len(), 3);
-        let lowered = step.prepare(&model).unwrap();
-        assert_eq!(lowered.input_count(), model.schema().arguments().len() + 3);
-        assert_eq!(lowered.output_count(), 3);
-        let stablehlo = std::str::from_utf8(lowered.code()).unwrap();
-        assert!(stablehlo.contains("stablehlo.sqrt"));
-        assert!(stablehlo.contains("stablehlo.exponential"));
+        assert_eq!(step.outputs().len(), 1);
+        assert_eq!(
+            model.states().map(|(path, _)| path).collect::<Vec<_>>(),
+            [
+                "__optimizer.adam.linear.weight.first_moment",
+                "__optimizer.adam.linear.weight.second_moment",
+                "__optimizer.adam.step",
+            ]
+        );
+        let prepared = step.prepare_stateful(&model).unwrap();
+        assert_eq!(
+            prepared.input_indices().len(),
+            model.schema().arguments().len()
+        );
+        let slots = model
+            .states()
+            .map(|(_, slot)| slot.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            prepared.state_layout(&slots).unwrap(),
+            vec![
+                (DType::F32, vec![1, 3]),
+                (DType::F32, vec![1, 3]),
+                (DType::F32, vec![]),
+            ]
+        );
 
         let outputs = step.outputs_with(model.outputs());
         assert_eq!(outputs.visible_count(), 1);
-        assert_eq!(outputs.tensors().len(), 4);
-        let error = match outputs.commit(Vec::new(), &mut BTreeMap::new(), &mut BTreeMap::new()) {
+        assert_eq!(outputs.tensors().len(), 2);
+        let error = match outputs.commit(Vec::new(), &mut BTreeMap::new()) {
             Ok(_) => panic!("truncated Adam outputs unexpectedly committed"),
             Err(error) => error,
         };
@@ -459,22 +372,23 @@ mod tests {
             error,
             ModelAdamError::UnexpectedOutputCount {
                 actual: 0,
-                expected: 4,
+                expected: 2,
                 visible: 1,
-                updates: 3,
+                updates: 1,
             }
         ));
     }
 
     #[test]
     fn adam_rejects_invalid_options() {
-        let (schema, model) = Model::new(linear_loss).trace().unwrap();
+        let (schema, mut model) = Model::new(linear_loss).trace().unwrap();
         let options = AdamOptions {
             beta2: 1.0,
             ..AdamOptions::default()
         };
+        let loss = model.outputs()[0].clone();
         assert!(matches!(
-            prepare_model_adam(&model, &schema.select_all(), &model.outputs()[0], options),
+            prepare_model_adam(&mut model, &schema.select_all(), &loss, options),
             Err(ModelAdamError::InvalidOptions)
         ));
     }
@@ -493,12 +407,13 @@ mod tests {
             Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
         }
         .unwrap();
-        let (schema, model) = Model::new(regression_loss).trace().unwrap();
+        let (schema, mut model) = Model::new(regression_loss).trace().unwrap();
         let selection = schema.select_under("linear");
+        let loss = model.outputs()[0].clone();
         let step = prepare_model_adam(
-            &model,
+            &mut model,
             &selection,
-            &model.outputs()[0],
+            &loss,
             AdamOptions {
                 learning_rate: 0.1,
                 ..AdamOptions::default()
@@ -507,17 +422,16 @@ mod tests {
         .unwrap();
         let output_plan = step.outputs_with(&[]);
         let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-        let executable = output_plan.compile(&model, &mut compiler).unwrap();
+        let program = output_plan.compile_stateful(&model, &mut compiler).unwrap();
+        let mut session = model.session(&program).build().unwrap();
         let input = client.buffer(&[1, 1], &[2.0]).unwrap();
         let target = client.buffer(&[1, 1], &[4.0]).unwrap();
         let mut parameters = BTreeMap::from([(
             "linear.weight".to_owned(),
             client.buffer(&[1, 1], &[0.0]).unwrap(),
         )]);
-        let mut moments = step.zero_moments(&client).unwrap();
 
-        for iteration in 1..=100 {
-            let iteration = client.buffer(&[], &[iteration as f32]).unwrap();
+        for _ in 0..100 {
             let model_arguments = model
                 .bind(
                     &[&input, &target],
@@ -526,17 +440,10 @@ mod tests {
                         .map(|(name, value)| (name.as_str(), value)),
                 )
                 .unwrap();
-            let arguments = step
-                .bind_optimizer_inputs(
-                    model_arguments.as_slice().iter().copied(),
-                    &moments,
-                    &iteration,
-                )
-                .unwrap();
-            let outputs = executable.execute(&arguments).unwrap();
+            let outputs = session.run(model_arguments.as_slice()).unwrap();
             assert!(
                 output_plan
-                    .commit(outputs, &mut parameters, &mut moments)
+                    .commit(outputs, &mut parameters)
                     .unwrap()
                     .is_empty()
             );
