@@ -7,7 +7,7 @@ use rxla_core::{
     Buffer, CacheLimits, Client, Compiler, Conv2dOptions, DType, PendingHostUpload, Pool2dOptions,
     Tensor,
 };
-use rxla_nn::{AppliedModel, Cx, Model, ParamSchema, Result as NnResult};
+use rxla_nn::{AppliedModel, Cx, Model, ModelInput, ParamSchema, Result as NnResult};
 use rxla_train::{BoundedPipeline, DataRng, PipelineResult, prepare_model_sgd};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -272,9 +272,13 @@ fn basic_block(
     Ok(hidden.add(&residual)?.relu()?)
 }
 
-fn resnet18(cx: &mut Cx, batch_size: i64, training: bool) -> NnResult<Vec<Tensor>> {
-    let images = cx.input_dtype(&[batch_size, IMAGE, IMAGE, 3], DType::U8)?;
-    let labels = cx.input_dtype(&[batch_size], DType::I32)?;
+fn resnet18(
+    cx: &mut Cx,
+    images: Tensor,
+    labels: Tensor,
+    training: bool,
+) -> NnResult<(Tensor, Tensor, Tensor)> {
+    let batch_size = images.shape()[0];
     let mut augmentation_rng = cx.rng("augmentation")?;
     let flips =
         augmentation_rng.bernoulli(&[batch_size, 1, 1, 1], if training { 0.5 } else { 0.0 })?;
@@ -323,7 +327,30 @@ fn resnet18(cx: &mut Cx, batch_size: i64, training: bool) -> NnResult<Vec<Tensor
         .le_mask(&labels)?
         .mul(&labels.le_mask(&predicted)?)?
         .sum(&[0], false)?;
-    Ok(vec![loss, logits, correct])
+    Ok((loss, logits, correct))
+}
+
+fn resnet18_train(
+    cx: &mut Cx,
+    images: Tensor,
+    labels: Tensor,
+) -> NnResult<(Tensor, Tensor, Tensor)> {
+    resnet18(cx, images, labels, true)
+}
+
+fn resnet18_infer(
+    cx: &mut Cx,
+    images: Tensor,
+    labels: Tensor,
+) -> NnResult<(Tensor, Tensor, Tensor)> {
+    resnet18(cx, images, labels, false)
+}
+
+fn resnet18_inputs(batch_size: i64) -> (ModelInput, ModelInput) {
+    (
+        ModelInput::new([batch_size, IMAGE, IMAGE, 3]).dtype(DType::U8),
+        ModelInput::new([batch_size]).dtype(DType::I32),
+    )
 }
 
 fn initialized_parameters(
@@ -447,7 +474,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let gpu = unsafe { Client::load(&args.gpu_plugin) }?;
     let batch_size = args.batch_size;
-    let definition = Model::new(move |cx: &mut Cx| resnet18(cx, batch_size, true));
+    let definition = Model::new(resnet18_train).inputs(resnet18_inputs(batch_size));
     let (schema, model) = definition.trace()?;
     let training = prepare_model_sgd(
         &model,
@@ -524,8 +551,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         phases.print(batch_size);
     }
 
-    let inference =
-        Model::new(move |cx: &mut Cx| resnet18(cx, batch_size, false)).apply(&schema)?;
+    let inference = Model::new(resnet18_infer)
+        .inputs(resnet18_inputs(batch_size))
+        .apply(&schema)?;
     let inference_metrics = Tensor::stack(
         &[
             inference.outputs()[0].clone(),
@@ -573,7 +601,8 @@ mod tests {
 
     #[test]
     fn resnet18_schema_has_eighteen_convolutions_and_stateful_norms() {
-        let (schema, model) = Model::new(|cx: &mut Cx| resnet18(cx, 2, true))
+        let (schema, model) = Model::new(resnet18_train)
+            .inputs(resnet18_inputs(2))
             .trace()
             .unwrap();
         let convolution_count = schema

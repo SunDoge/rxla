@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use rxla_core::{
     Buffer, CacheLimits, Client, Compiler, Conv2dOptions, DType, PendingHostUpload, Runtime, Tensor,
 };
-use rxla_nn::{Cx, Model, ParamSchema, Result as NnResult};
+use rxla_nn::{Cx, Model, ModelInput, ParamSchema, Result as NnResult};
 use rxla_train::{DataRng, prepare_model_sgd};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -183,9 +183,7 @@ fn basic_block(
     Ok(hidden.add(&residual)?.relu()?)
 }
 
-fn classifier(cx: &mut Cx, batch_size: i64) -> NnResult<Vec<Tensor>> {
-    let images = cx.input(&[batch_size, 32, 32, 3])?;
-    let labels = cx.input_dtype(&[batch_size], DType::I32)?;
+fn classifier(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor)> {
     let mut hidden = cx
         .named("stem_conv")?
         .conv2d(16, [3, 3])
@@ -208,7 +206,14 @@ fn classifier(cx: &mut Cx, batch_size: i64) -> NnResult<Vec<Tensor>> {
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;
-    Ok(vec![loss, logits])
+    Ok((loss, logits))
+}
+
+fn classifier_inputs(batch_size: i64) -> (ModelInput, ModelInput) {
+    (
+        ModelInput::new([batch_size, 32, 32, 3]),
+        ModelInput::new([batch_size]).dtype(DType::I32),
+    )
 }
 
 fn initialized_parameters(
@@ -315,7 +320,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gpu = unsafe { Client::load(&args.gpu_plugin) }?;
     let mut augmentation_runtime = Runtime::new(cpu);
     let batch_size = args.batch_size;
-    let (schema, model) = Model::new(move |cx: &mut Cx| classifier(cx, batch_size)).trace()?;
+    let (schema, model) = Model::new(classifier)
+        .inputs(classifier_inputs(batch_size))
+        .trace()?;
     let training = prepare_model_sgd(
         &model,
         &schema.select_all(),
@@ -428,7 +435,10 @@ mod tests {
 
     #[test]
     fn resnet20_has_expected_depth_and_state_schema() {
-        let (schema, model) = Model::new(|cx: &mut Cx| classifier(cx, 4)).trace().unwrap();
+        let (schema, model) = Model::new(classifier)
+            .inputs(classifier_inputs(4))
+            .trace()
+            .unwrap();
         let convolution_weights = schema
             .parameters()
             .iter()
