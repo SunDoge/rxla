@@ -82,7 +82,7 @@ impl Tensor {
             .graph()
             .0
             .lock()
-            .map_err(|_| err("graph lock poisoned"))?
+            .map_err(|_| Error::GraphLockPoisoned)?
             .semantic_nodes()?;
         for input in inputs {
             if !Arc::ptr_eq(&self.graph().0, &input.graph().0) {

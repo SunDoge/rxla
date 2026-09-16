@@ -25,14 +25,12 @@ impl InputTrace {
             .iter()
             .any(|input| !Arc::ptr_eq(&graph.0, &input.graph().0))
         {
-            return Err(err("stateful inputs belong to different lazy sessions"));
+            return Err(Error::LazySessionMismatch);
         }
         if inputs.iter().any(|input| !input.is_implicit_lazy()) {
-            return Err(err(
-                "stateful input fusion requires implicit lazy tensors, not explicit Tracer values",
-            ));
+            return Err(Error::ExplicitTraceEvaluation);
         }
-        let source = graph.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let source = graph.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         let semantic = source.semantic_nodes()?;
         let source_roots = inputs.iter().map(Tensor::node_id).collect::<Vec<_>>();
         let mut reachable = vec![false; semantic.len()];

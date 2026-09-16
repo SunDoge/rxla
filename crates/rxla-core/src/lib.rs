@@ -72,6 +72,22 @@ pub enum Error {
     Ir { source: IrError },
     #[snafu(transparent)]
     Sharding { source: ShardingError },
+    #[snafu(display("tensor has no expression node"))]
+    MissingExpression,
+    #[snafu(display("tensor belongs to an explicit Tracer; execute its Program"))]
+    ExplicitTraceEvaluation,
+    #[snafu(display("lazy input binding {index} is missing"))]
+    MissingLazyInput { index: usize },
+    #[snafu(display("executor returned {actual} materialized outputs, expected {expected}"))]
+    MaterializedOutputCount { expected: usize, actual: usize },
+    #[snafu(display("materialized output {index} does not match requested shape or dtype"))]
+    MaterializedOutputMetadata { index: usize },
+    #[snafu(display("executor output {index} is not materialized"))]
+    ExecutorOutputNotMaterialized { index: usize },
+    #[snafu(display("tensors belong to different implicit lazy sessions"))]
+    LazySessionMismatch,
+    #[snafu(display("tensor graph lock is poisoned"))]
+    GraphLockPoisoned,
     #[snafu(display("invalid tensor operation: {message}"))]
     InvalidArgument { message: String },
 }
@@ -130,7 +146,7 @@ fn elements(dims: &[i64]) -> Result<usize> {
 }
 impl Graph {
     fn set_sharding(&self, id: rxla_ir::SsaId, sharding: Sharding) -> Result<()> {
-        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         if graph.value_type(id).is_err() {
             return Err(err("invalid tensor expression node"));
         }
@@ -138,7 +154,7 @@ impl Graph {
     }
 
     fn sharding(&self, id: rxla_ir::SsaId) -> Result<Option<Sharding>> {
-        let graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         Ok(graph.sharding(id)?)
     }
     fn push_node(
@@ -148,7 +164,7 @@ impl Graph {
         ty: TensorType,
     ) -> Result<rxla_ir::SsaId> {
         elements(&ty.dims)?;
-        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         let operand_types = graph
             .operand_types(&operands)
             .map_err(|_| err("operation requires tensors from an active tracing session"))?;
@@ -160,7 +176,7 @@ impl Graph {
     }
     fn node(&self, op: Op, operands: Vec<rxla_ir::SsaId>, dims: &[i64]) -> Result<Tensor> {
         let dtype = {
-            let graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+            let graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
             dtype_rules::infer(&op, &graph.operand_types(&operands)?)?
         };
         let id = self.push_node(
@@ -203,7 +219,7 @@ impl Graph {
     }
     fn parameter(&self, ty: TensorType) -> Result<rxla_ir::SsaId> {
         elements(&ty.dims)?;
-        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         let number = graph.parameter_count()?;
         let op = Op::Parameter(number);
         Ok(graph.append(&op, &[], &ty)?)
@@ -221,7 +237,7 @@ impl Graph {
             dims: dims.to_vec(),
             dtype,
         };
-        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         let number = graph.parameter_count()?;
         let id = graph.state_input(number, state_id, path, &ty)?;
         Ok(Tensor::symbolic(self.clone(), id, dims, dtype))
@@ -231,7 +247,7 @@ impl Graph {
         if !Arc::ptr_eq(&self.0, &current.graph().0) {
             return Err(err("state read belongs to another graph"));
         }
-        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         let id = graph.state_read(current.node_id(), state_id)?;
         Ok(Tensor::symbolic(
             self.clone(),
@@ -245,7 +261,7 @@ impl Graph {
         if !Arc::ptr_eq(&self.0, &value.graph().0) {
             return Err(err("state write belongs to another graph"));
         }
-        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         let id = graph.state_write(value.node_id(), state_id)?;
         Ok(Tensor::symbolic(
             self.clone(),
@@ -271,7 +287,7 @@ impl Graph {
         {
             return Err(err("output belongs to another graph"));
         }
-        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         let ir = &mut *graph;
         let output_ids = outputs.iter().map(Tensor::node_id).collect::<Vec<_>>();
         let planning = ir.planning_snapshot(&output_ids)?.into();
@@ -306,7 +322,7 @@ impl Graph {
         {
             return Err(err("output belongs to another graph"));
         }
-        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         let ir = &mut *graph;
         let output_ids = outputs.iter().map(Tensor::node_id).collect::<Vec<_>>();
         let program = ir.stablehlo_program_for(&output_ids, preserve_all_inputs, target)?;
@@ -324,7 +340,7 @@ impl Graph {
         {
             return Err(err("output belongs to another graph"));
         }
-        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         let ir = &mut *graph;
         let output_ids = outputs.iter().map(Tensor::node_id).collect::<Vec<_>>();
         let program = ir.stablehlo_program(&output_ids, false)?;
@@ -352,7 +368,7 @@ impl Graph {
         {
             return Err(err("output belongs to another graph"));
         }
-        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         Ok(graph.stablehlo(&outputs.iter().map(Tensor::node_id).collect::<Vec<_>>())?)
     }
     pub fn compile(&self, client: &Client, output: &Tensor) -> Result<Executable> {

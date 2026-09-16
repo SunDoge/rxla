@@ -10,7 +10,7 @@
 #[cfg(feature = "disk-cache")]
 use crate::disk_cache::DiskCache;
 use crate::{
-    Buffer, CacheLimits, CacheStats, Compiler, Executable, ExecutionPlan, Graph, InputSpec,
+    Buffer, CacheLimits, CacheStats, Compiler, Error, Executable, ExecutionPlan, Graph, InputSpec,
     LoweredProgram, OutputSpec, PlanningPolicy, Result, StateGraph, StateProgram, Tensor, err,
 };
 use prost::Message;
@@ -910,7 +910,7 @@ impl Runtime {
             .iter()
             .any(|output| !std::sync::Arc::ptr_eq(&graph.0, &output.graph().0))
         {
-            return Err(err("eval_many tensors belong to different lazy sessions"));
+            return Err(Error::LazySessionMismatch);
         }
         let roots = pending.clone();
         let (lowered, planning, parameters, source) = graph.direct_program(&roots, false)?;

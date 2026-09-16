@@ -691,7 +691,7 @@ impl Tensor {
             .trace_value()?
             .lazy
             .as_ref()
-            .ok_or_else(|| err("tensor belongs to an explicit Tracer; execute its Program"))?;
+            .ok_or(Error::ExplicitTraceEvaluation)?;
         let inputs = session.inputs.borrow();
         parameters
             .iter()
@@ -699,14 +699,17 @@ impl Tensor {
                 inputs
                     .get(index)
                     .cloned()
-                    .ok_or_else(|| err("lazy input binding is missing"))
+                    .ok_or(Error::MissingLazyInput { index })
             })
             .collect()
     }
 
     pub(crate) fn materialize_all(outputs: &[Tensor], values: &[Tensor]) -> Result<()> {
         if outputs.len() != values.len() {
-            return Err(err("materialized output count mismatch"));
+            return Err(Error::MaterializedOutputCount {
+                expected: outputs.len(),
+                actual: values.len(),
+            });
         }
         let Some(first) = outputs.first() else {
             return Ok(());
@@ -715,19 +718,20 @@ impl Tensor {
         let first_session = first_trace
             .lazy
             .as_ref()
-            .ok_or_else(|| err("eval output does not belong to an implicit lazy session"))?;
+            .ok_or(Error::ExplicitTraceEvaluation)?;
         let bindings = outputs
             .iter()
             .zip(values)
-            .map(|(output, value)| {
+            .enumerate()
+            .map(|(index, (output, value))| {
                 if output.shape() != value.shape() || output.dtype() != value.dtype() {
-                    return Err(err("materialized output metadata mismatch"));
+                    return Err(Error::MaterializedOutputMetadata { index });
                 }
                 value
                     .binding
                     .get()
                     .cloned()
-                    .ok_or_else(|| err("executor returned an unmaterialized output"))
+                    .ok_or(Error::ExecutorOutputNotMaterialized { index })
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -735,12 +739,10 @@ impl Tensor {
         for (output, binding) in outputs.iter().zip(&bindings) {
             let trace = output.trace_value()?;
             let Some(session) = &trace.lazy else {
-                return Err(err(
-                    "eval output does not belong to an implicit lazy session",
-                ));
+                return Err(Error::ExplicitTraceEvaluation);
             };
             if !std::rc::Rc::ptr_eq(session, first_session) {
-                return Err(err("eval outputs belong to different lazy sessions"));
+                return Err(Error::LazySessionMismatch);
             }
             if replacements
                 .iter()
@@ -770,7 +772,7 @@ impl Tensor {
             .graph
             .0
             .lock()
-            .map_err(|_| err("graph lock poisoned"))?;
+            .map_err(|_| Error::GraphLockPoisoned)?;
         let mut inputs = first_session.inputs.borrow_mut();
         for (id, ty, backing) in replacements {
             if graph.parameter_number(id)?.is_some() {
@@ -797,7 +799,7 @@ impl Tensor {
             .graph
             .0
             .lock()
-            .map_err(|_| err("graph lock poisoned"))?;
+            .map_err(|_| Error::GraphLockPoisoned)?;
         graph
             .parameter_number(trace.id)?
             .ok_or_else(|| err("storage binding requires a symbolic input, not a computed value"))
@@ -921,9 +923,7 @@ impl Tensor {
     }
 
     fn trace_value(&self) -> Result<&TraceValue> {
-        self.trace
-            .as_ref()
-            .ok_or_else(|| err("tensor has no expression node"))
+        self.trace.as_ref().ok_or(Error::MissingExpression)
     }
 
     pub(crate) fn graph(&self) -> &Graph {
@@ -952,7 +952,7 @@ impl Compiler {
                 .graph()
                 .0
                 .lock()
-                .map_err(|_| err("graph lock poisoned"))?;
+                .map_err(|_| Error::GraphLockPoisoned)?;
             if graph.parameter_count()? != inputs.len() {
                 return Err(err("managed input count mismatch"));
             }
@@ -1096,10 +1096,38 @@ mod tests {
     #[test]
     fn materialization_rejects_explicit_traces_without_panicking() {
         assert!(Tensor::materialize_all(&[], &[]).is_ok());
+        let value = Tensor::from_slice([1], DType::F32, [1.0]).unwrap();
+        assert!(matches!(
+            Tensor::materialize_all(&[], std::slice::from_ref(&value)),
+            Err(Error::MaterializedOutputCount {
+                expected: 0,
+                actual: 1
+            })
+        ));
 
         let explicit = Graph::default().input(&[1]).unwrap();
-        let value = Tensor::from_slice([1], DType::F32, [1.0]).unwrap();
-        assert!(Tensor::materialize_all(&[explicit], &[value]).is_err());
+        assert!(matches!(
+            Tensor::materialize_all(&[explicit], std::slice::from_ref(&value)),
+            Err(Error::ExplicitTraceEvaluation)
+        ));
+
+        let lazy = value.add_scalar(1.0).unwrap();
+        let wrong_shape = Tensor::from_slice([2], DType::F32, [1.0, 2.0]).unwrap();
+        assert!(matches!(
+            Tensor::materialize_all(
+                std::slice::from_ref(&lazy),
+                std::slice::from_ref(&wrong_shape)
+            ),
+            Err(Error::MaterializedOutputMetadata { index: 0 })
+        ));
+        let unmaterialized = value.add_scalar(2.0).unwrap();
+        assert!(matches!(
+            Tensor::materialize_all(
+                std::slice::from_ref(&lazy),
+                std::slice::from_ref(&unmaterialized)
+            ),
+            Err(Error::ExecutorOutputNotMaterialized { index: 0 })
+        ));
     }
 
     #[test]
