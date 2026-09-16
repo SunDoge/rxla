@@ -27,6 +27,8 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Check generated bindings
+        run: cargo --locked xtask check
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint workspace
