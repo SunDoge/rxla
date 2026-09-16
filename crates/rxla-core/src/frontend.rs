@@ -895,7 +895,7 @@ impl Runtime {
 
     fn eval_many_on(&mut self, device: &Device, outputs: &[Tensor]) -> Result<Vec<Tensor>> {
         if outputs.is_empty() {
-            return Err(err("eval_many requires at least one tensor"));
+            return Ok(Vec::new());
         }
         let pending = outputs
             .iter()

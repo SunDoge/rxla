@@ -110,6 +110,10 @@ fn runtime_results_are_materialized_lazy_tensor_leaves() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn eval_many_preserves_materialized_values_and_only_executes_lazy_roots() {
     let mut runtime = Runtime::new(client());
+    assert!(runtime.eval_many(&[]).unwrap().is_empty());
+    let empty: [Tensor; 0] = runtime.eval([] as [&Tensor; 0]).unwrap();
+    assert!(empty.is_empty());
+
     let ready = Tensor::from_slice([2], DType::F32, [3.0, 4.0])
         .unwrap()
         .to_device(runtime.client())
