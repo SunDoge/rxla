@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(
     name = "xtask",
-    about = "Maintainer tasks for generated PJRT and OpenXLA protobuf bindings",
+    about = "Maintainer checks and generated bindings for the RXLA workspace",
     version
 )]
 pub(crate) struct Cli {
@@ -15,7 +15,7 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Regenerate checked-in PJRT and protobuf Rust sources.
     Generate,
-    /// Verify checked-in generated sources match the vendored inputs.
+    /// Verify generated sources and the public release graph.
     Check,
 }
 
