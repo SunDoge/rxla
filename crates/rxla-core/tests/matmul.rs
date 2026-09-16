@@ -54,8 +54,7 @@ fn real_broadcast_matmul_and_multiple_outputs() {
     let exe = g.compile_many(&client, &[sum, y.clone(), y]).unwrap();
     assert!(matches!(
         exe.run(&[]).unwrap_err(),
-        rxla_core::Error::InvalidArgument { message }
-            if message.contains("multiple outputs")
+        rxla_core::Error::SingleOutputRequired { actual: 3 }
     ));
     let av: Vec<f32> = (0..12).map(|v| v as f32 - 4.).collect();
     let bv: Vec<f32> = (0..18).map(|v| v as f32 / 2.).collect();

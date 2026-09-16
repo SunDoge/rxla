@@ -121,6 +121,41 @@ pub enum Error {
     ForeignClientStorage,
     #[snafu(display("symbolic tensor has no managed storage"))]
     MissingManagedStorage,
+    #[snafu(display("single-output execution requires 1 output, executable has {actual}"))]
+    SingleOutputRequired { actual: usize },
+    #[snafu(display("F32 convenience execution does not support input {index} dtype {dtype:?}"))]
+    F32InputRequired { index: usize, dtype: DType },
+    #[snafu(display("executable expects {expected} inputs, received {actual}"))]
+    ExecutableInputCount { expected: usize, actual: usize },
+    #[snafu(display("executable input {index} expects shape {expected:?}, received {actual:?}"))]
+    ExecutableInputShape {
+        index: usize,
+        expected: Vec<i64>,
+        actual: Vec<i64>,
+    },
+    #[snafu(display("executable input {index} expects dtype {expected:?}, received {actual:?}"))]
+    ExecutableInputDType {
+        index: usize,
+        expected: DType,
+        actual: DType,
+    },
+    #[snafu(display(
+        "sharded execution device {device} returned {actual} outputs, expected {expected}"
+    ))]
+    ShardedOutputCount {
+        device: usize,
+        expected: usize,
+        actual: usize,
+    },
+    #[snafu(display("invalid optimized program {format:?} protobuf: {source}"))]
+    OptimizedProgramDecode {
+        format: String,
+        source: prost::DecodeError,
+    },
+    #[snafu(display("optimized program with configuration has no HLO module"))]
+    MissingOptimizedHloModule,
+    #[snafu(display("unsupported optimized program format {format:?}"))]
+    UnsupportedOptimizedProgram { format: String },
     #[snafu(display("invalid tensor operation: {message}"))]
     InvalidArgument { message: String },
 }
@@ -628,17 +663,30 @@ impl Executable {
     /// Convenience host execution; use resident buffers through `execute` for hot paths.
     pub fn run(&self, inputs: &[&[f32]]) -> Result<Vec<f32>> {
         if self.output_count != 1 {
-            return Err(err("multiple outputs: use run_many"));
+            return Err(Error::SingleOutputRequired {
+                actual: self.output_count,
+            });
         }
         let mut outputs = self.run_many(inputs)?;
         Ok(outputs.remove(0))
     }
     pub fn run_many(&self, inputs: &[&[f32]]) -> Result<Vec<Vec<f32>>> {
-        if self.inputs.iter().any(|s| s.dtype != DType::F32) {
-            return Err(err("non-F32 inputs: use execute with typed buffers"));
+        if let Some((index, input)) = self
+            .inputs
+            .iter()
+            .enumerate()
+            .find(|(_, input)| input.dtype != DType::F32)
+        {
+            return Err(Error::F32InputRequired {
+                index,
+                dtype: input.dtype,
+            });
         }
         if inputs.len() != self.inputs.len() {
-            return Err(err("input count mismatch"));
+            return Err(Error::ExecutableInputCount {
+                expected: self.inputs.len(),
+                actual: inputs.len(),
+            });
         }
         let buffers: Vec<_> = inputs
             .iter()
@@ -680,11 +728,16 @@ impl Executable {
             .collect::<Vec<_>>();
         let lists = references.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let mut outputs = self.raw.execute_sharded(&lists)?;
-        if outputs
+        if let Some((device, values)) = outputs
             .iter()
-            .any(|values| values.len() != self.output_count)
+            .enumerate()
+            .find(|(_, values)| values.len() != self.output_count)
         {
-            return Err(err("sharded execution returned an invalid output count"));
+            return Err(Error::ShardedOutputCount {
+                device,
+                expected: self.output_count,
+                actual: values.len(),
+            });
         }
         Ok(outputs.remove(0))
     }
@@ -700,20 +753,28 @@ impl Executable {
     }
     fn validate_inputs(&self, inputs: &[&Buffer]) -> Result<()> {
         if inputs.len() != self.inputs.len() {
-            return Err(err("input count mismatch"));
+            return Err(Error::ExecutableInputCount {
+                expected: self.inputs.len(),
+                actual: inputs.len(),
+            });
         }
         for (index, (buffer, expected)) in inputs.iter().zip(&self.inputs).enumerate() {
             let actual = buffer.dimensions()?;
             if actual != expected.dims {
-                return Err(err(format!(
-                    "input {index}: expected shape {expected:?}, got {actual:?}"
-                )));
+                return Err(Error::ExecutableInputShape {
+                    index,
+                    expected: expected.dims.clone(),
+                    actual,
+                });
             }
             let expected_dtype = expected.dtype;
-            if buffer.dtype()? != expected_dtype {
-                return Err(err(format!(
-                    "input {index}: expected dtype {expected_dtype:?}"
-                )));
+            let actual_dtype = buffer.dtype()?;
+            if actual_dtype != expected_dtype {
+                return Err(Error::ExecutableInputDType {
+                    index,
+                    expected: expected_dtype,
+                    actual: actual_dtype,
+                });
             }
         }
         Ok(())
@@ -722,17 +783,24 @@ impl Executable {
 
 fn decode_optimized_hlo(program: rxla_pjrt::OptimizedProgram) -> Result<HloModuleProto> {
     match program.format.as_str() {
-        "hlo" => HloModuleProto::decode(program.code.as_slice())
-            .map_err(|e| err(format!("invalid optimized HLO protobuf: {e}"))),
+        "hlo" => HloModuleProto::decode(program.code.as_slice()).map_err(|source| {
+            Error::OptimizedProgramDecode {
+                format: program.format,
+                source,
+            }
+        }),
         "hlo_with_config" => {
             rxla_xla_proto::xla::HloModuleProtoWithConfig::decode(program.code.as_slice())
-                .map_err(|e| err(format!("invalid optimized HLO/config protobuf: {e}")))?
+                .map_err(|source| Error::OptimizedProgramDecode {
+                    format: program.format,
+                    source,
+                })?
                 .hlo_module
-                .ok_or_else(|| err("optimized program has no HLO module"))
+                .ok_or(Error::MissingOptimizedHloModule)
         }
-        other => Err(err(format!(
-            "unsupported optimized program format: {other:?}"
-        ))),
+        _ => Err(Error::UnsupportedOptimizedProgram {
+            format: program.format,
+        }),
     }
 }
 
@@ -762,10 +830,22 @@ mod optimized_program_tests {
             decode_optimized_hlo(program("hlo_with_config", wrapped.encode_to_vec())).unwrap(),
             module
         );
-        assert!(decode_optimized_hlo(program("hlo_with_config", vec![])).is_err());
-        assert!(decode_optimized_hlo(program("unknown", module.encode_to_vec())).is_err());
+        assert!(matches!(
+            decode_optimized_hlo(program("hlo_with_config", vec![])),
+            Err(Error::MissingOptimizedHloModule)
+        ));
+        assert!(matches!(
+            decode_optimized_hlo(program("unknown", module.encode_to_vec())),
+            Err(Error::UnsupportedOptimizedProgram { format }) if format == "unknown"
+        ));
         for format in ["hlo", "hlo_with_config"] {
-            assert!(decode_optimized_hlo(program(format, vec![0xff])).is_err());
+            assert!(matches!(
+                decode_optimized_hlo(program(format, vec![0xff])),
+                Err(Error::OptimizedProgramDecode {
+                    format: actual,
+                    ..
+                }) if actual == format
+            ));
         }
     }
 }
