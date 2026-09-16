@@ -91,7 +91,14 @@ pub(crate) fn check() -> Result<()> {
 fn validate_package_files(root: &Path) -> Result<()> {
     for package in PUBLIC_PACKAGES {
         let output = Command::new(env!("CARGO"))
-            .args(["package", "--locked", "--list", "-p", package])
+            .args([
+                "package",
+                "--locked",
+                "--allow-dirty",
+                "--list",
+                "-p",
+                package,
+            ])
             .current_dir(root)
             .output()?;
         if !output.status.success() {
