@@ -205,6 +205,25 @@ silently dropping their gradient. The broader policies below remain necessary.
 - External effects: not ordinary dead-code-eliminable tensor operations. Ordering
   and retry behavior need separate contracts before adding callbacks or I/O.
 
+Named device randomness is available directly through the state interpreter:
+
+```rust
+let model = StatefulModel::new(|cx: &mut StateCx, xs: &[Tensor]| {
+    let mut rng = cx.rng("dropout")?;
+    Ok(vec![rng.dropout(&xs[0], 0.5)?.output])
+});
+let mut session = model.session().rng_seed("dropout", 42)?;
+```
+
+`StateRng` currently provides raw blocks, uniform, normal, Bernoulli, and
+dropout draws. Each name owns four scalar I32 states (`key0`, `key1`,
+`counter_low`, and `counter_high`). Reborrowing the same name continues its
+symbolic stream. `StateCx::finish` records the final counter update as part of
+the state transaction; a counter wrap rejects the whole stream advancement.
+The session injects the seed without exposing `StateGraph` or requiring a host
+random-number upload. Use `rng_state` when exact raw key words or a nonzero
+counter are required.
+
 ## First implementation verification targets
 
 Start with a state slot plus compiled-session wrapper, not a Monad-heavy public

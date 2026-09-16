@@ -137,6 +137,7 @@ impl<F> StatefulModel<F> {
         StatefulSession {
             model: self,
             initial: BTreeMap::new(),
+            rng_initial: BTreeMap::new(),
             compiled: None,
         }
     }
@@ -148,6 +149,7 @@ pub struct StateCx {
     scope: Vec<String>,
     states: BTreeMap<String, StateDeclaration>,
     order: Vec<String>,
+    rngs: BTreeMap<String, RngStream>,
 }
 
 struct StateDeclaration {
@@ -163,6 +165,18 @@ pub struct StateValue {
     slot: StateSlot,
 }
 
+struct RngStream {
+    key: [Tensor; 2],
+    counters: [StateValue; 2],
+    next: [Tensor; 2],
+    available: Tensor,
+}
+
+/// A named device RNG capability borrowed from [`StateCx`].
+pub struct StateRng<'a> {
+    stream: &'a mut RngStream,
+}
+
 impl StateCx {
     fn new(inputs: &[Tensor]) -> Result<(Self, Vec<Tensor>, Vec<Tensor>, String)> {
         let mut graph = StateGraph::default();
@@ -173,6 +187,7 @@ impl StateCx {
                 scope: Vec::new(),
                 states: BTreeMap::new(),
                 order: Vec::new(),
+                rngs: BTreeMap::new(),
             },
             symbolic,
             bindings,
@@ -286,6 +301,39 @@ impl StateCx {
         self.graph.iota_i32(shape, axis)
     }
 
+    /// Borrow a named Threefry2x32 stream. Repeated calls with the same path
+    /// continue the stream, while distinct names own independent state.
+    pub fn rng(&mut self, name: &str) -> Result<StateRng<'_>> {
+        validate_state_name(name)?;
+        let path = self.path(name);
+        if !self.rngs.contains_key(&path) {
+            let words = self.scope(name, |cx| {
+                Ok([
+                    cx.state("key0", &[], DType::I32)?,
+                    cx.state("key1", &[], DType::I32)?,
+                    cx.state("counter_low", &[], DType::I32)?,
+                    cx.state("counter_high", &[], DType::I32)?,
+                ])
+            })?;
+            let values = words
+                .iter()
+                .map(|word| word.read(self))
+                .collect::<Result<Vec<_>>>()?;
+            self.rngs.insert(
+                path.clone(),
+                RngStream {
+                    key: [values[0].clone(), values[1].clone()],
+                    counters: [words[2].clone(), words[3].clone()],
+                    next: [values[2].clone(), values[3].clone()],
+                    available: self.graph.constant(&[], &[1.])?,
+                },
+            );
+        }
+        Ok(StateRng {
+            stream: self.rngs.get_mut(&path).expect("inserted above"),
+        })
+    }
+
     fn validate_state(&self, state: &StateValue) -> Result<()> {
         match self.states.get(&state.path) {
             Some(declaration) if declaration.slot.identity() == state.slot.identity() => Ok(()),
@@ -301,7 +349,16 @@ impl StateCx {
         }
     }
 
-    fn finish(self, outputs: &[Tensor]) -> Result<PendingSpecialization> {
+    fn finish(mut self, outputs: &[Tensor]) -> Result<PendingSpecialization> {
+        for stream in std::mem::take(&mut self.rngs).into_values() {
+            self.write_many_if(
+                &stream.available,
+                &[
+                    (&stream.counters[0], stream.next[0].clone()),
+                    (&stream.counters[1], stream.next[1].clone()),
+                ],
+            )?;
+        }
         let slots = self
             .order
             .iter()
@@ -367,6 +424,78 @@ impl StateValue {
     }
 }
 
+impl StateRng<'_> {
+    fn draw(&mut self, shape: &[i64]) -> Result<crate::random::ThreefryBlocks> {
+        let draw = crate::random::threefry2x32_blocks(
+            [&self.stream.key[0], &self.stream.key[1]],
+            [&self.stream.next[0], &self.stream.next[1]],
+            shape,
+        )?;
+        self.stream.available = self
+            .stream
+            .available
+            .mul(&draw.counter_wrapped.neg()?.add_scalar(1.)?)?;
+        self.stream.next = draw.next_counter.clone();
+        Ok(draw)
+    }
+
+    /// Return two I32 words per element, consuming one Threefry block.
+    pub fn blocks(&mut self, shape: &[i64]) -> Result<[Tensor; 2]> {
+        Ok(self.draw(shape)?.bits)
+    }
+
+    /// Uniform F32 values on the high-24-bit grid in `[0, 1)`.
+    pub fn uniform_f32(&mut self, shape: &[i64]) -> Result<Tensor> {
+        let bits = self.draw(shape)?.bits;
+        crate::random::uniform_f32_from_bits(&bits[0])
+    }
+
+    /// Approximate standard-normal F32 values generated on device.
+    pub fn normal_f32(&mut self, shape: &[i64]) -> Result<Tensor> {
+        let bits = self.draw(shape)?.bits;
+        crate::random::normal_f32_from_bits([&bits[0], &bits[1]])
+    }
+
+    /// F32 zero/one samples. Endpoint probabilities consume no blocks.
+    pub fn bernoulli(&mut self, shape: &[i64], probability: f32) -> Result<Tensor> {
+        if !(0.0..=1.0).contains(&probability) {
+            return Err(err(
+                "device Bernoulli probability must be finite and in [0, 1]",
+            ));
+        }
+        if probability == 0. || probability == 1. {
+            return self.stream.key[0]
+                .graph()
+                .constant(&[], &[probability])?
+                .broadcast_to(shape);
+        }
+        let uniform = self.uniform_f32(shape)?;
+        uniform.lt_mask(
+            &uniform
+                .graph()
+                .constant(&[], &[probability])?
+                .broadcast_to(shape)?,
+        )
+    }
+
+    /// Training-only inverted dropout and the exact keep mask used by it.
+    pub fn dropout(
+        &mut self,
+        input: &Tensor,
+        keep_probability: f32,
+    ) -> Result<crate::random::DropoutSample> {
+        if !keep_probability.is_finite() || keep_probability <= 0. || keep_probability > 1. {
+            return Err(err("dropout keep probability must be finite and in (0, 1]"));
+        }
+        if !Arc::ptr_eq(&self.stream.key[0].graph().0, &input.graph().0) {
+            return Err(err("dropout input belongs to another RNG trace"));
+        }
+        let keep_mask = self.bernoulli(input.shape(), keep_probability)?;
+        let output = input.dropout_with_mask(&keep_mask, keep_probability)?;
+        Ok(crate::random::DropoutSample { output, keep_mask })
+    }
+}
+
 fn validate_state_name(name: &str) -> Result<()> {
     if name.is_empty() || name.contains('.') {
         return Err(err(format!(
@@ -394,6 +523,7 @@ struct CompiledState {
 pub struct StatefulSession<'model, F> {
     model: &'model StatefulModel<F>,
     initial: BTreeMap<String, Buffer>,
+    rng_initial: BTreeMap<String, ([u32; 2], u64)>,
     compiled: Option<CompiledState>,
 }
 
@@ -406,6 +536,30 @@ impl<F> StatefulSession<'_, F> {
             return Err(err(format!(
                 "duplicate or empty initial state name {name:?}"
             )));
+        }
+        Ok(self)
+    }
+
+    /// Initialize a named RNG stream from a u64 seed and counter zero.
+    pub fn rng_seed(self, name: impl Into<String>, seed: u64) -> Result<Self> {
+        self.rng_state(name, [seed as u32, (seed >> 32) as u32], 0)
+    }
+
+    /// Initialize the raw Threefry key and counter of a named RNG stream.
+    pub fn rng_state(
+        mut self,
+        name: impl Into<String>,
+        key: [u32; 2],
+        counter: u64,
+    ) -> Result<Self> {
+        let name = name.into();
+        if name.is_empty()
+            || self
+                .rng_initial
+                .insert(name.clone(), (key, counter))
+                .is_some()
+        {
+            return Err(err(format!("duplicate or empty RNG stream name {name:?}")));
         }
         Ok(self)
     }
@@ -499,6 +653,27 @@ impl<F> StateStep<'_, '_, F> {
                 .collect::<Vec<_>>();
             let mut initial = program.zero_state(&slots)?;
             let mut overrides = std::mem::take(&mut self.owner.initial);
+            for (name, (key, counter)) in std::mem::take(&mut self.owner.rng_initial) {
+                for (suffix, value) in [
+                    ("key0", key[0]),
+                    ("key1", key[1]),
+                    ("counter_low", counter as u32),
+                    ("counter_high", (counter >> 32) as u32),
+                ] {
+                    let state_name = format!("{name}.{suffix}");
+                    if overrides
+                        .insert(
+                            state_name.clone(),
+                            program.client().buffer(&[], &[value as i32])?,
+                        )
+                        .is_some()
+                    {
+                        return Err(err(format!(
+                            "state {state_name:?} has both direct and RNG initialization"
+                        )));
+                    }
+                }
+            }
             for (name, buffer) in overrides.iter() {
                 if !named_slots.iter().any(|(declared, _)| declared == name) {
                     return Err(err(format!(
@@ -606,6 +781,48 @@ mod tests {
         assert_eq!(left.path(), "left.cache");
         assert_eq!(right.path(), "right.cache");
         assert_ne!(left.slot.identity(), right.slot.identity());
+    }
+
+    #[test]
+    fn named_rng_is_a_transactional_state_effect() {
+        let (mut cx, _, _, _) = StateCx::new(&[]).unwrap();
+        let first = cx.rng("sampling").unwrap().blocks(&[2]).unwrap();
+        let second = cx.rng("sampling").unwrap().blocks(&[3]).unwrap();
+        let pending = cx.finish(&[first[0].clone(), second[0].clone()]).unwrap();
+        let prepared = pending.graph.prepare(&pending.outputs).unwrap();
+
+        assert_eq!(pending.slots.len(), 4);
+        assert_eq!(pending.slots[0].0, "sampling.key0");
+        assert_eq!(pending.slots[3].0, "sampling.counter_high");
+        assert_eq!(prepared.output_spec(0).unwrap().dtype, DType::I32);
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+    fn named_rng_seed_injection_advances_without_graph_api() {
+        let model = StatefulModel::new(|cx: &mut StateCx, _: &[Tensor]| {
+            let mut rng = cx.rng("sampling")?;
+            Ok(vec![rng.uniform_f32(&[4])?])
+        });
+        let mut session = model.session().rng_seed("sampling", 42).unwrap();
+        let mut runtime =
+            unsafe { Runtime::load(std::env::var("PJRT_PLUGIN_PATH").expect("PJRT_PLUGIN_PATH")) }
+                .unwrap();
+
+        let first = session.call(&[]).unwrap().eval_one(&mut runtime).unwrap();
+        let second = session.call(&[]).unwrap().eval_one(&mut runtime).unwrap();
+        assert_ne!(
+            first.to_vec::<f32>().unwrap(),
+            second.to_vec::<f32>().unwrap()
+        );
+        assert_eq!(
+            session
+                .state("sampling.counter_low")
+                .unwrap()
+                .to_vec::<i32>()
+                .unwrap(),
+            [8]
+        );
     }
 
     #[test]
