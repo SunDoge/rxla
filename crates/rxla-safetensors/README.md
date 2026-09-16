@@ -84,15 +84,15 @@ checkpoint.
 let (schema, _) = rxla_nn::init(model)?;
 let applied = rxla_nn::apply(&schema, model)?;
 let weights = checkpoint.load_parameter_schema(&client, &schema)?;
-let arguments = applied.bind(&[&input], weights.bindings())?;
-let executable = applied.compile(&mut compiler)?;
-let outputs = executable.execute(arguments.as_slice())?;
+let compiled = applied.compile(&mut compiler)?;
+let model = compiled.bind_parameters(weights.bindings())?;
+let output: Buffer = model.run(&input)?;
 ```
 
 Inputs retain the explicit model-function order. Parameters are selected by
-their stable lexical paths, then `AppliedModel::bind` produces the frozen PJRT
-ABI order. This prevents a checkpoint from becoming coupled to incidental trace
-or compiler parameter numbering.
+their stable lexical paths, then `CompiledModel::bind_parameters` freezes their
+PJRT ABI order for repeated execution. This prevents a checkpoint from becoming
+coupled to incidental trace or compiler parameter numbering.
 
 ## Export current module weights
 

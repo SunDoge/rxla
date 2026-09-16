@@ -161,9 +161,9 @@ mod tests {
         .trace()
         .unwrap();
         let mut compiler = Compiler::new(client, CacheLimits::default());
-        let executable = applied.compile(&mut compiler).unwrap();
-        let outputs = executable.execute(&[]).unwrap();
-        let (scalar, vector): (Buffer, Buffer) = applied.decode_outputs(outputs).unwrap();
+        let compiled = applied.compile(&mut compiler).unwrap();
+        let (scalar, vector): (Buffer, Buffer) =
+            compiled.run(&[] as &[&Buffer], std::iter::empty()).unwrap();
         assert_eq!(scalar.to_vec::<f32>().unwrap(), [3.0]);
         assert_eq!(vector.to_vec::<f32>().unwrap(), [4.0, 5.0]);
     }

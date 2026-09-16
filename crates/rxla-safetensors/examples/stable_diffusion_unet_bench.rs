@@ -82,7 +82,7 @@ fn run(args: Args) -> Result<()> {
     let mut checkpoint = SafeTensors::open(&args.weights)?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let compile_start = Instant::now();
-    let executable = applied.compile(&mut compiler)?;
+    let executable = applied.compile_executable(&mut compiler)?;
     let compile_time = compile_start.elapsed();
     let load_start = Instant::now();
     let weights = checkpoint.load_parameter_schema(&client, &schema)?;

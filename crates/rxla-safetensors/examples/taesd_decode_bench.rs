@@ -57,13 +57,13 @@ fn run(args: Args) -> Result<()> {
 
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let compile_start = Instant::now();
-    let executable = decoder.compile(&mut compiler)?;
+    let compiled = decoder.compile(&mut compiler)?;
     let compile_time = compile_start.elapsed();
 
     let load_start = Instant::now();
     let weights = checkpoint.load_parameter_schema(&client, &schema)?;
     let bindings = weights.bindings();
-    let parameters = decoder.bind_parameters(bindings)?;
+    let runner = compiled.bind_parameters(bindings)?;
     let load_time = load_start.elapsed();
 
     let values = (0..args.latent * args.latent * 4)
@@ -71,20 +71,20 @@ fn run(args: Args) -> Result<()> {
         .collect::<Vec<_>>();
     let latent = client.buffer(&[1, args.latent, args.latent, 4], &values)?;
     for _ in 0..args.warmup {
-        let arguments = parameters.bind(&latent)?;
-        executable.execute(arguments.as_slice())?;
+        let _: Buffer = runner.run(&latent)?;
     }
 
     let mut samples = Vec::with_capacity(args.iterations);
-    let mut result = Vec::new();
+    let mut result = None;
     for _ in 0..args.iterations {
         let start = Instant::now();
-        let arguments = parameters.bind(&latent)?;
-        result = executable.execute(arguments.as_slice())?;
+        result = Some(runner.run::<_, Buffer>(&latent)?);
         samples.push(start.elapsed().as_secs_f64() * 1e3);
     }
     let download_start = Instant::now();
-    let final_image = decoder.decode_outputs::<Buffer>(result)?.to_vec::<f32>()?;
+    let final_image = result
+        .expect("at least one measured iteration")
+        .to_vec::<f32>()?;
     let download_time = download_start.elapsed();
     samples.sort_by(f64::total_cmp);
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;

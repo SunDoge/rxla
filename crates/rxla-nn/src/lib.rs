@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, HashSet};
 
 mod applied;
 pub use applied::{
-    AppliedModel, BoundParameters, ModelArguments, ModelSessionBuffers, ModelSessionBuilder,
-    TransformState,
+    AppliedModel, BoundModel, BoundParameters, CompiledModel, ModelArguments, ModelSessionBuffers,
+    ModelSessionBuilder, TransformState,
 };
 mod inputs;
 pub use inputs::{ModelHandler, ModelInput, ModelInputValues, ModelInputs};
@@ -1303,20 +1303,16 @@ mod tests {
 
         for client in [cpu, cuda] {
             let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-            let executable = applied.compile(&mut compiler).expect("compile model");
+            let compiled = applied.compile(&mut compiler).expect("compile model");
             let input = client
                 .buffer(&[2, 3], &[1., -2., 3., -4., 5., -6.])
                 .expect("upload input");
             let weight = client
                 .buffer(&[2, 3], &[1., 3., 5., 2., 4., 6.])
                 .expect("upload parameter");
-            let arguments = applied
-                .bind([&input], [("head.weight", &weight)])
-                .expect("bind model arguments");
-            let outputs = executable
-                .execute(arguments.as_slice())
+            let output: Buffer = compiled
+                .run([&input], [("head.weight", &weight)])
                 .expect("execute model");
-            let output: Buffer = applied.decode_outputs(outputs).unwrap();
             assert_eq!(output.to_vec::<f32>().unwrap(), [10., 12., 0., 0.]);
         }
     }

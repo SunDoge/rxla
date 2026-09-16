@@ -33,6 +33,19 @@ pub struct BoundParameters<'model, 'parameters> {
     values: Vec<Option<&'parameters Buffer>>,
 }
 
+/// A compiled stateless model that retains its named parameter ABI and output structure.
+pub struct CompiledModel<'model> {
+    model: &'model AppliedModel,
+    executable: Arc<Executable>,
+}
+
+/// A compiled model with its named parameters validated and ordered once.
+pub struct BoundModel<'model, 'parameters> {
+    model: &'model AppliedModel,
+    executable: Arc<Executable>,
+    parameters: Vec<Option<&'parameters Buffer>>,
+}
+
 /// Named initialization for a compiled unified stateful model.
 pub struct ModelSessionBuilder<'a> {
     model: &'a AppliedModel,
@@ -89,6 +102,59 @@ impl<'model, 'parameters> BoundParameters<'model, 'parameters> {
         I: ModelInputValues<'inputs>,
     {
         self.model.bind_ordered(&inputs.into_values(), &self.values)
+    }
+}
+
+impl<'model> CompiledModel<'model> {
+    /// Access the low-level executable for profiler and backend integrations.
+    pub fn executable(&self) -> &Executable {
+        &self.executable
+    }
+
+    /// Bind named parameters once for repeated typed model execution.
+    pub fn bind_parameters<'parameters>(
+        &self,
+        parameters: impl IntoIterator<Item = (&'parameters str, &'parameters Buffer)>,
+    ) -> Result<BoundModel<'model, 'parameters>> {
+        Ok(BoundModel {
+            model: self.model,
+            executable: Arc::clone(&self.executable),
+            parameters: self.model.order_parameters(parameters)?,
+        })
+    }
+
+    /// Validate inputs and parameters, execute, and reconstruct the requested output structure.
+    pub fn run<'a, I, O>(
+        &self,
+        inputs: I,
+        parameters: impl IntoIterator<Item = (&'a str, &'a Buffer)>,
+    ) -> Result<O>
+    where
+        I: ModelInputValues<'a>,
+        O: ModelOutputValues,
+    {
+        let arguments = self.model.bind(inputs, parameters)?;
+        let outputs = self.executable.execute(arguments.as_slice())?;
+        self.model.decode_outputs(outputs)
+    }
+}
+
+impl<'parameters> BoundModel<'_, 'parameters> {
+    /// Execute with changing inputs while reusing validated parameter bindings.
+    pub fn run<'inputs, I, O>(&self, inputs: I) -> Result<O>
+    where
+        'parameters: 'inputs,
+        I: ModelInputValues<'inputs>,
+        O: ModelOutputValues,
+    {
+        let inputs = inputs.into_values();
+        let arguments = self.model.bind_ordered(&inputs, &self.parameters)?;
+        let outputs = self.executable.execute(arguments.as_slice())?;
+        self.model.decode_outputs(outputs)
+    }
+
+    pub fn executable(&self) -> &Executable {
+        &self.executable
     }
 }
 
@@ -337,8 +403,16 @@ impl AppliedModel {
         Ok(self.state_graph.prepare(&self.outputs)?)
     }
 
-    /// Compile this immutable model snapshot through the caller's cache-aware compiler.
-    pub fn compile(&self, compiler: &mut Compiler) -> Result<Arc<Executable>> {
+    /// Compile a stateless model while retaining its typed model ABI.
+    pub fn compile(&self, compiler: &mut Compiler) -> Result<CompiledModel<'_>> {
+        Ok(CompiledModel {
+            model: self,
+            executable: self.compile_executable(compiler)?,
+        })
+    }
+
+    /// Compile to a low-level executable without retaining model binding metadata.
+    pub fn compile_executable(&self, compiler: &mut Compiler) -> Result<Arc<Executable>> {
         ensure!(
             !self.is_stateful(),
             InvalidDefinitionSnafu {

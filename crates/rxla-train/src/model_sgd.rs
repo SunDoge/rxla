@@ -445,7 +445,7 @@ mod tests {
         let step = prepare_model_sgd(&model, &selection, &model.outputs()[0], 0.1).unwrap();
         let output_plan = step.outputs_with(&[]);
         let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-        let loss_executable = model.compile(&mut compiler).unwrap();
+        let loss_model = model.compile(&mut compiler).unwrap();
         let step_executable = output_plan.compile(&model, &mut compiler).unwrap();
         let input = client.buffer(&[1, 1], &[2.0]).unwrap();
         let target = client.buffer(&[1, 1], &[4.0]).unwrap();
@@ -454,19 +454,15 @@ mod tests {
             client.buffer(&[1, 1], &[0.0]).unwrap(),
         )]);
 
-        let initial_arguments = model
-            .bind(
+        let initial_loss: Buffer = loss_model
+            .run(
                 [&input, &target],
                 parameters
                     .iter()
                     .map(|(name, value)| (name.as_str(), value)),
             )
             .unwrap();
-        let initial_loss = loss_executable
-            .execute(initial_arguments.as_slice())
-            .unwrap()[0]
-            .to_vec::<f32>()
-            .unwrap()[0];
+        let initial_loss = initial_loss.to_vec::<f32>().unwrap()[0];
 
         for _ in 0..8 {
             let arguments = model
@@ -486,17 +482,15 @@ mod tests {
             );
         }
 
-        let final_arguments = model
-            .bind(
+        let final_loss: Buffer = loss_model
+            .run(
                 [&input, &target],
                 parameters
                     .iter()
                     .map(|(name, value)| (name.as_str(), value)),
             )
             .unwrap();
-        let final_loss = loss_executable.execute(final_arguments.as_slice()).unwrap()[0]
-            .to_vec::<f32>()
-            .unwrap()[0];
+        let final_loss = final_loss.to_vec::<f32>().unwrap()[0];
         assert!(
             final_loss < initial_loss * 1e-6,
             "{initial_loss} -> {final_loss}"

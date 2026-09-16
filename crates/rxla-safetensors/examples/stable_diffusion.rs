@@ -417,7 +417,7 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
             .inputs(ModelInput::new([2, 77]).with_dtype(rxla_core::DType::I32));
     let (clip_schema, clip_model) = clip_model.trace()?;
     let mut clip_checkpoint = SafeTensors::open(args.model.join("text_encoder/model.safetensors"))?;
-    let clip_executable = clip_model.compile(&mut compiler)?;
+    let clip_executable = clip_model.compile_executable(&mut compiler)?;
     let clip_weights = clip_checkpoint.load_parameter_schema(&client, &clip_schema)?;
     let clip = Stage {
         model: clip_model,
@@ -466,7 +466,7 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
     let (denoise_schema, denoise_model) = denoise_model.trace()?;
     let mut unet_checkpoint =
         SafeTensors::open(args.model.join("unet/diffusion_pytorch_model.safetensors"))?;
-    let denoise_executable = denoise_model.compile(&mut compiler)?;
+    let denoise_executable = denoise_model.compile_executable(&mut compiler)?;
     let denoise_weights = unet_checkpoint.load_parameter_schema(&client, &denoise_schema)?;
     let denoise = Stage {
         model: denoise_model,
@@ -485,7 +485,7 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
     let (vae_schema, vae_model) = vae_model.trace()?;
     let mut vae_checkpoint =
         SafeTensors::open(args.model.join("vae/diffusion_pytorch_model.safetensors"))?;
-    let vae_executable = vae_model.compile(&mut compiler)?;
+    let vae_executable = vae_model.compile_executable(&mut compiler)?;
     let vae_weights = match args.preset {
         ModelPreset::Tiny => vae_checkpoint.load_parameter_schema(&client, &vae_schema)?,
         ModelPreset::SdV1 => vae_checkpoint.load_parameter_schema_with_mapping(

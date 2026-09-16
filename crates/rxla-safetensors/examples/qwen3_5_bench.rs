@@ -53,26 +53,28 @@ fn run(args: Args) -> Result<()> {
     let load_ms = load_start.elapsed().as_secs_f64() * 1e3;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let compile_start = Instant::now();
-    let executable = applied.compile(&mut compiler)?;
+    let compiled = applied.compile(&mut compiler)?;
     let compile_ms = compile_start.elapsed().as_secs_f64() * 1e3;
     let token_values = (0..args.sequence)
         .map(|index| 1000 + index as i32)
         .collect::<Vec<_>>();
     let tokens = client.buffer(&[1, args.sequence], &token_values)?;
-    let arguments = applied.bind(&tokens, weights.bindings())?;
+    let runner = compiled.bind_parameters(weights.bindings())?;
     for _ in 0..args.warmup {
-        executable.execute(arguments.as_slice())?;
+        let _: Buffer = runner.run(&tokens)?;
     }
     let mut samples = Vec::with_capacity(args.iterations);
-    let mut output = Vec::new();
+    let mut output = None;
     for _ in 0..args.iterations {
         let start = Instant::now();
-        output = executable.execute(arguments.as_slice())?;
+        output = Some(runner.run::<_, Buffer>(&tokens)?);
         samples.push(start.elapsed().as_secs_f64() * 1e3);
     }
     samples.sort_by(f64::total_cmp);
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-    let logits = applied.decode_outputs::<Buffer>(output)?.to_vec::<f32>()?;
+    let logits = output
+        .expect("at least one measured iteration")
+        .to_vec::<f32>()?;
     let checksum = logits.iter().map(|&value| f64::from(value)).sum::<f64>();
     if let Some(path) = args.output {
         let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);

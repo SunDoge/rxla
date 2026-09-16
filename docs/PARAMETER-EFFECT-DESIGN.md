@@ -100,8 +100,10 @@ typed result such as `DenoiserOutputs` without forcing compiler internals to
 understand application containers or making the model return an unlabelled
 `Vec<Tensor>`.
 
-After execution, `AppliedModel::decode_outputs` checks the concrete buffer count
-against that model and reconstructs a `ModelOutputValues` target. Built-in
+`AppliedModel::compile` retains this metadata in a `CompiledModel`. Its `run`
+method checks the concrete buffer count and reconstructs a `ModelOutputValues`
+target; `bind_parameters` returns a reusable runner that avoids validating and
+ordering unchanged weights on every call. Built-in
 targets include `Buffer`, tuples, arrays and `Vec<Buffer>`; a domain result can
 implement the trait as well. A dynamic vector consumes all remaining buffers,
 so it belongs at the top level or at the final position of a custom decoder.

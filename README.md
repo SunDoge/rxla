@@ -56,7 +56,7 @@ use rxla::{
 };
 
 fn apply(cx: &mut Cx, image: Tensor, label: Tensor) -> Result<(Tensor, Tensor)> {
-    let logits = cx.named("head")?.linear(10).apply(&image)?;
+    let logits = cx.linear("head", &image, 10)?;
     let loss = logits.cross_entropy_with_indices(&label, 1)?.mean(&[0], false)?;
     Ok((loss, logits))
 }
@@ -73,9 +73,9 @@ assert_eq!(model.outputs().len(), 2);
 ```
 
 The same handler mechanism supports one input, two through sixteen independent
-arguments, arrays, vectors, and application-defined structs. Runtime buffers
-use the symmetric `ModelInputValues` contract, and ordinary execution results
-can be reconstructed through `AppliedModel::decode_outputs`. See the
+arguments, arrays, vectors, and application-defined structs. `compile()` keeps
+that model ABI attached to the executable, so `CompiledModel::run` validates
+runtime inputs and named parameters and reconstructs typed outputs. See the
 [parameter-effect design](docs/PARAMETER-EFFECT-DESIGN.md) for the effect and
 ABI invariants.
 
