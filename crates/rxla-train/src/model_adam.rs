@@ -427,9 +427,7 @@ mod tests {
     #[test]
     fn resident_adam_hides_parameter_replacements_from_the_result_abi() {
         let definition = Model::new(linear_loss);
-        let (selection, mut model) = definition
-            .trace_resident(|schema| schema.select_under("linear"))
-            .unwrap();
+        let (selection, mut model) = definition.trace_resident_under("linear").unwrap();
         let loss = model.outputs()[0].clone();
 
         apply_model_adam(&mut model, &selection, &loss, AdamOptions::default()).unwrap();
@@ -518,9 +516,7 @@ mod tests {
         }
         .unwrap();
         let definition = Model::new(regression_loss);
-        let (selection, mut model) = definition
-            .trace_resident(|schema| schema.select_under("linear"))
-            .unwrap();
+        let (selection, mut model) = definition.trace_resident_under("linear").unwrap();
         let schema = model.schema().clone();
         let loss = model.outputs()[0].clone();
         apply_model_adam(

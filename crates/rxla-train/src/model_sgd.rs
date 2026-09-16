@@ -365,9 +365,7 @@ mod tests {
     #[test]
     fn resident_sgd_hides_parameter_replacements_from_the_result_abi() {
         let definition = Model::new(linear_loss);
-        let (selection, mut model) = definition
-            .trace_resident(|schema| schema.select_under("linear"))
-            .unwrap();
+        let (selection, mut model) = definition.trace_resident_under("linear").unwrap();
         let loss = model.outputs()[0].clone();
 
         apply_model_sgd(&mut model, &selection, &loss, 0.1).unwrap();
@@ -517,9 +515,7 @@ mod tests {
         }
         .expect("load CPU plugin");
         let definition = Model::new(regression_loss);
-        let (selection, mut model) = definition
-            .trace_resident(|schema| schema.select_under("linear"))
-            .unwrap();
+        let (selection, mut model) = definition.trace_resident_under("linear").unwrap();
         let schema = model.schema().clone();
         let slot = model.resident_parameters().next().unwrap().2.clone();
         assert_eq!(

@@ -89,7 +89,7 @@ impl ParameterSelection {
     }
 }
 
-fn path_is_under(path: &str, scope: &str) -> bool {
+pub(crate) fn path_is_under(path: &str, scope: &str) -> bool {
     scope.is_empty()
         || path == scope
         || path

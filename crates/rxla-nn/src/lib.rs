@@ -176,6 +176,13 @@ where
         Ok((selection, applied))
     }
 
+    /// Trace once with parameters under one lexical scope stored as resident state.
+    pub fn trace_resident_under(&self, scope: &str) -> Result<(ParameterSelection, AppliedModel)> {
+        let applied = trace_once_resident_under(scope, |cx| (self.apply)(cx))?;
+        let selection = applied.schema().select_under(scope);
+        Ok((selection, applied))
+    }
+
     /// Discover the schema and trace a caller-selected resident parameter set.
     ///
     /// The owned selection is returned for later transforms such as SGD or
@@ -232,6 +239,19 @@ where
         Ok((selection, applied))
     }
 
+    /// Trace typed inputs once with one lexical parameter scope resident.
+    pub fn trace_resident_under<Marker>(
+        &self,
+        scope: &str,
+    ) -> Result<(ParameterSelection, AppliedModel)>
+    where
+        F: ModelHandler<I, Marker>,
+    {
+        let applied = trace_once_resident_under(scope, |cx| self.apply.invoke(cx, &self.inputs))?;
+        let selection = applied.schema().select_under(scope);
+        Ok((selection, applied))
+    }
+
     /// Discover typed inputs and trace a caller-selected resident parameter set.
     pub fn trace_resident<Marker>(
         &self,
@@ -277,7 +297,7 @@ enum ParamMode {
     Init {
         schema: ParamSchema,
         values: BTreeMap<String, Tensor>,
-        resident_all: bool,
+        residency: InitResidency,
     },
     Apply {
         schema: ParamSchema,
@@ -285,6 +305,22 @@ enum ParamMode {
         read: HashSet<String>,
         resident: HashSet<ParameterId>,
     },
+}
+
+enum InitResidency {
+    None,
+    All,
+    Under(String),
+}
+
+impl InitResidency {
+    fn contains(&self, path: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::All => true,
+            Self::Under(scope) => selection::path_is_under(path, scope),
+        }
+    }
 }
 
 /// The explicit interpreter for scoped parameter effects.
@@ -361,14 +397,18 @@ pub struct Rng<'a> {
 
 impl Cx {
     fn init() -> Self {
-        Self::init_with_residency(false)
+        Self::init_with_residency(InitResidency::None)
     }
 
     fn init_resident_all() -> Self {
-        Self::init_with_residency(true)
+        Self::init_with_residency(InitResidency::All)
     }
 
-    fn init_with_residency(resident_all: bool) -> Self {
+    fn init_resident_under(scope: &str) -> Self {
+        Self::init_with_residency(InitResidency::Under(scope.to_owned()))
+    }
+
+    fn init_with_residency(residency: InitResidency) -> Self {
         Self {
             graph: StateGraph::default(),
             scope: Vec::new(),
@@ -377,7 +417,7 @@ impl Cx {
             mode: ParamMode::Init {
                 schema: ParamSchema::default(),
                 values: BTreeMap::new(),
-                resident_all,
+                residency,
             },
             states: BTreeMap::new(),
             rngs: BTreeMap::new(),
@@ -458,7 +498,7 @@ impl Cx {
             ParamMode::Init {
                 schema,
                 values,
-                resident_all,
+                residency,
             } => {
                 if let Some(existing) = schema.get(&path) {
                     ensure!(existing == &requested, IncompatibleParameterSnafu { path });
@@ -467,7 +507,7 @@ impl Cx {
                         .expect("schema and parameter value are inserted together")
                         .clone());
                 }
-                let value = if *resident_all {
+                let value = if residency.contains(&path) {
                     let (value, slot) = resident_parameter_tensor(graph, &path, shape, dtype)?;
                     resident_parameters.insert(path.clone(), slot);
                     value
@@ -946,6 +986,13 @@ fn trace_once_resident_all<T: ModelOutputs>(
     trace_once_with(Cx::init_resident_all(), body)
 }
 
+fn trace_once_resident_under<T: ModelOutputs>(
+    scope: &str,
+    body: impl FnOnce(&mut Cx) -> Result<T>,
+) -> Result<AppliedModel> {
+    trace_once_with(Cx::init_resident_under(scope), body)
+}
+
 fn trace_once_with<T: ModelOutputs>(
     mut cx: Cx,
     body: impl FnOnce(&mut Cx) -> Result<T>,
@@ -1334,21 +1381,23 @@ mod tests {
 
     #[test]
     fn selected_parameters_can_be_traced_as_resident_state() {
+        let calls = Cell::new(0);
         let definition = Model::new(|cx: &mut Cx, input: Tensor| {
-            cx.layer("head")?.linear(2).bias(false).apply(&input)
+            calls.set(calls.get() + 1);
+            let body = cx.layer("body")?.linear(3).bias(false).apply(&input)?;
+            cx.layer("head")?.linear(2).bias(false).apply(&body)
         })
         .inputs(ModelInput::new([1, 3]));
-        let (selection, applied) = definition
-            .trace_resident(|schema| schema.select_under("head"))
-            .unwrap();
+        let (selection, applied) = definition.trace_resident_under("head").unwrap();
         let schema = applied.schema();
 
+        assert_eq!(calls.get(), 1);
         assert!(applied.is_stateful());
         assert_eq!(selection.len(), 1);
-        assert_eq!(schema.parameters().len(), 1);
+        assert_eq!(schema.parameters().len(), 2);
         assert_eq!(applied.resident_parameters().count(), 1);
         let prepared = applied.prepare_stateful().unwrap();
-        assert_eq!(prepared.input_indices(), [0]);
+        assert_eq!(prepared.input_indices(), [0, 1]);
         let (_, spec, slot) = applied.resident_parameters().next().unwrap();
         assert_eq!(spec.path(), "head.weight");
         assert_eq!(prepared.state_type(slot).unwrap(), (DType::F32, vec![2, 3]));
@@ -1358,10 +1407,7 @@ mod tests {
                 .param_dtype("weight", &[2], DType::U8)?
                 .cast(DType::F32)?)
         });
-        let schema = quantized.init().unwrap();
-        let applied = quantized
-            .apply_resident(&schema, &schema.select_all())
-            .unwrap();
+        let (_, applied) = quantized.trace_resident_all().unwrap();
         let prepared = applied.prepare_stateful().unwrap();
         let (_, _, slot) = applied.resident_parameters().next().unwrap();
         assert_eq!(prepared.state_type(slot).unwrap(), (DType::U8, vec![2]));

@@ -199,17 +199,18 @@ discovers the schema, selects storage and traces the model in one operation:
 #     Ok(cx.layer("linear")?.linear(1).bias(false).apply(&x)?.sum(&[0, 1], false)?)
 # }
 let (trainable, mut model) = Model::new(loss)
-    .trace_resident(|schema| schema.select_under("linear"))?;
+    .trace_resident_under("linear")?;
 let loss = model.outputs()[0].clone();
 rxla_train::apply_model_sgd(&mut model, &trainable, &loss, 0.01)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-When every parameter is resident, `trace_resident_all()` avoids both the
-selection closure and the schema-discovery replay. It declares resident slots
-during the single model-body invocation and returns the all-parameter selection
-with the applied model. Arbitrary schema-dependent selections continue to use
-`trace_resident` and its explicit two-phase interpretation.
+`trace_resident_all()` and `trace_resident_under("adapter")` avoid both the
+selection closure and the schema-discovery replay for the two common policies.
+They declare resident slots during the single model-body invocation and return
+the matching selection with the applied model. Arbitrary schema-dependent
+selections continue to use `trace_resident` and its explicit two-phase
+interpretation.
 
 The selected `ParameterSelection` is interpreted as session-owned state.
 Those parameters disappear from the visible execution ABI and must be
