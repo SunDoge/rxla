@@ -57,6 +57,11 @@ impl TransformState {
     pub fn value(&self) -> &Tensor {
         &self.value
     }
+
+    /// Resident slot initialized and inspected by a compiled model session.
+    pub fn slot(&self) -> &StateSlot {
+        &self.slot
+    }
 }
 
 impl<'a> ModelArguments<'a> {
@@ -136,6 +141,22 @@ impl AppliedModel {
             })
     }
 
+    /// Validate that a selection belongs to this trace and every member uses
+    /// resident storage. Performs no graph mutation.
+    pub fn validate_resident_parameters(&self, selection: &ParameterSelection<'_>) -> Result<()> {
+        ensure!(
+            selection.schema() == &self.schema,
+            SelectionSchemaMismatchSnafu
+        );
+        for (id, spec) in selection.parameters() {
+            ensure!(
+                self.resident_parameters[id.index()].is_some(),
+                ParameterNotResidentSnafu { path: spec.path() }
+            );
+        }
+        Ok(())
+    }
+
     pub fn is_stateful(&self) -> bool {
         !self.states.is_empty() || self.resident_parameters.iter().any(Option::is_some)
     }
@@ -200,10 +221,7 @@ impl AppliedModel {
         selection: &ParameterSelection<'_>,
         values: &[Tensor],
     ) -> Result<()> {
-        ensure!(
-            selection.schema() == &self.schema,
-            SelectionSchemaMismatchSnafu
-        );
+        self.validate_resident_parameters(selection)?;
         ensure!(
             selection.len() == values.len(),
             ParameterUpdateCountSnafu {
@@ -214,11 +232,11 @@ impl AppliedModel {
         let updates = selection
             .parameters()
             .zip(values)
-            .map(|((id, spec), value)| {
-                self.resident_parameters[id.index()]
+            .map(|((id, _), value)| {
+                let slot = self.resident_parameters[id.index()]
                     .as_ref()
-                    .map(|slot| (slot, value))
-                    .with_context(|| ParameterNotResidentSnafu { path: spec.path() })
+                    .expect("resident selection validated");
+                Ok((slot, value))
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(self.state_graph.write_many(&updates)?)

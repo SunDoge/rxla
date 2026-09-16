@@ -170,13 +170,12 @@ F32, BF16 and U8 storage preserve the same symbolic semantics as input-backed
 parameters, so frozen and quantized inference weights can use this policy too.
 
 Functional SGD and Adam continue to support input-backed parameters and expose
-selected replacements as visible optimizer results. `apply_model_sgd` is the
-resident alternative: it records each F32 replacement into the selected
-parameter's state slot, so the ordinary model outputs remain the entire visible
-result ABI. One session execution then atomically commits parameters, model
-state and RNG without host-side handle replacement. Adam has resident moments
-but has not yet adopted resident parameter writes, so its parameter replacements
-remain visible.
+selected replacements as visible optimizer results. `apply_model_sgd` and
+`apply_model_adam` are the resident alternatives: they record each F32
+replacement into the selected parameter's state slot, so the ordinary model
+outputs remain the entire visible result ABI. One session execution then
+atomically commits parameters, model state, RNG and—under Adam—moments plus the
+step counter, without host-side handle replacement.
 
 `Cx` intentionally exposes only effect primitives and `named`. The layer
 vocabulary lives on the temporary named namespace, so adding layers does not

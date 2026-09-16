@@ -1,7 +1,7 @@
 //! Minimal functional SGD for effect-based models.
 
 use rxla_core::{
-    Buffer, Compiler, Executable, LoweredProgram, PreparedStateGraph, StateProgram, Tensor,
+    Buffer, Compiler, DType, Executable, LoweredProgram, PreparedStateGraph, StateProgram, Tensor,
 };
 use rxla_nn::{AppliedModel, ParameterId, ParameterSelection};
 use snafu::{Snafu, ensure};
@@ -17,6 +17,8 @@ pub enum ModelSgdError {
     InvalidLoss,
     #[snafu(display("model SGD learning rate must be finite and nonnegative"))]
     InvalidLearningRate,
+    #[snafu(display("model SGD can only update F32 parameter {path:?}, found {dtype:?}"))]
+    UnsupportedParameterDType { path: String, dtype: DType },
     #[snafu(display(
         "model SGD execution returned {actual} buffers, expected {expected} ({visible} visible and {updates} updates)"
     ))]
@@ -256,6 +258,16 @@ pub fn apply_model_sgd(
     loss: &Tensor,
     learning_rate: f32,
 ) -> ModelSgdResult<()> {
+    model.validate_resident_parameters(selection)?;
+    for (_, parameter) in selection.parameters() {
+        ensure!(
+            parameter.dtype() == DType::F32,
+            UnsupportedParameterDTypeSnafu {
+                path: parameter.path(),
+                dtype: parameter.dtype(),
+            }
+        );
+    }
     let step = prepare_model_sgd(model, selection, loss, learning_rate)?;
     let values = step.outputs();
     model.write_resident_parameters(selection, &values)?;

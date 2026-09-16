@@ -33,6 +33,8 @@ pub enum ModelAdamError {
     InvalidLoss,
     #[snafu(display("invalid Adam hyperparameters"))]
     InvalidOptions,
+    #[snafu(display("model Adam can only update F32 parameter {path:?}, found {dtype:?}"))]
+    UnsupportedParameterDType { path: String, dtype: DType },
     #[snafu(display(
         "model Adam execution returned {actual} buffers, expected {expected} ({visible} visible and {updates} update buffers)"
     ))]
@@ -311,6 +313,33 @@ pub fn prepare_model_adam(
     })
 }
 
+/// Add Adam parameter writes to an already-resident model trace.
+///
+/// Parameters, moments, the step counter, model state and RNG are all hidden
+/// state roots committed by one session execution. Ordinary model outputs stay
+/// as the complete visible result ABI.
+pub fn apply_model_adam(
+    model: &mut AppliedModel,
+    selection: &ParameterSelection<'_>,
+    loss: &Tensor,
+    options: AdamOptions,
+) -> ModelAdamResult<()> {
+    model.validate_resident_parameters(selection)?;
+    for (_, parameter) in selection.parameters() {
+        ensure!(
+            parameter.dtype() == DType::F32,
+            UnsupportedParameterDTypeSnafu {
+                path: parameter.path(),
+                dtype: parameter.dtype(),
+            }
+        );
+    }
+    let step = prepare_model_adam(model, selection, loss, options)?;
+    let values = step.outputs();
+    model.write_resident_parameters(selection, &values)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +423,24 @@ mod tests {
     }
 
     #[test]
+    fn resident_adam_hides_parameter_replacements_from_the_result_abi() {
+        let definition = Model::new(linear_loss);
+        let schema = definition.init().unwrap();
+        let selection = schema.select_under("linear");
+        let mut model = definition.apply_resident(&schema, &selection).unwrap();
+        let loss = model.outputs()[0].clone();
+
+        apply_model_adam(&mut model, &selection, &loss, AdamOptions::default()).unwrap();
+
+        let prepared = model.prepare_stateful().unwrap();
+        assert!(prepared.output_spec(0).is_some());
+        assert!(prepared.output_spec(1).is_none());
+        assert_eq!(prepared.input_indices(), [0]);
+        assert_eq!(model.resident_parameters().count(), 1);
+        assert_eq!(model.states().count(), 3);
+    }
+
+    #[test]
     #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
     fn adam_executes_as_one_device_program() {
         fn regression_loss(cx: &mut Cx) -> Result<Tensor> {
@@ -451,5 +498,70 @@ mod tests {
 
         let actual = parameters["linear.weight"].to_vec::<f32>().unwrap()[0];
         assert!((actual - 2.0).abs() < 0.02, "weight = {actual}");
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
+    fn resident_adam_commits_parameters_and_optimizer_state_in_session() {
+        fn regression_loss(cx: &mut Cx) -> Result<Tensor> {
+            let input = cx.input(&[1, 1])?;
+            let target = cx.input(&[1, 1])?;
+            let prediction = cx.named("linear")?.linear(1).bias(false).apply(&input)?;
+            Ok(prediction.sub(&target)?.square()?.sum(&[0, 1], false)?)
+        }
+
+        let client = unsafe {
+            Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
+        }
+        .unwrap();
+        let definition = Model::new(regression_loss);
+        let schema = definition.init().unwrap();
+        let selection = schema.select_under("linear");
+        let mut model = definition.apply_resident(&schema, &selection).unwrap();
+        let loss = model.outputs()[0].clone();
+        apply_model_adam(
+            &mut model,
+            &selection,
+            &loss,
+            AdamOptions {
+                learning_rate: 0.1,
+                ..AdamOptions::default()
+            },
+        )
+        .unwrap();
+        let step_slot = model
+            .states()
+            .find(|(path, _)| *path == "__optimizer.adam.step")
+            .unwrap()
+            .1
+            .clone();
+
+        let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+        let program = model.compile_stateful(&mut compiler).unwrap();
+        let mut session = model
+            .session(&program)
+            .parameter("linear.weight", client.buffer(&[1, 1], &[0.0]).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+        let input = client.buffer(&[1, 1], &[2.0]).unwrap();
+        let target = client.buffer(&[1, 1], &[4.0]).unwrap();
+
+        for _ in 0..100 {
+            let outputs = session.run(&[&input, &target]).unwrap();
+            assert_eq!(outputs.len(), 1);
+        }
+
+        let (_, _, parameter_slot) = model.resident_parameters().next().unwrap();
+        let actual = session
+            .state(parameter_slot)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap()[0];
+        assert!((actual - 2.0).abs() < 0.02, "weight = {actual}");
+        assert_eq!(
+            session.state(&step_slot).unwrap().to_vec::<f32>().unwrap(),
+            [100.0]
+        );
     }
 }
