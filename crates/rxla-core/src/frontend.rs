@@ -933,6 +933,18 @@ impl Runtime {
         program: &Program,
         inputs: &[&Tensor],
     ) -> Result<Vec<Tensor>> {
+        self.run_tensor_buffers_on(device, program, inputs)?
+            .into_iter()
+            .map(Tensor::materialized)
+            .collect()
+    }
+
+    fn run_tensor_buffers_on(
+        &mut self,
+        device: &Device,
+        program: &Program,
+        inputs: &[&Tensor],
+    ) -> Result<Vec<Buffer>> {
         program.validate_tensor_inputs(inputs)?;
         let client = self.client_on(device)?.clone();
         let buffers = inputs
@@ -946,10 +958,7 @@ impl Runtime {
                 .iter()
                 .map(|buffer| buffer.as_ref())
                 .collect::<Vec<_>>(),
-        )?
-        .into_iter()
-        .map(Tensor::materialized)
-        .collect()
+        )
     }
 
     /// Materialize one or more lazy expressions with a typed return shape.
@@ -1062,7 +1071,11 @@ impl Runtime {
             lowered,
             source,
         };
-        let values = self.run_tensors_on(device, &program, &inputs.iter().collect::<Vec<_>>())?;
+        let values = self
+            .run_tensor_buffers_on(device, &program, &inputs.iter().collect::<Vec<_>>())?
+            .into_iter()
+            .map(Tensor::materialized_detached)
+            .collect::<Result<Vec<_>>>()?;
         Tensor::materialize_all(&pending, &values)?;
         Ok(outputs.to_vec())
     }
@@ -1308,6 +1321,26 @@ mod tests {
                 actual: DType::I32,
             })
         ));
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+    fn lazy_eval_registers_only_the_materialized_root_input() {
+        let input = Tensor::from_slice([2], DType::F32, [1.0, 2.0]).unwrap();
+        let output = input.add_scalar(1.0).unwrap();
+        let graph = output.graph().clone();
+        assert_eq!(graph.0.lock().unwrap().parameter_count().unwrap(), 1);
+
+        // SAFETY: the test operator explicitly supplies a trusted plugin path.
+        let mut runtime =
+            unsafe { Runtime::load(std::env::var("PJRT_PLUGIN_PATH").expect("PJRT_PLUGIN_PATH")) }
+                .unwrap();
+        output.eval(&mut runtime).unwrap();
+
+        // One original input plus the detached materialized root. A temporary
+        // executor-result Tensor must not register a third graph parameter.
+        assert_eq!(graph.0.lock().unwrap().parameter_count().unwrap(), 2);
+        assert_eq!(output.to_vec::<f32>().unwrap(), [2.0, 3.0]);
     }
 
     #[test]
