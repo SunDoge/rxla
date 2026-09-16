@@ -14,3 +14,5 @@ mod model_sgd;
 pub use model_sgd::{
     ModelSgdError, ModelSgdResult, ModelSgdStep, ModelSgdUpdate, prepare_model_sgd,
 };
+mod pipeline;
+pub use pipeline::{BoundedPipeline, PipelineError, PipelineResult};

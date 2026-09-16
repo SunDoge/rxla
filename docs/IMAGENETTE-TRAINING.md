@@ -7,13 +7,13 @@ BatchNorm. The 160px stem uses 7x7 stride-two convolution followed by 3x3
 stride-two average pooling. This last detail differs from canonical ResNet-18's
 max pool because RXLA does not yet implement a max-pool VJP.
 
-The input path is a bounded three-stage pipeline. Rayon performs JPEG decode,
-resize, random crop, and collation; a dedicated CPU PJRT runtime performs
-horizontal flip and ImageNet normalization as an RXLA Tensor program; the main
-thread performs pinned uploads and CUDA training. Owned host batches cross
-capacity-two channels, providing backpressure without sharing PJRT handles
-between threads. Forward, backward, BatchNorm state transitions, and SGD execute
-as one compiled CUDA program.
+The input path uses the reusable `rxla_train::BoundedPipeline` to construct a
+bounded three-stage pipeline. Rayon performs JPEG decode, resize, random crop,
+and collation; a dedicated CPU PJRT runtime performs horizontal flip and
+ImageNet normalization as an RXLA Tensor program; the main thread performs
+pinned uploads and CUDA training. Owned host batches cross capacity-two
+channels, providing ordered backpressure. Forward, backward, BatchNorm state
+transitions, and SGD execute as one compiled CUDA program.
 
 ```bash
 cargo run -p rxla-train --release --example imagenette_train -- \
@@ -56,12 +56,12 @@ batch-16 and batch-64 runs use 100 steps, and batch 128 uses 50 steps:
 
 | Batch | Serialized | Pipelined | Speedup | Pipelined steady state |
 | ---: | ---: | ---: | ---: | ---: |
-| 16 | 433.9 images/s | 1,091.6 images/s | 2.52x | 1,193.6 images/s |
+| 16 | 433.9 images/s | 1,118.1 images/s | 2.58x | 1,199.9 images/s |
 | 64 | 707.3 images/s | 1,630.0 images/s | 2.30x | 1,710.9 images/s |
 | 128 | 759.3 images/s | 1,989.6 images/s | 2.62x | 2,176.0 images/s |
 
-At batch 16, steady-state input wait is 1.13 ms and upload is 0.46 ms,
-compared with 10.80 ms in CUDA execution. Accuracy is reduced on-device and one
+At batch 16, the reusable pipeline's steady-state input wait is 0.77 ms and
+upload is 0.51 ms, compared with 10.95 ms in CUDA execution. Accuracy is reduced on-device and one
 `[loss, correct_count]` buffer is downloaded instead of full logits and labels;
 host metric work falls from 2.35 ms to 0.98 ms. At batch 128 the GPU accounts for
 91.8% of the measured step, so the input pipeline is no longer the primary

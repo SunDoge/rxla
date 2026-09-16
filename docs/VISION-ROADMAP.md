@@ -63,6 +63,25 @@ Host-driven and IR-resident denoising loops should both be possible. The former
 supports development and dynamic policies; the latter can remove repeated host
 dispatch and synchronization when the schedule is compilable.
 
+The long-term scripting boundary is a declarative training and serving plan,
+not a per-operator foreign-function binding. Thin TypeScript/Deno and Python
+frontends may eventually compose model code, data sources, augmentation,
+optimizer steps, and scheduling policy into RXLA IR, while compiled Rust
+components own execution. The Rust runtime remains free to run input work,
+transfers, compilation, and devices in parallel; a scripting-language runtime
+must never become the per-batch executor.
+
+Data loading belongs to the overall program IR, but not directly to StableHLO.
+File reads, decoding, shuffling, prefetch, and transfer are typed host effects
+in an upper scheduling/data dialect. Pure tensor augmentation and model regions
+can then lower to StableHLO for CPU or accelerator execution. This separation
+preserves reproducible RNG and transformation opportunities without pretending
+that backend tensor IR is an I/O runtime. This boundary also makes the system
+agent-friendly: an agent can construct, inspect, transform, and launch a typed
+plan without generating resource-management or concurrency code. Scripting
+frontends are intentionally deferred until the Rust IR and execution semantics
+are stable.
+
 ## Backend priorities
 
 ### Layer 1: CUDA

@@ -8,11 +8,10 @@ use rxla_core::{
     Runtime, Tensor,
 };
 use rxla_nn::{AppliedModel, Cx, Model, ParamSchema, Result as NnResult};
-use rxla_train::{DataRng, prepare_model_sgd};
+use rxla_train::{BoundedPipeline, DataRng, PipelineResult, prepare_model_sgd};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
-use std::thread;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const CLASSES: i64 = 10;
@@ -415,35 +414,19 @@ fn prefetch_batches(
     batch_size: usize,
     rng: DataRng,
     cpu_client: Client,
-) -> (
-    mpsc::Receiver<Result<AugmentedHostBatch, String>>,
-    [thread::JoinHandle<()>; 2],
-) {
-    let (decoded_sender, decoded_receiver) = mpsc::sync_channel(2);
-    let decoder = thread::spawn(move || {
-        for step in 0..steps {
-            let batch = dataset
+) -> PipelineResult<BoundedPipeline<AugmentedHostBatch, String>> {
+    let decoded = BoundedPipeline::from_iter(
+        2,
+        (0..steps).map(move |step| {
+            dataset
                 .batch(step, batch_size, rng, true)
-                .map_err(|error| error.to_string());
-            if decoded_sender.send(batch).is_err() {
-                break;
-            }
-        }
-    });
-    let (augmented_sender, augmented_receiver) = mpsc::sync_channel(2);
-    let augmenter = thread::spawn(move || {
-        let mut cpu = Runtime::new(cpu_client);
-        for decoded in decoded_receiver {
-            let augmented = decoded.and_then(|batch| {
-                augment_host_batch(batch, batch_size as i64, &mut cpu)
-                    .map_err(|error| error.to_string())
-            });
-            if augmented_sender.send(augmented).is_err() {
-                break;
-            }
-        }
-    });
-    (augmented_receiver, [decoder, augmenter])
+                .map_err(|error| error.to_string())
+        }),
+    )?;
+    let mut cpu = Runtime::new(cpu_client);
+    decoded.map(2, move |batch| {
+        augment_host_batch(batch, batch_size as i64, &mut cpu).map_err(|error| error.to_string())
+    })
 }
 
 fn initialize_session<'a>(
@@ -507,19 +490,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_loss = 0.0;
     let mut phases = PhaseTimes::default();
     let profile_after = args.steps.min(10);
-    let (batches, pipeline_workers) = prefetch_batches(
+    let batches = prefetch_batches(
         Arc::clone(&train),
         args.steps,
         batch_size as usize,
         rng,
         cpu,
-    );
+    )?;
 
     for step in 0..args.steps {
         let phase = Instant::now();
-        let host = batches
-            .recv()
-            .map_err(|_| "input prefetch worker stopped")??;
+        let host = batches.recv().ok_or("input pipeline stopped early")??;
         let input_wait = phase.elapsed();
         let phase = Instant::now();
         let (images, labels) = upload_batch(host, batch_size, &gpu)?;
@@ -560,11 +541,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    for worker in pipeline_workers {
-        worker
-            .join()
-            .map_err(|_| "input pipeline worker panicked")?;
-    }
+    batches.finish()?;
     let seconds = started.elapsed().as_secs_f64();
     let trained = args.steps as f64 * batch_size as f64;
     println!(
