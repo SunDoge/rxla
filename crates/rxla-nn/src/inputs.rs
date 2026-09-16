@@ -1,6 +1,6 @@
 //! Typed model-input declarations.
 
-use crate::{Cx, Result, TraceOutputs};
+use crate::{Cx, ModelOutputs, Result};
 use rxla_core::{DType, Tensor};
 
 /// One tensor input specification for a [`crate::Model`].
@@ -50,7 +50,7 @@ pub trait ModelInputs {
 /// disambiguates function arities in the same way as web-framework handler
 /// traits and is normally inferred.
 pub trait ModelHandler<I, Marker> {
-    type Outputs: TraceOutputs;
+    type Outputs: ModelOutputs;
 
     fn invoke(&self, cx: &mut Cx, inputs: &I) -> Result<Self::Outputs>;
 }
@@ -59,7 +59,7 @@ impl<F, I, T> ModelHandler<I, fn(I) -> T> for F
 where
     I: ModelInputs,
     F: Fn(&mut Cx, I::Tensors) -> Result<T>,
-    T: TraceOutputs,
+    T: ModelOutputs,
 {
     type Outputs = T;
 
@@ -141,7 +141,7 @@ macro_rules! impl_tuple_handlers {
                 ModelHandler<($($name,)+), fn($($name),+) -> Output> for Func
             where
                 Func: Fn(&mut Cx, $($name::Tensors),+) -> Result<Output>,
-                Output: TraceOutputs,
+                Output: ModelOutputs,
             {
                 type Outputs = Output;
 
@@ -189,6 +189,17 @@ mod tests {
         labels: Tensor,
     }
 
+    struct Predictions {
+        logits: Tensor,
+        auxiliary: Tensor,
+    }
+
+    impl ModelOutputs for Predictions {
+        fn into_tensors(self) -> Vec<Tensor> {
+            vec![self.logits, self.auxiliary]
+        }
+    }
+
     impl ModelInputs for Batch {
         type Tensors = BatchTensors;
 
@@ -217,12 +228,22 @@ mod tests {
             .inputs(vec![ModelInput::new(vec![2]), ModelInput::new(vec![2])]);
         assert_eq!(vector.trace().unwrap().0.inputs().len(), 2);
 
-        let custom =
-            Model::new(|_: &mut Cx, batch: BatchTensors| Ok(batch.images.add(&batch.labels)?))
-                .inputs(Batch {
-                    images: ModelInput::new(vec![2]),
-                    labels: ModelInput::new(vec![2]),
-                });
-        assert_eq!(custom.trace().unwrap().0.inputs().len(), 2);
+        let custom = Model::new(|_: &mut Cx, batch: BatchTensors| {
+            Ok(Predictions {
+                logits: batch.images.add(&batch.labels)?,
+                auxiliary: batch.images,
+            })
+        })
+        .inputs(Batch {
+            images: ModelInput::new(vec![2]),
+            labels: ModelInput::new(vec![2]),
+        });
+        let (schema, applied) = custom.trace().unwrap();
+        assert_eq!(schema.inputs().len(), 2);
+        assert_eq!(applied.outputs().len(), 2);
+
+        let nested = Model::new(|_: &mut Cx, x: Tensor| Ok((x.clone(), [x.clone(), x])))
+            .inputs(ModelInput::new(vec![2]));
+        assert_eq!(nested.trace().unwrap().1.outputs().len(), 3);
     }
 }

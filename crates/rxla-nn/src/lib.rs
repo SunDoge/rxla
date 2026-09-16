@@ -126,7 +126,7 @@ impl<F> Model<F, NoModelInputs> {
 impl<F, T> Model<F, NoModelInputs>
 where
     F: Fn(&mut Cx) -> Result<T>,
-    T: TraceOutputs,
+    T: ModelOutputs,
 {
     /// Discover parameter effects and produce the executable model trace.
     ///
@@ -230,32 +230,76 @@ pub struct Rng<'a> {
     stream: &'a mut RngStream,
 }
 
-/// Values a model trace may return from [`apply`].
+/// Structured values a model `apply` function may return.
 ///
-/// A single [`Tensor`] is the common case; vectors and fixed arrays retain
-/// multi-output programs without forcing every single-output model to allocate
-/// or spell `vec![output]`.
-pub trait TraceOutputs {
-    fn into_outputs(self) -> Vec<Tensor>;
+/// Containers are flattened deterministically into the executable output ABI.
+/// Applications may implement this for domain structs to keep model signatures
+/// typed without exposing their storage structure to the compiler boundary.
+pub trait ModelOutputs {
+    fn into_tensors(self) -> Vec<Tensor>;
 }
 
-impl TraceOutputs for Tensor {
-    fn into_outputs(self) -> Vec<Tensor> {
+impl ModelOutputs for () {
+    fn into_tensors(self) -> Vec<Tensor> {
+        Vec::new()
+    }
+}
+
+impl ModelOutputs for Tensor {
+    fn into_tensors(self) -> Vec<Tensor> {
         vec![self]
     }
 }
 
-impl TraceOutputs for Vec<Tensor> {
-    fn into_outputs(self) -> Vec<Tensor> {
-        self
+impl<T: ModelOutputs> ModelOutputs for Vec<T> {
+    fn into_tensors(self) -> Vec<Tensor> {
+        self.into_iter()
+            .flat_map(ModelOutputs::into_tensors)
+            .collect()
     }
 }
 
-impl<const N: usize> TraceOutputs for [Tensor; N] {
-    fn into_outputs(self) -> Vec<Tensor> {
-        self.into()
+impl<T: ModelOutputs, const N: usize> ModelOutputs for [T; N] {
+    fn into_tensors(self) -> Vec<Tensor> {
+        self.into_iter()
+            .flat_map(ModelOutputs::into_tensors)
+            .collect()
     }
 }
+
+macro_rules! impl_tuple_outputs {
+    ($(($($name:ident),+)),+ $(,)?) => {
+        $(
+            impl<$($name: ModelOutputs),+> ModelOutputs for ($($name,)+) {
+                #[allow(non_snake_case)]
+                fn into_tensors(self) -> Vec<Tensor> {
+                    let ($($name,)+) = self;
+                    let mut outputs = Vec::new();
+                    $(outputs.extend($name.into_tensors());)+
+                    outputs
+                }
+            }
+        )+
+    };
+}
+
+impl_tuple_outputs!(
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H),
+    (A, B, C, D, E, F, G, H, I),
+    (A, B, C, D, E, F, G, H, I, J),
+    (A, B, C, D, E, F, G, H, I, J, K),
+    (A, B, C, D, E, F, G, H, I, J, K, L),
+    (A, B, C, D, E, F, G, H, I, J, K, L, M),
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N),
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O),
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P),
+);
 
 impl Cx {
     fn init() -> Self {
@@ -724,12 +768,12 @@ pub fn init<T>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ParamSchema, 
 }
 
 /// Interpret parameter effects as reads from `schema` and retain traced outputs.
-pub fn apply<T: TraceOutputs>(
+pub fn apply<T: ModelOutputs>(
     schema: &ParamSchema,
     body: impl FnOnce(&mut Cx) -> Result<T>,
 ) -> Result<AppliedModel> {
     let mut cx = Cx::apply(schema.clone());
-    let outputs = body(&mut cx)?.into_outputs();
+    let outputs = body(&mut cx)?.into_tensors();
     cx.finish_rngs()?;
     cx.finish_apply()?;
     let parameters = cx.parameter_tensors();
@@ -831,14 +875,14 @@ mod tests {
         let (schema, _) = init(|cx| cx.param("weight", &[2, 3])).unwrap();
         let changed = match apply(&schema, |cx| {
             cx.param("weight", &[3, 2])?;
-            Ok(vec![])
+            Ok(())
         }) {
             Ok(_) => panic!("changed parameter shape unexpectedly applied"),
             Err(error) => error,
         };
         assert!(matches!(changed, Error::IncompatibleParameter { .. }));
 
-        let missing = match apply(&schema, |_cx| Ok(vec![])) {
+        let missing = match apply(&schema, |_cx| Ok(())) {
             Ok(_) => panic!("missing parameter effect unexpectedly applied"),
             Err(error) => error,
         };

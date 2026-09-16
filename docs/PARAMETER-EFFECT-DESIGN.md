@@ -93,6 +93,13 @@ grouping in Rust's type system without arity-specific model classes or a string
 map. Calling `cx.input` inside a zero-input `Model` remains available for
 low-level or dynamically assembled definitions.
 
+Outputs follow the symmetric `ModelOutputs` contract. A tensor, nested tuples,
+arrays and vectors flatten into a deterministic executable ABI; domain structs
+can implement the trait directly. Consequently an `apply` function can expose a
+typed result such as `DenoiserOutputs` without forcing compiler internals to
+understand application containers or making the model return an unlabelled
+`Vec<Tensor>`.
+
 Trainability belongs to a particular transformation, not permanently to a
 parameter declaration. The immutable schema provides typed parameter identities
 and deterministic, scope-based selections instead:
