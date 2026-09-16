@@ -1,8 +1,8 @@
 //! Ordered parameter selection for partial differentiation and updates.
 
-use super::{ParamSchema, ParameterSpec};
+use super::{ModelSchema, ParameterSpec};
 
-/// Stable parameter identity within one immutable [`ParamSchema`].
+/// Stable parameter identity within one immutable [`ModelSchema`].
 ///
 /// The newtype prevents parameter indices from being confused with model input
 /// or runtime ABI indices. It deliberately does not claim identity across two
@@ -27,12 +27,12 @@ impl ParameterId {
 /// from the current selection.
 #[derive(Clone, Debug)]
 pub struct ParameterSelection {
-    schema: ParamSchema,
+    schema: ModelSchema,
     ids: Vec<ParameterId>,
 }
 
 impl ParameterSelection {
-    pub(crate) fn all(schema: &ParamSchema) -> Self {
+    pub(crate) fn all(schema: &ModelSchema) -> Self {
         Self {
             schema: schema.clone(),
             ids: (0..schema.parameters().len())
@@ -84,7 +84,7 @@ impl ParameterSelection {
         self.ids.binary_search(&id).is_ok()
     }
 
-    pub(crate) fn schema(&self) -> &ParamSchema {
+    pub(crate) fn schema(&self) -> &ModelSchema {
         &self.schema
     }
 }

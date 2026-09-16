@@ -8,7 +8,7 @@ observations, not general backend performance claims.
 
 On September 15, 2026 the complete tiny Stable Diffusion example was migrated
 from parameter-owning modules to the effect-based `init`/`apply` API. CLIP, UNet
-and VAE parameters are declared at use sites, loaded by `ParamSchema` path, and
+and VAE parameters are declared at use sites, loaded by `ModelSchema` path, and
 compiled from Pliron-derived StableHLO. PNDM history remains in device buffers
 between executions. No legacy model module or stateful parameter session is
 constructed.

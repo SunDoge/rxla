@@ -2,7 +2,10 @@ use super::*;
 use rxla_core::{Conv2dOptions, RotaryLayout};
 
 fn projection(cx: &mut Cx, name: &str, input: &Tensor, width: i64, group: i64) -> Result<Tensor> {
-    cx.scope(name)?.quantized_linear(width, group).apply(input)
+    Ok(cx
+        .scope(name)?
+        .quantized_linear(width, group)
+        .apply(input)?)
 }
 
 fn partial_rope(input: &Tensor, angles: &Tensor, width: i64) -> Result<Tensor> {

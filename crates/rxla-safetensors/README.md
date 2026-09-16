@@ -74,7 +74,7 @@ Linear while the bias remains unchanged.
 
 ## Parameter-effect models
 
-New IR-first models use `ParamSchema` rather than module-owned parameter
+New IR-first models use `ModelSchema` rather than module-owned parameter
 handles. `load_parameter_schema` validates every schema path, shape and storage
 dtype before any payload is read or uploaded. Its default checkpoint mapping is
 path-to-identical-path; use `load_parameter_schema_with_mapping` for a renamed

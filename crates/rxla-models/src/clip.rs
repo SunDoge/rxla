@@ -50,8 +50,8 @@ impl ClipTextConfig {
             || !self.epsilon.is_finite()
             || self.epsilon <= 0.0
         {
-            return Err(Error::InvalidDefinition {
-                message: "invalid CLIP text configuration".into(),
+            return Err(Error::InvalidModel {
+                reason: "invalid CLIP text configuration",
             });
         }
         Ok(())
@@ -60,13 +60,13 @@ impl ClipTextConfig {
 
 fn attention(cx: &mut Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> Result<Tensor> {
     let [batch, length, width] = input.shape() else {
-        return Err(Error::InvalidDefinition {
-            message: "CLIP attention expects [batch, sequence, width]".into(),
+        return Err(Error::InvalidModel {
+            reason: "CLIP attention expects [batch, sequence, width]",
         });
     };
     if heads <= 0 || width % heads != 0 {
-        return Err(Error::InvalidDefinition {
-            message: "CLIP attention heads must divide width".into(),
+        return Err(Error::InvalidModel {
+            reason: "CLIP attention heads must divide width",
         });
     }
     let head_dim = width / heads;
@@ -84,7 +84,7 @@ fn attention(cx: &mut Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> R
         .scaled_dot_product_attention(&k, &v, Some(causal_bias), None)?
         .transpose(&[0, 2, 1, 3])?
         .reshape(&[*batch, *length, *width])?;
-    cx.scope("out_proj")?.linear(*width).apply(&hidden)
+    Ok(cx.scope("out_proj")?.linear(*width).apply(&hidden)?)
 }
 
 fn quick_gelu(input: &Tensor) -> Result<Tensor> {
@@ -134,13 +134,13 @@ pub fn clip_text_encoder(
 ) -> Result<Tensor> {
     config.validate()?;
     let [_, length] = token_ids.shape() else {
-        return Err(Error::InvalidDefinition {
-            message: "CLIP token IDs must have shape [batch, sequence]".into(),
+        return Err(Error::InvalidModel {
+            reason: "CLIP token IDs must have shape [batch, sequence]",
         });
     };
     if token_ids.dtype() != DType::I32 || *length <= 0 || *length > config.max_positions {
-        return Err(Error::InvalidDefinition {
-            message: "CLIP token IDs or sequence length are invalid".into(),
+        return Err(Error::InvalidModel {
+            reason: "CLIP token IDs or sequence length are invalid",
         });
     }
     let positions = cx.iota_i32(token_ids.shape(), 1)?;
@@ -172,11 +172,12 @@ pub fn clip_text_encoder(
             hidden = encoder_layer(&mut scope, &hidden, &causal_bias, config)?;
         }
     }
-    cx.scope("text_model")?
+    Ok(cx
+        .scope("text_model")?
         .scope("final_layer_norm")?
         .layer_norm(1)
         .epsilon(config.epsilon)
-        .apply(&hidden)
+        .apply(&hidden)?)
 }
 
 #[cfg(test)]

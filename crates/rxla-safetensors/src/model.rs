@@ -1,7 +1,7 @@
 //! SafeTensors loading for parameter-effect model schemas.
 
 use super::*;
-use rxla_nn::{CompiledModelSessionBuilder, ParamSchema};
+use rxla_nn::{CompiledModelSessionBuilder, ModelSchema};
 use std::collections::HashMap;
 
 /// Weight buffers keyed by the stable paths in a parameter-effect schema.
@@ -42,7 +42,7 @@ impl<R: Read + Seek> SafeTensors<R> {
     pub fn load_parameter_schema(
         &mut self,
         client: &Client,
-        schema: &ParamSchema,
+        schema: &ModelSchema,
     ) -> Result<SchemaBuffers> {
         let mapping = schema
             .parameters()
@@ -58,7 +58,7 @@ impl<R: Read + Seek> SafeTensors<R> {
     pub fn load_parameter_schema_with_mapping(
         &mut self,
         client: &Client,
-        schema: &ParamSchema,
+        schema: &ModelSchema,
         mapping: &HashMap<String, String>,
     ) -> Result<SchemaBuffers> {
         let mut sources = Vec::with_capacity(schema.parameters().len());

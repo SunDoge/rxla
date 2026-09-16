@@ -129,32 +129,41 @@ impl<'a, I: ModelInputValues<'a>> ModelInputValues<'a> for Vec<I> {
 /// traits and is normally inferred.
 pub trait ModelHandler<I, Marker> {
     type Outputs: ModelOutputs;
+    type Error: From<crate::Error>;
 
-    fn invoke(&self, cx: &mut Cx, inputs: &I) -> Result<Self::Outputs>;
+    fn invoke(&self, cx: &mut Cx, inputs: &I) -> std::result::Result<Self::Outputs, Self::Error>;
 }
 
-impl<F, T> ModelHandler<NoModelInputs, fn() -> T> for F
+impl<F, T, E> ModelHandler<NoModelInputs, fn() -> std::result::Result<T, E>> for F
 where
-    F: Fn(&mut Cx) -> Result<T>,
+    F: Fn(&mut Cx) -> std::result::Result<T, E>,
     T: ModelOutputs,
+    E: From<crate::Error>,
 {
     type Outputs = T;
+    type Error = E;
 
-    fn invoke(&self, cx: &mut Cx, _: &NoModelInputs) -> Result<Self::Outputs> {
+    fn invoke(
+        &self,
+        cx: &mut Cx,
+        _: &NoModelInputs,
+    ) -> std::result::Result<Self::Outputs, Self::Error> {
         self(cx)
     }
 }
 
-impl<F, I, T> ModelHandler<I, fn(I) -> T> for F
+impl<F, I, T, E> ModelHandler<I, fn(I) -> std::result::Result<T, E>> for F
 where
     I: ModelInputs,
-    F: Fn(&mut Cx, I::Tensors) -> Result<T>,
+    F: Fn(&mut Cx, I::Tensors) -> std::result::Result<T, E>,
     T: ModelOutputs,
+    E: From<crate::Error>,
 {
     type Outputs = T;
+    type Error = E;
 
-    fn invoke(&self, cx: &mut Cx, inputs: &I) -> Result<Self::Outputs> {
-        let inputs = inputs.declare(cx)?;
+    fn invoke(&self, cx: &mut Cx, inputs: &I) -> std::result::Result<Self::Outputs, Self::Error> {
+        let inputs = inputs.declare(cx).map_err(E::from)?;
         self(cx, inputs)
     }
 }
@@ -267,18 +276,30 @@ impl_tuple_input_values!(
 macro_rules! impl_tuple_handlers {
     ($(($($name:ident),+)),+ $(,)?) => {
         $(
-            impl<Func, Output, $($name: ModelInputs),+>
-                ModelHandler<($($name,)+), fn($($name),+) -> Output> for Func
+            impl<Func, Output, HandlerError, $($name: ModelInputs),+>
+                ModelHandler<
+                    ($($name,)+),
+                    fn($($name),+) -> std::result::Result<Output, HandlerError>,
+                > for Func
             where
-                Func: Fn(&mut Cx, $($name::Tensors),+) -> Result<Output>,
+                Func: Fn(
+                    &mut Cx,
+                    $($name::Tensors),+
+                ) -> std::result::Result<Output, HandlerError>,
                 Output: ModelOutputs,
+                HandlerError: From<crate::Error>,
             {
                 type Outputs = Output;
+                type Error = HandlerError;
 
                 #[allow(non_snake_case)]
-                fn invoke(&self, cx: &mut Cx, inputs: &($($name,)+)) -> Result<Self::Outputs> {
+                fn invoke(
+                    &self,
+                    cx: &mut Cx,
+                    inputs: &($($name,)+),
+                ) -> std::result::Result<Self::Outputs, Self::Error> {
                     let ($($name,)+) = inputs;
-                    $(let $name = $name.declare(cx)?;)+
+                    $(let $name = $name.declare(cx).map_err(HandlerError::from)?;)+
                     self(cx, $($name),+)
                 }
             }
@@ -307,7 +328,19 @@ impl_tuple_handlers!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Model;
+    use crate::{Error, Model};
+
+    #[derive(Debug)]
+    enum ModelError {
+        Framework(#[allow(dead_code)] Error),
+        Rejected,
+    }
+
+    impl From<Error> for ModelError {
+        fn from(error: Error) -> Self {
+            Self::Framework(error)
+        }
+    }
 
     struct Batch {
         images: ModelInput,
@@ -346,22 +379,23 @@ mod tests {
         let input = ModelInput::new([2, 3]);
         assert_eq!(input.shape(), [2, 3]);
         assert_eq!(input.dtype(), DType::F32);
-        let single = Model::new(|_: &mut Cx, x: Tensor| Ok(x)).inputs(input);
+        let single = Model::new(|_: &mut Cx, x: Tensor| Ok::<_, Error>(x)).inputs(input);
         assert_eq!(single.trace().unwrap().outputs()[0].shape(), [2, 3]);
 
-        let tuple = Model::new(|_: &mut Cx, x: Tensor, y: Tensor| Ok(x.add(&y)?))
+        let tuple = Model::new(|_: &mut Cx, x: Tensor, y: Tensor| -> Result<_> { Ok(x.add(&y)?) })
             .inputs((ModelInput::new(vec![2]), ModelInput::new(vec![2])));
         assert_eq!(tuple.trace().unwrap().schema().inputs().len(), 2);
 
-        let array = Model::new(|_: &mut Cx, [x, y]: [Tensor; 2]| Ok(x.add(&y)?))
+        let array = Model::new(|_: &mut Cx, [x, y]: [Tensor; 2]| -> Result<_> { Ok(x.add(&y)?) })
             .inputs([ModelInput::new(vec![2]), ModelInput::new(vec![2])]);
         assert_eq!(array.trace().unwrap().schema().inputs().len(), 2);
 
-        let vector = Model::new(|_: &mut Cx, xs: Vec<Tensor>| Ok(xs[0].add(&xs[1])?))
-            .inputs(vec![ModelInput::new(vec![2]), ModelInput::new(vec![2])]);
+        let vector =
+            Model::new(|_: &mut Cx, xs: Vec<Tensor>| -> Result<_> { Ok(xs[0].add(&xs[1])?) })
+                .inputs(vec![ModelInput::new(vec![2]), ModelInput::new(vec![2])]);
         assert_eq!(vector.trace().unwrap().schema().inputs().len(), 2);
 
-        let custom = Model::new(|_: &mut Cx, batch: BatchTensors| {
+        let custom = Model::new(|_: &mut Cx, batch: BatchTensors| -> Result<_> {
             Ok(Predictions {
                 logits: batch.images.add(&batch.labels)?,
                 auxiliary: batch.images,
@@ -375,8 +409,18 @@ mod tests {
         assert_eq!(applied.schema().inputs().len(), 2);
         assert_eq!(applied.outputs().len(), 2);
 
-        let nested = Model::new(|_: &mut Cx, x: Tensor| Ok((x.clone(), [x.clone(), x])))
-            .inputs(ModelInput::new(vec![2]));
+        let nested =
+            Model::new(|_: &mut Cx, x: Tensor| -> Result<_> { Ok((x.clone(), [x.clone(), x])) })
+                .inputs(ModelInput::new(vec![2]));
         assert_eq!(nested.trace().unwrap().outputs().len(), 3);
+    }
+
+    #[test]
+    fn model_handlers_preserve_downstream_errors() {
+        let model = Model::new(|_: &mut Cx| -> std::result::Result<Tensor, ModelError> {
+            Err(ModelError::Rejected)
+        });
+
+        assert!(matches!(model.trace(), Err(ModelError::Rejected)));
     }
 }

@@ -60,8 +60,8 @@ impl AutoencoderKlDecoderConfig {
                 .iter()
                 .any(|&channels| channels <= 0 || channels % self.norm_groups != 0)
         {
-            return Err(Error::InvalidDefinition {
-                message: "invalid AutoencoderKL decoder configuration".into(),
+            return Err(Error::InvalidModel {
+                reason: "invalid AutoencoderKL decoder configuration",
             });
         }
         Ok(())
@@ -69,7 +69,7 @@ impl AutoencoderKlDecoderConfig {
 }
 
 fn indexed_scope<'a>(cx: &'a mut Cx, collection: &str, index: usize) -> Result<Scope<'a>> {
-    cx.scope_path([collection.to_owned(), index.to_string()])
+    Ok(cx.scope_path([collection.to_owned(), index.to_string()])?)
 }
 
 fn resnet(
@@ -111,8 +111,8 @@ fn resnet(
 
 fn attention(cx: &mut Cx, input: &Tensor, groups: i64, epsilon: f32) -> Result<Tensor> {
     let [batch, height, width, channels] = input.shape() else {
-        return Err(Error::InvalidDefinition {
-            message: "VAE attention expects NHWC input".into(),
+        return Err(Error::InvalidModel {
+            reason: "VAE attention expects NHWC input",
         });
     };
     let hidden = cx
@@ -151,16 +151,13 @@ pub fn autoencoder_kl_decoder(
 ) -> Result<Tensor> {
     config.validate()?;
     if latent.shape().len() != 4 || latent.shape()[3] != config.latent_channels {
-        return Err(Error::InvalidDefinition {
-            message: "VAE decoder latent shape does not match its configuration".into(),
+        return Err(Error::InvalidModel {
+            reason: "VAE decoder latent shape does not match its configuration",
         });
     }
-    let deepest = *config
-        .block_channels
-        .last()
-        .ok_or_else(|| Error::InvalidDefinition {
-            message: "validated VAE block channels are nonempty".into(),
-        })?;
+    let deepest = *config.block_channels.last().ok_or(Error::InvalidModel {
+        reason: "validated VAE block channels are nonempty",
+    })?;
     let mut hidden = latent.mul_scalar(1.0 / config.scaling_factor)?;
     hidden = cx
         .scope("post_quant_conv")?
@@ -227,11 +224,11 @@ pub fn autoencoder_kl_decoder(
         .group_norm(config.norm_groups)
         .epsilon(config.norm_epsilon)
         .apply(&hidden)?;
-    decoder
+    Ok(decoder
         .scope("conv_out")?
         .conv2d(config.output_channels, [3, 3])
         .options(convolution(3))
-        .apply(&normalized.silu()?)
+        .apply(&normalized.silu()?)?)
 }
 
 #[cfg(test)]

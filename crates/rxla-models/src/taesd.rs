@@ -1,9 +1,9 @@
 //! Tiny AutoEncoder decoder used by Stable Diffusion TAESD checkpoints.
 
 use rxla_core::{Conv2dOptions, Tensor};
-use rxla_nn::{Cx, Error};
+use rxla_nn::Cx;
 
-use crate::Result;
+use crate::{Error, Result};
 
 fn convolution() -> Conv2dOptions {
     Conv2dOptions {
@@ -41,11 +41,12 @@ fn transition(
     output_channels: i64,
     bias: bool,
 ) -> Result<Tensor> {
-    cx.scope(&layer.to_string())?
+    Ok(cx
+        .scope(&layer.to_string())?
         .conv2d(output_channels, [3, 3])
         .options(convolution())
         .bias(bias)
-        .apply(input)
+        .apply(input)?)
 }
 
 /// Diffusers-compatible `AutoencoderTiny.decoder` using NHWC tensors.
@@ -55,8 +56,8 @@ fn transition(
 /// neighbor stages produce RGB output at eight times the spatial resolution.
 pub fn taesd_decoder(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
     if input.shape().len() != 4 || input.shape()[3] != 4 {
-        return Err(Error::InvalidDefinition {
-            message: "TAESD decoder expects NHWC input with four latent channels".into(),
+        return Err(Error::InvalidModel {
+            reason: "TAESD decoder expects NHWC input with four latent channels",
         });
     }
 

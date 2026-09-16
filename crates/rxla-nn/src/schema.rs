@@ -75,8 +75,8 @@ impl ModelInputSpec {
 
 /// One runtime argument in the model ABI, in effect declaration order.
 ///
-/// The indices refer to [`ParamSchema::inputs`] and
-/// [`ParamSchema::parameters`], respectively. This is the authoritative
+/// The indices refer to [`ModelSchema::inputs`] and
+/// [`ModelSchema::parameters`], respectively. This is the authoritative
 /// binding order before unreachable arguments are compacted at lowering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelArgument {
@@ -87,7 +87,7 @@ pub enum ModelArgument {
 
 /// Ordered, immutable declarations produced by [`crate::init`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct ParamSchemaData {
+struct ModelSchemaData {
     pub(crate) inputs: Vec<ModelInputSpec>,
     pub(crate) parameters: Vec<ParameterSpec>,
     pub(crate) indices: BTreeMap<String, usize>,
@@ -101,17 +101,17 @@ struct ParamSchemaData {
 /// share the same allocation so selections can retain provenance without a
 /// borrow or a deep copy.
 #[derive(Clone, Debug, Default)]
-pub struct ParamSchema(Arc<ParamSchemaData>);
+pub struct ModelSchema(Arc<ModelSchemaData>);
 
-impl PartialEq for ParamSchema {
+impl PartialEq for ModelSchema {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
     }
 }
 
-impl Eq for ParamSchema {}
+impl Eq for ModelSchema {}
 
-impl ParamSchema {
+impl ModelSchema {
     /// Materialize every parameter from its declaration-time initializer.
     ///
     /// Seeds are derived from `seed` and the stable parameter path, so adding

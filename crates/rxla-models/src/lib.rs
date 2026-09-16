@@ -1,7 +1,21 @@
 //! Functional Stable Diffusion building blocks using scoped parameter effects.
 
 use rxla_core::{Conv2dOptions, DType, Tensor};
-use rxla_nn::{Cx, Error, Result, Scope};
+use rxla_nn::{Cx, Scope};
+use snafu::Snafu;
+
+#[derive(Debug, Snafu)]
+#[non_exhaustive]
+pub enum Error {
+    #[snafu(transparent)]
+    Nn { source: rxla_nn::Error },
+    #[snafu(transparent)]
+    Tensor { source: rxla_core::Error },
+    #[snafu(display("invalid model definition: {reason}"))]
+    InvalidModel { reason: &'static str },
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 mod unet;
 pub use unet::{UnetConfig, unet};
@@ -21,9 +35,10 @@ pub mod pp_ocr_v6;
 /// The input width is inferred at the point of use.
 pub fn timestep_embedding(cx: &mut Cx, input: &Tensor, output_width: i64) -> Result<Tensor> {
     let hidden = cx.scope("linear_1")?.linear(output_width).apply(input)?;
-    cx.scope("linear_2")?
+    Ok(cx
+        .scope("linear_2")?
         .linear(output_width)
-        .apply(&hidden.silu()?)
+        .apply(&hidden.silu()?)?)
 }
 
 /// Static choices for a Diffusers-compatible `ResnetBlock2D`.
@@ -66,14 +81,13 @@ pub fn resnet2d(
     options: Resnet2dOptions,
 ) -> Result<Tensor> {
     if input.shape().len() != 4 || timestep_embedding.shape().len() != 2 {
-        return Err(Error::InvalidDefinition {
-            message: "stable diffusion ResNet expects NHWC input and rank-two timestep embedding"
-                .into(),
+        return Err(Error::InvalidModel {
+            reason: "stable diffusion ResNet expects NHWC input and rank-two timestep embedding",
         });
     }
     if input.shape()[0] != timestep_embedding.shape()[0] {
-        return Err(Error::InvalidDefinition {
-            message: "stable diffusion ResNet input and timestep batches must match".into(),
+        return Err(Error::InvalidModel {
+            reason: "stable diffusion ResNet input and timestep batches must match",
         });
     }
     let convolution = Conv2dOptions {
@@ -150,16 +164,16 @@ fn cross_attention(cx: &mut Cx, query: &Tensor, context: &Tensor, head_dim: i64)
         || context.shape().len() != 3
         || query.shape()[0] != context.shape()[0]
     {
-        return Err(Error::InvalidDefinition {
-            message: "cross attention expects rank-three query/context with equal batches".into(),
+        return Err(Error::InvalidModel {
+            reason: "cross attention expects rank-three query/context with equal batches",
         });
     }
     let [batch, query_length, width] = query.shape() else {
         unreachable!("rank checked above")
     };
     if head_dim <= 0 || *width <= 0 || width % head_dim != 0 {
-        return Err(Error::InvalidDefinition {
-            message: "attention width must be divisible by positive head_dim".into(),
+        return Err(Error::InvalidModel {
+            reason: "attention width must be divisible by positive head_dim",
         });
     }
     let heads = width / head_dim;
@@ -189,29 +203,23 @@ fn cross_attention(cx: &mut Cx, query: &Tensor, context: &Tensor, head_dim: i64)
         .scaled_dot_product_attention(&k, &v, None, None)?
         .transpose(&[0, 2, 1, 3])?
         .reshape(&[*batch, *query_length, *width])?;
-    cx.scope("to_out")?
+    Ok(cx
+        .scope("to_out")?
         .scope("0")?
         .linear(*width)
-        .apply(&hidden)
+        .apply(&hidden)?)
 }
 
 fn feed_forward(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
-    let width = *input
-        .shape()
-        .last()
-        .ok_or_else(|| Error::InvalidDefinition {
-            message: "feed-forward input must have a feature dimension".into(),
-        })?;
-    let hidden = width
-        .checked_mul(4)
-        .ok_or_else(|| Error::InvalidDefinition {
-            message: "GEGLU hidden width overflow".into(),
-        })?;
-    let projected = hidden
-        .checked_mul(2)
-        .ok_or_else(|| Error::InvalidDefinition {
-            message: "GEGLU projected width overflow".into(),
-        })?;
+    let width = *input.shape().last().ok_or(Error::InvalidModel {
+        reason: "feed-forward input must have a feature dimension",
+    })?;
+    let hidden = width.checked_mul(4).ok_or(Error::InvalidModel {
+        reason: "GEGLU hidden width overflow",
+    })?;
+    let projected = hidden.checked_mul(2).ok_or(Error::InvalidModel {
+        reason: "GEGLU projected width overflow",
+    })?;
     let projected = cx
         .scope("net")?
         .scope("0")?
@@ -220,7 +228,7 @@ fn feed_forward(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
         .apply(input)?;
     let parts = projected.split(projected.shape().len() - 1, &[hidden, hidden])?;
     let gated = parts[0].mul(&parts[1].gelu()?)?;
-    cx.scope("net")?.scope("2")?.linear(width).apply(&gated)
+    Ok(cx.scope("net")?.scope("2")?.linear(width).apply(&gated)?)
 }
 
 fn transformer_block(
@@ -258,10 +266,8 @@ pub fn spatial_transformer(
         || input.shape()[0] != context.shape()[0]
         || options.layers == 0
     {
-        return Err(Error::InvalidDefinition {
-            message:
-                "spatial transformer expects NHWC input, rank-three context, equal batches and layers"
-                    .into(),
+        return Err(Error::InvalidModel {
+            reason: "spatial transformer expects NHWC input, rank-three context, equal batches and layers",
         });
     }
     let [batch, height, width, channels] = input.shape() else {

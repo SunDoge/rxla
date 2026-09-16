@@ -69,7 +69,7 @@ This does not serialize sessions or validate compatibility across plugin version
 
 Models use `rxla_nn` parameter effects. Parameters are declared beside the tensor
 values that determine their shapes. Tracing records stable paths, shapes, dtypes
-and shared identities in `ParamSchema`; `ParameterSelection` chooses trainable
+and shared identities in `ModelSchema`; `ParameterSelection` chooses trainable
 subsets without a parallel Rust object tree or manual visitation implementation.
 
 Checkpoint binding consumes the schema directly. Mutable caches remain explicit

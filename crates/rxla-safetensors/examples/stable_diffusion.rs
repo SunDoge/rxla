@@ -9,7 +9,7 @@ use rxla_models::{
     AutoencoderKlDecoderConfig, ClipTextConfig, PndmSampleSource, PndmScheduler, UnetConfig,
     autoencoder_kl_decoder, clip_text_encoder, unet,
 };
-use rxla_nn::{BoundModel, Cx, Model, ModelInput, ModelOutputValues, ParamSchema};
+use rxla_nn::{BoundModel, Cx, Model, ModelInput, ModelOutputValues, ModelSchema};
 use rxla_safetensors::SafeTensors;
 use std::{
     collections::{HashMap, HashSet},
@@ -276,7 +276,7 @@ fn write_png(path: &Path, image: &[f32], height: usize, width: usize) -> Result<
     Ok(())
 }
 
-fn diffusers_vae_mapping(schema: &ParamSchema) -> HashMap<String, String> {
+fn diffusers_vae_mapping(schema: &ModelSchema) -> HashMap<String, String> {
     schema
         .parameters()
         .iter()

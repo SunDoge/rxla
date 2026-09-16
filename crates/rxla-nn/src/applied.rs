@@ -17,7 +17,7 @@ pub struct AppliedModel {
     outputs: Vec<Tensor>,
     parameters: Vec<Tensor>,
     resident_parameters: Vec<Option<StateSlot>>,
-    schema: ParamSchema,
+    schema: ModelSchema,
 }
 
 /// Validated runtime buffers in the ABI order required by an [`AppliedModel`].
@@ -330,7 +330,7 @@ impl AppliedModel {
         outputs: Vec<Tensor>,
         parameters: Vec<Tensor>,
         resident_parameters: Vec<Option<StateSlot>>,
-        schema: ParamSchema,
+        schema: ModelSchema,
     ) -> Self {
         let graph = state_graph.tracer();
         Self {
@@ -467,7 +467,7 @@ impl AppliedModel {
     }
 
     /// The frozen effect schema used to produce this program.
-    pub fn schema(&self) -> &ParamSchema {
+    pub fn schema(&self) -> &ModelSchema {
         &self.schema
     }
 
@@ -486,7 +486,7 @@ impl AppliedModel {
 
     /// Append named resident state owned by a graph transformation.
     ///
-    /// Unlike a model `Cx::state` effect, this does not modify `ParamSchema` or
+    /// Unlike a model `Cx::state` effect, this does not modify `ModelSchema` or
     /// require changing the model body. It becomes part of this applied model's
     /// stateful program and session layout immediately.
     pub fn transform_state(

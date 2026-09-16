@@ -48,7 +48,7 @@ function, repeat tracing closures, or manually plumb a parameter tree.
 Built-in trainable layers attach an `Initializer` to each parameter effect:
 affine and convolution weights use fan-in-scaled Kaiming uniform values, their
 biases use the matching uniform bound, and normalization scale/bias use
-ones/zeros. `ParamSchema::initialize(client, seed)` materializes the complete
+ones/zeros. `ModelSchema::initialize(client, seed)` materializes the complete
 named buffer set deterministically. Seeds are derived from stable parameter
 paths, so inserting an unrelated layer does not perturb existing weights. A
 bare `cx.param` remains explicitly uninitialized for checkpoint-only or custom

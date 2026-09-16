@@ -25,8 +25,8 @@ impl PndmStep {
     /// classifier-free guidance scale, deliberately runtime-configurable.
     pub fn tensor_coefficients(self, guidance_scale: f32) -> Result<[f32; 8]> {
         if !guidance_scale.is_finite() {
-            return Err(Error::InvalidDefinition {
-                message: "guidance scale must be finite".into(),
+            return Err(Error::InvalidModel {
+                reason: "guidance scale must be finite",
             });
         }
         Ok([
@@ -59,20 +59,20 @@ impl PndmScheduler {
     pub fn stable_diffusion(inference_steps: usize) -> Result<Self> {
         const TRAIN_STEPS: usize = 1000;
         if !(2..=TRAIN_STEPS).contains(&inference_steps) {
-            return Err(Error::InvalidDefinition {
-                message: "PNDM inference steps must be in 2..=1000".into(),
+            return Err(Error::InvalidModel {
+                reason: "PNDM inference steps must be in 2..=1000",
             });
         }
         let step_ratio = TRAIN_STEPS / inference_steps;
         if step_ratio == 0 {
-            return Err(Error::InvalidDefinition {
-                message: "PNDM timestep ratio must be positive".into(),
+            return Err(Error::InvalidModel {
+                reason: "PNDM timestep ratio must be positive",
             });
         }
         let base: Vec<i64> = (0..inference_steps)
             .map(|index| {
-                i64::try_from(index * step_ratio + 1).map_err(|_| Error::InvalidDefinition {
-                    message: "PNDM timestep exceeds i64".into(),
+                i64::try_from(index * step_ratio + 1).map_err(|_| Error::InvalidModel {
+                    reason: "PNDM timestep exceeds i64",
                 })
             })
             .collect::<Result<_>>()?;
@@ -94,8 +94,8 @@ impl PndmScheduler {
         Ok(Self {
             timesteps,
             alphas_cumprod,
-            step_ratio: i64::try_from(step_ratio).map_err(|_| Error::InvalidDefinition {
-                message: "PNDM timestep ratio exceeds i64".into(),
+            step_ratio: i64::try_from(step_ratio).map_err(|_| Error::InvalidModel {
+                reason: "PNDM timestep ratio exceeds i64",
             })?,
         })
     }
@@ -105,18 +105,15 @@ impl PndmScheduler {
     }
 
     pub fn step(&self, index: usize) -> Result<PndmStep> {
-        let &listed_timestep =
-            self.timesteps
-                .get(index)
-                .ok_or_else(|| Error::InvalidDefinition {
-                    message: "PNDM step index out of range".into(),
-                })?;
+        let &listed_timestep = self.timesteps.get(index).ok_or(Error::InvalidModel {
+            reason: "PNDM step index out of range",
+        })?;
         let (timestep, previous, sample_source) = if index == 1 {
             (
                 listed_timestep
                     .checked_add(self.step_ratio)
-                    .ok_or_else(|| Error::InvalidDefinition {
-                        message: "PNDM timestep overflow".into(),
+                    .ok_or(Error::InvalidModel {
+                        reason: "PNDM timestep overflow",
                     })?,
                 listed_timestep,
                 PndmSampleSource::Initial,
@@ -140,8 +137,8 @@ impl PndmScheduler {
         let denominator = alpha * beta_previous.sqrt() + (alpha * beta * alpha_previous).sqrt();
         let model_coefficient = -(alpha_previous - alpha) / denominator;
         if !sample_coefficient.is_finite() || !model_coefficient.is_finite() {
-            return Err(Error::InvalidDefinition {
-                message: "PNDM produced nonfinite update coefficients".into(),
+            return Err(Error::InvalidModel {
+                reason: "PNDM produced nonfinite update coefficients",
             });
         }
         let model_coefficients = match index {
@@ -165,8 +162,8 @@ impl PndmScheduler {
         usize::try_from(timestep)
             .ok()
             .and_then(|index| self.alphas_cumprod.get(index).copied())
-            .ok_or_else(|| Error::InvalidDefinition {
-                message: "PNDM timestep is outside training schedule".into(),
+            .ok_or(Error::InvalidModel {
+                reason: "PNDM timestep is outside training schedule",
             })
     }
 }

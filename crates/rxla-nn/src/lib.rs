@@ -25,7 +25,7 @@ pub use layers::{
 mod outputs;
 pub use outputs::{ModelOutputValues, ModelOutputs};
 mod schema;
-pub use schema::{ModelArgument, ModelInputSpec, ParamSchema, ParameterSpec, StateSpec};
+pub use schema::{ModelArgument, ModelInputSpec, ModelSchema, ParameterSpec, StateSpec};
 mod selection;
 pub use selection::{ParameterId, ParameterSelection};
 
@@ -116,8 +116,6 @@ pub enum Error {
         layer: &'static str,
         requirement: &'static str,
     },
-    #[snafu(display("invalid model definition: {message}"))]
-    InvalidDefinition { message: String },
     #[snafu(display("state handle belongs to another model trace"))]
     ForeignState,
     #[snafu(display("{operation} requires a stateless model"))]
@@ -186,7 +184,9 @@ where
     ///
     /// The frozen declarations are available through [`AppliedModel::schema`].
     /// Zero-input and structured-input models use this same interpretation path.
-    pub fn trace<Marker>(&self) -> Result<AppliedModel>
+    pub fn trace<Marker>(
+        &self,
+    ) -> std::result::Result<AppliedModel, <F as ModelHandler<I, Marker>>::Error>
     where
         F: ModelHandler<I, Marker>,
     {
@@ -194,7 +194,12 @@ where
     }
 
     /// Trace typed inputs once with every parameter stored as resident state.
-    pub fn trace_resident_all<Marker>(&self) -> Result<(ParameterSelection, AppliedModel)>
+    pub fn trace_resident_all<Marker>(
+        &self,
+    ) -> std::result::Result<
+        (ParameterSelection, AppliedModel),
+        <F as ModelHandler<I, Marker>>::Error,
+    >
     where
         F: ModelHandler<I, Marker>,
     {
@@ -207,7 +212,10 @@ where
     pub fn trace_resident_under<Marker>(
         &self,
         scope: &str,
-    ) -> Result<(ParameterSelection, AppliedModel)>
+    ) -> std::result::Result<
+        (ParameterSelection, AppliedModel),
+        <F as ModelHandler<I, Marker>>::Error,
+    >
     where
         F: ModelHandler<I, Marker>,
     {
@@ -219,8 +227,11 @@ where
     /// Discover typed inputs and trace a caller-selected resident parameter set.
     pub fn trace_resident<Marker>(
         &self,
-        select: impl FnOnce(&ParamSchema) -> ParameterSelection,
-    ) -> Result<(ParameterSelection, AppliedModel)>
+        select: impl FnOnce(&ModelSchema) -> ParameterSelection,
+    ) -> std::result::Result<
+        (ParameterSelection, AppliedModel),
+        <F as ModelHandler<I, Marker>>::Error,
+    >
     where
         F: ModelHandler<I, Marker>,
     {
@@ -230,41 +241,46 @@ where
         Ok((selection, applied))
     }
 
-    pub fn init<Marker>(&self) -> Result<ParamSchema>
+    pub fn init<Marker>(
+        &self,
+    ) -> std::result::Result<ModelSchema, <F as ModelHandler<I, Marker>>::Error>
     where
         F: ModelHandler<I, Marker>,
     {
-        init(|cx| self.apply.invoke(cx, &self.inputs)).map(|(schema, _)| schema)
+        init_with_error(|cx| self.apply.invoke(cx, &self.inputs)).map(|(schema, _)| schema)
     }
 
-    pub fn apply<Marker>(&self, schema: &ParamSchema) -> Result<AppliedModel>
+    pub fn apply<Marker>(
+        &self,
+        schema: &ModelSchema,
+    ) -> std::result::Result<AppliedModel, <F as ModelHandler<I, Marker>>::Error>
     where
         F: ModelHandler<I, Marker>,
     {
-        apply(schema, |cx| self.apply.invoke(cx, &self.inputs))
+        apply_with_error(schema, |cx| self.apply.invoke(cx, &self.inputs))
     }
 
     /// Trace with selected parameters stored as resident session state.
     pub fn apply_resident<Marker>(
         &self,
-        schema: &ParamSchema,
+        schema: &ModelSchema,
         selection: &ParameterSelection,
-    ) -> Result<AppliedModel>
+    ) -> std::result::Result<AppliedModel, <F as ModelHandler<I, Marker>>::Error>
     where
         F: ModelHandler<I, Marker>,
     {
-        apply_resident(schema, selection, |cx| self.apply.invoke(cx, &self.inputs))
+        apply_resident_with_error(schema, selection, |cx| self.apply.invoke(cx, &self.inputs))
     }
 }
 
 enum ParamMode {
     Init {
-        schema: ParamSchema,
+        schema: ModelSchema,
         values: BTreeMap<String, Tensor>,
         residency: InitResidency,
     },
     Apply {
-        schema: ParamSchema,
+        schema: ModelSchema,
         values: BTreeMap<String, Tensor>,
         read: HashSet<String>,
         resident: HashSet<ParameterId>,
@@ -379,7 +395,7 @@ impl Cx {
             input_index: 0,
             effect_index: 0,
             mode: ParamMode::Init {
-                schema: ParamSchema::default(),
+                schema: ModelSchema::default(),
                 values: BTreeMap::new(),
                 residency,
             },
@@ -389,7 +405,7 @@ impl Cx {
         }
     }
 
-    fn apply(schema: ParamSchema, resident: HashSet<ParameterId>) -> Self {
+    fn apply(schema: ModelSchema, resident: HashSet<ParameterId>) -> Self {
         Self {
             graph: StateGraph::default(),
             scope: Vec::new(),
@@ -782,7 +798,7 @@ impl Cx {
             .collect()
     }
 
-    fn state_slots(&self, schema: &ParamSchema) -> Vec<(String, StateSlot)> {
+    fn state_slots(&self, schema: &ModelSchema) -> Vec<(String, StateSlot)> {
         schema
             .states()
             .iter()
@@ -795,7 +811,7 @@ impl Cx {
             .collect()
     }
 
-    fn resident_parameter_slots(&self, schema: &ParamSchema) -> Vec<Option<StateSlot>> {
+    fn resident_parameter_slots(&self, schema: &ModelSchema) -> Vec<Option<StateSlot>> {
         schema
             .parameters()
             .iter()
@@ -803,7 +819,7 @@ impl Cx {
             .collect()
     }
 
-    fn into_schema(self) -> ParamSchema {
+    fn into_schema(self) -> ModelSchema {
         match self.mode {
             ParamMode::Init { schema, .. } => schema,
             ParamMode::Apply { .. } => unreachable!("only init contexts produce schemas"),
@@ -934,36 +950,64 @@ fn validate_name(name: &str) -> Result<()> {
 }
 
 /// Interpret parameter effects as declarations and return the frozen schema.
-fn init<T>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ParamSchema, T)> {
+fn init_with_error<T, E>(
+    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+) -> std::result::Result<(ModelSchema, T), E>
+where
+    E: From<Error>,
+{
     let mut cx = Cx::init();
     let result = body(&mut cx)?;
-    cx.finish_rngs()?;
+    cx.finish_rngs().map_err(E::from)?;
     Ok((cx.into_schema(), result))
 }
 
-fn trace_once<T: ModelOutputs>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<AppliedModel> {
+#[cfg(test)]
+fn init<T>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ModelSchema, T)> {
+    init_with_error(body)
+}
+
+fn trace_once<T, E>(
+    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+) -> std::result::Result<AppliedModel, E>
+where
+    T: ModelOutputs,
+    E: From<Error>,
+{
     trace_once_with(Cx::init(), body)
 }
 
-fn trace_once_resident_all<T: ModelOutputs>(
-    body: impl FnOnce(&mut Cx) -> Result<T>,
-) -> Result<AppliedModel> {
+fn trace_once_resident_all<T, E>(
+    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+) -> std::result::Result<AppliedModel, E>
+where
+    T: ModelOutputs,
+    E: From<Error>,
+{
     trace_once_with(Cx::init_resident_all(), body)
 }
 
-fn trace_once_resident_under<T: ModelOutputs>(
+fn trace_once_resident_under<T, E>(
     scope: &str,
-    body: impl FnOnce(&mut Cx) -> Result<T>,
-) -> Result<AppliedModel> {
+    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+) -> std::result::Result<AppliedModel, E>
+where
+    T: ModelOutputs,
+    E: From<Error>,
+{
     trace_once_with(Cx::init_resident_under(scope), body)
 }
 
-fn trace_once_with<T: ModelOutputs>(
+fn trace_once_with<T, E>(
     mut cx: Cx,
-    body: impl FnOnce(&mut Cx) -> Result<T>,
-) -> Result<AppliedModel> {
+    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+) -> std::result::Result<AppliedModel, E>
+where
+    T: ModelOutputs,
+    E: From<Error>,
+{
     let outputs = body(&mut cx)?.into_tensors();
-    cx.finish_rngs()?;
+    cx.finish_rngs().map_err(E::from)?;
     let schema = match &cx.mode {
         ParamMode::Init { schema, .. } => schema.clone(),
         ParamMode::Apply { .. } => unreachable!("trace_once creates an init context"),
@@ -982,35 +1026,54 @@ fn trace_once_with<T: ModelOutputs>(
 }
 
 /// Interpret parameter effects as reads from `schema` and retain traced outputs.
-fn apply<T: ModelOutputs>(
-    schema: &ParamSchema,
-    body: impl FnOnce(&mut Cx) -> Result<T>,
-) -> Result<AppliedModel> {
+fn apply_with_error<T, E>(
+    schema: &ModelSchema,
+    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+) -> std::result::Result<AppliedModel, E>
+where
+    T: ModelOutputs,
+    E: From<Error>,
+{
     apply_with_resident(schema, HashSet::new(), body)
 }
 
-/// Interpret selected parameters as resident state rather than ABI inputs.
-fn apply_resident<T: ModelOutputs>(
-    schema: &ParamSchema,
-    selection: &ParameterSelection,
+#[cfg(test)]
+fn apply<T: ModelOutputs>(
+    schema: &ModelSchema,
     body: impl FnOnce(&mut Cx) -> Result<T>,
 ) -> Result<AppliedModel> {
-    ensure!(
-        selection.schema().same_identity(schema),
-        SelectionSchemaMismatchSnafu
-    );
+    apply_with_error(schema, body)
+}
+
+/// Interpret selected parameters as resident state rather than ABI inputs.
+fn apply_resident_with_error<T, E>(
+    schema: &ModelSchema,
+    selection: &ParameterSelection,
+    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+) -> std::result::Result<AppliedModel, E>
+where
+    T: ModelOutputs,
+    E: From<Error>,
+{
+    if !selection.schema().same_identity(schema) {
+        return Err(E::from(Error::SelectionSchemaMismatch));
+    }
     apply_with_resident(schema, selection.ids().iter().copied().collect(), body)
 }
 
-fn apply_with_resident<T: ModelOutputs>(
-    schema: &ParamSchema,
+fn apply_with_resident<T, E>(
+    schema: &ModelSchema,
     resident: HashSet<ParameterId>,
-    body: impl FnOnce(&mut Cx) -> Result<T>,
-) -> Result<AppliedModel> {
+    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+) -> std::result::Result<AppliedModel, E>
+where
+    T: ModelOutputs,
+    E: From<Error>,
+{
     let mut cx = Cx::apply(schema.clone(), resident);
     let outputs = body(&mut cx)?.into_tensors();
-    cx.finish_rngs()?;
-    cx.finish_apply()?;
+    cx.finish_rngs().map_err(E::from)?;
+    cx.finish_apply().map_err(E::from)?;
     let parameters = cx.parameter_tensors();
     let states = cx.state_slots(schema);
     let resident_parameters = cx.resident_parameter_slots(schema);
@@ -1279,7 +1342,7 @@ mod tests {
 
     #[test]
     fn program_owns_the_model_body_and_layer_builders_own_scopes() {
-        let model = Model::new(|cx: &mut Cx| {
+        let model = Model::new(|cx: &mut Cx| -> Result<_> {
             let input = cx.input(&[2, 4])?;
             let hidden = cx
                 .scope("hidden")?
@@ -1303,7 +1366,7 @@ mod tests {
 
     #[test]
     fn one_context_composes_parameters_and_resident_state() {
-        let model = Model::new(|cx: &mut Cx| {
+        let model = Model::new(|cx: &mut Cx| -> Result<_> {
             let input = cx.input(&[2, 4])?;
             let output = cx.scope("head")?.linear(3).apply(&input)?;
             let count = cx.state("steps", &[], DType::I32)?;
@@ -1390,7 +1453,7 @@ mod tests {
         assert_eq!(spec.path(), "head.weight");
         assert_eq!(prepared.state_type(slot).unwrap(), (DType::F32, vec![2, 3]));
 
-        let quantized = Model::new(|cx: &mut Cx| {
+        let quantized = Model::new(|cx: &mut Cx| -> Result<_> {
             Ok(cx
                 .param_dtype("weight", &[2], DType::U8)?
                 .cast(DType::F32)?)
@@ -1459,7 +1522,7 @@ mod tests {
     #[test]
     #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
     fn unified_context_state_and_rng_execute_as_one_program() {
-        let model = Model::new(|cx: &mut Cx| {
+        let model = Model::new(|cx: &mut Cx| -> Result<_> {
             let steps = cx.state("steps", &[], DType::I32)?;
             let next = steps.read(cx)?.wrapping_add_scalar(1)?;
             steps.write(cx, &next)?;

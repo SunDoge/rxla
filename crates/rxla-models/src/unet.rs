@@ -67,8 +67,8 @@ impl UnetConfig {
                     || channels % self.attention_heads != 0
             })
         {
-            return Err(Error::InvalidDefinition {
-                message: "invalid Stable Diffusion UNet configuration".into(),
+            return Err(Error::InvalidModel {
+                reason: "invalid Stable Diffusion UNet configuration",
             });
         }
         Ok(())
@@ -84,7 +84,7 @@ fn convolution(padding: i64, stride: i64) -> Conv2dOptions {
 }
 
 fn indexed_scope<'a>(cx: &'a mut Cx, collection: &str, index: usize) -> Result<Scope<'a>> {
-    cx.scope_path([collection.to_owned(), index.to_string()])
+    Ok(cx.scope_path([collection.to_owned(), index.to_string()])?)
 }
 
 /// Conditional latent-diffusion UNet. Samples/results are NHWC; timestep input
@@ -105,15 +105,13 @@ pub fn unet(
         || context.shape()[0] != sample.shape()[0]
         || context.shape()[2] != config.context_width
     {
-        return Err(Error::InvalidDefinition {
-            message: "UNet input shapes do not match its configuration".into(),
+        return Err(Error::InvalidModel {
+            reason: "UNet input shapes do not match its configuration",
         });
     }
-    let time_width = base
-        .checked_mul(4)
-        .ok_or_else(|| Error::InvalidDefinition {
-            message: "UNet timestep width overflow".into(),
-        })?;
+    let time_width = base.checked_mul(4).ok_or(Error::InvalidModel {
+        reason: "UNet timestep width overflow",
+    })?;
     let temb = {
         let mut scope = cx.scope("time_embedding")?;
         timestep_embedding(&mut scope, timestep, time_width)?
@@ -204,8 +202,8 @@ pub fn unet(
         let mut block = indexed_scope(cx, "up_blocks", up_stage)?;
         let mut value = hidden;
         for layer in 0..=config.layers_per_block {
-            let residual = residuals.pop().ok_or_else(|| Error::InvalidDefinition {
-                message: "UNet has too few down-block residuals".into(),
+            let residual = residuals.pop().ok_or(Error::InvalidModel {
+                reason: "UNet has too few down-block residuals",
             })?;
             value = Tensor::concatenate(&[value, residual], 3)?;
             {
@@ -242,8 +240,8 @@ pub fn unet(
         hidden = value;
     }
     if !residuals.is_empty() {
-        return Err(Error::InvalidDefinition {
-            message: "UNet forward left unused residuals".into(),
+        return Err(Error::InvalidModel {
+            reason: "UNet forward left unused residuals",
         });
     }
     let hidden = cx
@@ -251,10 +249,11 @@ pub fn unet(
         .group_norm(config.norm_groups)
         .epsilon(config.norm_epsilon)
         .apply(&hidden)?;
-    cx.scope("conv_out")?
+    Ok(cx
+        .scope("conv_out")?
         .conv2d(config.output_channels, [3, 3])
         .options(convolution(1, 1))
-        .apply(&hidden.silu()?)
+        .apply(&hidden.silu()?)?)
 }
 
 #[cfg(test)]
