@@ -3,7 +3,7 @@
 The active direction is a Rust tensor library built on **Pliron + StableHLO + PJRT**,
 not completion of the historical IREE feature list. This page records the
 current boundary and outstanding work; it is not a declaration of completion.
-The detailed API guide is [README.md](README.md).
+The detailed API guide is the repository [README](../README.md).
 
 The product target and ordering of future work are recorded separately in the
 [product vision and roadmap](VISION-ROADMAP.md). In short, RXLA prioritizes
@@ -18,17 +18,18 @@ validated execution-plan boundary for single-device, manually partitioned and
 eventually automatically planned execution. Semantic IR, physical placement,
 state commits and backend executables remain distinct.
 
-The primary future model API declares parameters as scoped tracing effects at
+The primary model API declares parameters as scoped tracing effects at
 their tensor use sites, rather than requiring module constructors to duplicate
 inferred dimensions in configuration. See [parameter-effect design](PARAMETER-EFFECT-DESIGN.md).
 
 [Execution-plan design and acceptance gates](EXECUTION-PLAN-DESIGN.md) defines
 the required information preservation, training/remote failure semantics,
-compilation budgets and staged validation. This is an accepted design constraint,
-not implemented distributed support: even the unified one-stage plan remains
-pending. `Program` snapshots retain StableHLO plus planning facts derived from
-Pliron; `LoweredProgram` is the format-tagged backend boundary rather than a
-second computational graph. Existing tested capabilities below are unchanged.
+compilation budgets and staged validation. The validated one-stage plan and
+backend-neutral automatic sharding decisions exist, but multi-stage execution,
+collective insertion and a distributed trainer remain pending. `Program`
+snapshots retain StableHLO plus planning facts derived from Pliron;
+`LoweredProgram` is the format-tagged backend boundary rather than a second
+computational graph.
 
 ## Architecture and evidence
 
@@ -54,15 +55,15 @@ Rust Tensor / modules / stateful programs
 
 | Layer | Present implementation | Evidence / boundary |
 | --- | --- | --- |
-| Rust tensor graph | Static shapes, F32 tensors and I32 indexing/state, frozen BF16 storage with explicit F32 conversion, NN compositions and differentiation | [tensor source](crates/rxla-core/src/lib.rs), CPU gate; GPU gate covers a selected subset, not every operator |
-| Model composition | Scoped parameter effects with use-site shape inference; legacy trainable modules remain isolated | [effect model](../crates/rxla-nn/src/lib.rs), [legacy module](../crates/rxla-train/src/module.rs); no automatic capture of arbitrary Rust mutation |
-| Stateful execution | Parameters, optimizer/BatchNorm/RNG/KV state, compiled programs and owning sessions | [state](crates/rxla-core/src/state.rs); pure state-in/state-out lowering, synchronous non-donating execution |
-| Training | Autodiff, plain SGD/Momentum/Adam(W), explicit gradient/proposal APIs, accumulation, parameter groups, guarded state updates | [optimizers](crates/rxla-train/src/optim.rs), training examples; no distributed trainer or universal transform support |
-| Detection geometry | Graph-native xyxy/cxcywh conversion, area, aligned/pairwise IoU and aligned GIoU with gradients; explicit host class-agnostic/class-aware NMS | [boxes](crates/rxla-core/src/boxes.rs), [host utilities](crates/rxla-core/src/vision.rs), F64/gradient tests and [resident box fitting](crates/rxla-train/examples/train_boxes.rs); no GPU NMS, general detector or detection dataset training |
-| Compilation | Typed Pliron SSA lowers to StableHLO MLIR for PJRT; optimized backend HLO remains diagnostic-only | [Pliron IR](../crates/rxla-core/src/pliron_ir.rs), [runtime](../crates/rxla-pjrt/src/runtime.rs); no second frontend HLO-proto representation or arbitrary external-code compilation in the tensor API |
-| Cache / artifacts | In-memory reuse, optional disk executable cache and serialization | [compiler](crates/rxla-core/src/compiler.rs), [disk cache](crates/rxla-core/src/disk_cache.rs); artifacts trusted, compatibility namespace operator-supplied |
-| Native ownership | `Arc`-owned `Send + Sync` plugins, clients, buffers and executables; thread-affine submit/wait handles retain in-flight resources; readiness polling and explicit typed creation options | [PJRT runtime](crates/rxla-pjrt/src/runtime.rs), [thread-safety tests](../crates/rxla-pjrt/tests/thread_safety.rs), [submission tests](crates/rxla-core/tests/submit.rs); Drop waits, no cancellation/Future or automatic cross-client sharing |
-| Checkpoints | SafeTensors loading, mixed F32/BF16 module bindings/export, canonical-name loading, streaming no-overwrite module files and training-state snapshots | [weights](crates/rxla-safetensors/src/lib.rs); model layouts and state schemas remain explicit; BF16 storage is not trainable BF16 state |
+| Rust tensor graph | Static shapes, F32 tensors and I32 indexing/state, frozen BF16 storage with explicit F32 conversion, NN compositions and differentiation | [tensor source](../crates/rxla-core/src/lib.rs), CPU gate; GPU gate covers a selected subset, not every operator |
+| Model composition | Scoped parameter effects with use-site shape inference and selectable resident parameters | [effect model](../crates/rxla-nn/src/lib.rs), [design](PARAMETER-EFFECT-DESIGN.md); no automatic capture of arbitrary Rust mutation |
+| Stateful execution | Parameters, optimizer/BatchNorm/RNG/KV state, compiled programs and owning sessions | [state](../crates/rxla-core/src/state.rs); pure state-in/state-out lowering, synchronous non-donating execution |
+| Training | Autodiff plus functional and resident SGD/Adam paths; parameter subsets and atomic model/optimizer state commits | [training crate](../crates/rxla-train/src/lib.rs), [Imagenette example](../crates/rxla-train/examples/imagenette_train.rs); no distributed trainer or universal transform support |
+| Detection geometry | Tensor-native xyxy/cxcywh conversion, area, aligned/pairwise IoU and aligned GIoU with gradients; explicit host class-agnostic/class-aware NMS | [boxes](../crates/rxla-core/src/boxes.rs), [host utilities](../crates/rxla-core/src/vision.rs); no GPU NMS, general detector or detection dataset training |
+| Compilation | Typed Pliron SSA lowers to verified StableHLO MLIR for PJRT; optimized backend HLO remains diagnostic-only | [Pliron IR](../crates/rxla-ir/src/pliron), [runtime](../crates/rxla-pjrt/src/runtime.rs); no second frontend HLO-proto representation or arbitrary external-code compilation in the tensor API |
+| Cache / artifacts | In-memory reuse, optional disk executable cache and serialization | [compiler](../crates/rxla-core/src/compiler.rs), [disk cache](../crates/rxla-core/src/disk_cache.rs); artifacts trusted, compatibility namespace operator-supplied |
+| Native ownership | `Arc`-owned `Send + Sync` plugins, clients, buffers and executables; thread-affine submit/wait handles retain in-flight resources; readiness polling and explicit typed creation options | [PJRT runtime](../crates/rxla-pjrt/src/runtime.rs), [thread-safety tests](../crates/rxla-pjrt/tests/thread_safety.rs), [submission tests](../crates/rxla-core/tests/submit.rs); Drop waits, no cancellation/Future or automatic cross-client sharing |
+| Checkpoints | SafeTensors loading, native F16/BF16 values, mixed-dtype resident model initialization/export and streaming no-overwrite files | [weights](../crates/rxla-safetensors/src/lib.rs); model layouts and state schemas remain explicit; BF16 storage is not trainable BF16 state |
 | Development build | Pregenerated bindings/protos and a separate maintainer xtask | CPU gates isolate native source paths; Rust dependencies and a compatible plugin still need provision |
 
 F32 matmul and convolution request HIGHEST operand precision. This avoids the
@@ -81,38 +82,9 @@ promise bitwise equivalence or choose the fastest algorithm on every device.
   CPU/CUDA staged transfers and bounded execution, plus host-copy tests on each
   backend. Requires both trusted plugins and existing CUDA dependencies; it is
   separate from single-plugin checks and makes no throughput claim.
-- [CPU placement gate](../scripts/check-xla-cpu-placement.sh): opt-in default and
-  disk-cache checks with two logical CPU devices in separate native processes.
-  It fixes its child XLA flags, verifies selected-device compile/restore and
-  wrong-placement rejection, then tests separate device cache entries and scoped
-  trimming. This is not multi-GPU/replicated execution and is outside the default
-  single-device development gate.
-- [TinyLlama](../benchmarks/rust-xla-tinyllama-results.md): full 22-layer FP32 model,
-  one fixed prompt, 21 greedy tokens matching Transformers on CPU and CUDA;
-  first eight full-logit vectors checked. Cross-process CUDA executable cache
-  reuse and opt-in optimized weight loading are tested. Frozen BF16 storage with
-  F32 arithmetic also passes the reference; order-balanced RTX 5080 replay tests
-  measured about 1.62–1.63x decode throughput versus F32 storage for that prompt.
-  Allocator diagnostics show lower active/peak usage but unchanged default pool
-  preallocation. These are scoped single-model results, not serving performance.
-  A shared full-model builder also passes eight-token chunk prefill versus scalar
-  execution for all prompt logits and final KV, sharing uploaded weight buffers.
-  Resident prefill-to-decode handoff and greedy continuation also pass the
-  fixed-prompt checks. Scalar tail handling avoids padding and extra tail-shape
-  compilations. Additional full-model CUDA fixtures cover 5/41-token prompts,
-  a 103-token prompt with a seven-token scalar tail, and a 57-token bilingual
-  prompt. The latter two each match all 24 Transformers greedy tokens and the
-  first eight full-logit vectors, with maximum errors below 1.6e-5. These remain
-  a handful of fixed cases at capacity 128; warmed prefill throughput remains
-  unverified. The prefill diagnostic's explicit generation budget also has
-  one-token and 64-token CUDA/reference checks; reports distinguish EOS from
-  length truncation. Configurable capacity defaults to 128, with a separate
-  capacity-256 run matching all 64 reference tokens after a 177-token prompt.
-  A capacity-2048 repeated-text stress case also matches all 34 reference tokens
-  after a 2014-token prompt, ending at position 2047 (the final prediction is not
-  consumed). It is not a representative long-context or semantic-quality suite.
-  See the linked results for per-case
-  storage and precision details.
+- [CPU placement example](../crates/rxla-core/examples/cpu_placement.rs): selects
+  logical CPU device ordinals and checks placement-aware compilation. This is
+  not multi-GPU, replicated execution or a distributed correctness gate.
 - [Qwen3.5-0.8B](QWEN3.5-BENCHMARK.md): the actual hybrid text topology runs
   from a 742 MB grouped-W8 checkpoint on CUDA, including gated-delta and full
   attention layers. A sequence-16 RTX 5080 benchmark and BF16 Transformers
@@ -130,16 +102,15 @@ promise bitwise equivalence or choose the fastest algorithm on every device.
 No result above establishes llama.cpp/JAX speed parity, full YOLO support,
 arbitrary model support, or a production-ready distributed RL framework.
 
-The [CNN training example](crates/rxla-train/examples/train_cnn.rs) has an opt-in
-`--residual` variant: spatial convolution, a two-layer 1x1 convolutional residual
-branch, pooling and a classifier. Three seeds each train for 250 Momentum SGD
-steps on eight synthetic horizontal/vertical-line images on CPU/CUDA, reusing one
-compiled graph. Checks require correct labels, reduced loss and learned weights
-in both residual convolutions. Separate linear residual tests compare every SGD
-step with F64 formulas, including shared-weight gradient summation and one update
-per parameter. Neither is a real-dataset vision benchmark or full ResNet claim.
+The [CIFAR-10 ResNet-20](../crates/rxla-train/examples/cifar_train.rs) and
+[Imagenette ResNet-18](../crates/rxla-train/examples/imagenette_train.rs)
+examples use the public parameter-effect API, resident SGD parameters, stateful
+normalization/RNG and bounded host input pipelines. Imagenette has a recorded
+real-dataset CUDA run; see [its scoped results](IMAGENETTE-TRAINING.md). These
+examples are architecture and integration evidence, not canonical accuracy
+recipes or distributed-training benchmarks.
 
-The opt-in [heterogeneous example](crates/rxla-core/examples/heterogeneous.rs) also runs
+The opt-in [heterogeneous example](../crates/rxla-core/examples/heterogeneous.rs) also runs
 CPU -> CUDA -> CPU subgraphs in one process, with explicit synchronous host
 staging and three pipeline compilations reused over 17 requests each at retained-task
 capacities one and three, with identical outputs. This establishes a small
@@ -328,7 +299,7 @@ LLM/OCR benchmark or multi-GPU validation was rerun for this checkpoint.
 1. **Reusable execution ergonomics:** at the native layer, `submit`/`wait`,
    `is_ready` and borrowed pending output
    handles support bounded in-flight inference and device-data pipelines on one
-   thread/client. [The bounded example](crates/rxla-core/examples/inflight.rs) does not
+   thread/client. [The bounded example](../crates/rxla-core/examples/inflight.rs) does not
    provide a byte-based memory quota or an event-driven executor. A
    [small release benchmark](PIPELINE-BENCHMARK.md) found lower median latency
    for split submissions than split synchronous calls, while a whole graph stayed
