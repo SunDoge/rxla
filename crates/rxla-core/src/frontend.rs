@@ -194,11 +194,14 @@ impl TensorFunction {
     /// Execute with a host-backed or resident Tensor and return a resident
     /// materialized Tensor. Input shape and dtype must match the traced spec.
     pub fn call(&self, runtime: &mut Runtime, input: &Tensor) -> Result<Tensor> {
-        self.program
-            .run_tensors(runtime, &[input])?
-            .into_iter()
-            .next()
-            .ok_or_else(|| err("TensorFunction execution returned no output"))
+        let mut outputs = self.program.run_tensors(runtime, &[input])?;
+        if outputs.len() != 1 {
+            return Err(Error::EvaluationOutputCount {
+                expected: 1,
+                actual: outputs.len(),
+            });
+        }
+        Ok(outputs.remove(0))
     }
 
     /// Compile without executing. Ordinary callers can rely on first-call
@@ -219,15 +222,14 @@ impl Program {
     /// path for frontend tests, IR inspection, cache-key preparation, and tools
     /// that do not need runtime execution.
     pub fn from_tensors(outputs: &[Tensor]) -> Result<Self> {
-        let first = outputs
-            .first()
-            .ok_or_else(|| err("program requires at least one Tensor output"))?;
+        let first = outputs.first().ok_or(Error::ProgramOutputRequired)?;
         let graph = first.graph();
-        if outputs
+        if let Some((index, _)) = outputs
             .iter()
-            .any(|output| !std::sync::Arc::ptr_eq(&graph.0, &output.graph().0))
+            .enumerate()
+            .find(|(_, output)| !std::sync::Arc::ptr_eq(&graph.0, &output.graph().0))
         {
-            return Err(err("program outputs belong to different lazy traces"));
+            return Err(Error::ProgramOutputTraceMismatch { index });
         }
         let (lowered, planning, _, source) = graph.direct_program(outputs, false)?;
         Ok(Self {
@@ -469,7 +471,10 @@ impl<const N: usize> Evaluable for [&Tensor; N] {
         runtime
             .eval_many_on(device, &self.map(Tensor::clone))?
             .try_into()
-            .map_err(|_| err("eval returned an unexpected output count"))
+            .map_err(|values: Vec<Tensor>| Error::EvaluationOutputCount {
+                expected: N,
+                actual: values.len(),
+            })
     }
 }
 
@@ -486,10 +491,16 @@ macro_rules! impl_tuple_evaluable {
                 fn eval_with(self, runtime: &mut Runtime, device: &Device) -> Result<Self::Output> {
                     let ($($name),+) = self;
                     let values = vec![$($name.borrow().clone()),+];
-                    let mut values = runtime.eval_many_on(device, &values)?.into_iter();
+                    let expected = [$(stringify!($name)),+].len();
+                    let evaluated = runtime.eval_many_on(device, &values)?;
+                    let actual = evaluated.len();
+                    if actual != expected {
+                        return Err(Error::EvaluationOutputCount { expected, actual });
+                    }
+                    let mut values = evaluated.into_iter();
                     Ok(($({
                         let _ = stringify!($name);
-                        values.next().expect("tuple arity is preserved")
+                        values.next().ok_or(Error::EvaluationOutputCount { expected, actual })?
                     }),+))
                 }
             }
@@ -1544,6 +1555,20 @@ mod tests {
         assert_eq!(program.output_count(), 1);
         assert_eq!(program.output_spec(0).unwrap().shape, &[2]);
         assert_eq!(program.output_spec(0).unwrap().dtype, DType::F32);
+    }
+
+    #[test]
+    fn reusable_program_rejects_empty_and_cross_trace_outputs_structurally() {
+        assert!(matches!(
+            Program::from_tensors(&[]),
+            Err(Error::ProgramOutputRequired)
+        ));
+        let left = Tracer::new().input(&[1]).unwrap();
+        let right = Tracer::new().input(&[1]).unwrap();
+        assert!(matches!(
+            Program::from_tensors(&[left, right]),
+            Err(Error::ProgramOutputTraceMismatch { index: 1 })
+        ));
     }
 
     #[test]

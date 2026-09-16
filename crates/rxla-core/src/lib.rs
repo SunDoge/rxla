@@ -93,6 +93,12 @@ pub enum Error {
     EvaluationInFlight { index: usize },
     #[snafu(display("an evaluation lease requires at least one lazy output"))]
     EmptyEvaluationLease,
+    #[snafu(display("a reusable Program requires at least one Tensor output"))]
+    ProgramOutputRequired,
+    #[snafu(display("program output {index} belongs to a different lazy trace"))]
+    ProgramOutputTraceMismatch { index: usize },
+    #[snafu(display("evaluation returned {actual} outputs, expected {expected}"))]
+    EvaluationOutputCount { expected: usize, actual: usize },
     #[snafu(display(
         "asynchronous Tensor evaluation currently requires one executable device, got {actual}"
     ))]
