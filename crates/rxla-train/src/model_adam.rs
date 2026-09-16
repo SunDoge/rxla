@@ -517,7 +517,6 @@ mod tests {
         .unwrap();
         let definition = Model::new(regression_loss);
         let (selection, mut model) = definition.trace_resident_under("linear").unwrap();
-        let schema = model.schema().clone();
         let loss = model.outputs()[0].clone();
         apply_model_adam(
             &mut model,
@@ -569,7 +568,7 @@ mod tests {
             [100.0]
         );
 
-        let inference = definition.trace_resident(&schema, &selection).unwrap();
+        let inference = definition.trace_resident(&selection).unwrap();
         let inference_program = inference.compile_stateful(&mut compiler).unwrap();
         let snapshot = model.take_session(session.into_raw()).unwrap();
         assert!(

@@ -214,31 +214,25 @@ where
         Ok((selection, applied))
     }
 
-    /// Trace once with resident parameters selected from a compatible schema.
+    /// Trace once with resident parameters selected from an existing schema.
     ///
     /// This supports distinct training and inference functions that declare the
-    /// same model structure. The selection must belong to `schema`; the newly
-    /// traced structure is compared in full before it is returned.
+    /// same model structure. The selection carries its schema provenance; the
+    /// newly traced structure is compared with that schema before it is returned.
     pub fn trace_resident<Marker>(
         &self,
-        schema: &ModelSchema,
         selection: &ParameterSelection,
     ) -> std::result::Result<AppliedModel, <F as ModelHandler<I, Marker>>::Error>
     where
         F: ModelHandler<I, Marker>,
     {
-        if !selection.schema().same_identity(schema) {
-            return Err(<F as ModelHandler<I, Marker>>::Error::from(
-                Error::SelectionSchemaMismatch,
-            ));
-        }
         let paths = selection
             .parameters()
             .map(|(_, parameter)| parameter.path().to_owned())
             .collect();
         let applied =
             trace_once_resident_selected(paths, |cx| self.apply.invoke(cx, &self.inputs))?;
-        if applied.schema() != schema {
+        if applied.schema() != selection.schema() {
             return Err(<F as ModelHandler<I, Marker>>::Error::from(
                 Error::ModelSchemaMismatch,
             ));
@@ -934,13 +928,13 @@ mod tests {
             calls.set(calls.get() + 1);
             cx.param("weight", &[2])
         })
-        .trace_resident(&schema, &selection)
+        .trace_resident(&selection)
         .unwrap();
         assert_eq!(calls.get(), 1);
         assert_eq!(compatible.resident_parameters().count(), 1);
 
         let incompatible =
-            Model::new(|cx: &mut Cx| cx.param("weight", &[3])).trace_resident(&schema, &selection);
+            Model::new(|cx: &mut Cx| cx.param("weight", &[3])).trace_resident(&selection);
         assert!(matches!(incompatible, Err(Error::ModelSchemaMismatch)));
     }
 

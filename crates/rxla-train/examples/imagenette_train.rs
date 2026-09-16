@@ -420,7 +420,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batch_size = args.batch_size;
     let definition = Model::new(resnet18_train).inputs(resnet18_inputs(batch_size));
     let (trainable, mut model) = definition.trace_resident_all()?;
-    let schema = model.schema().clone();
     let metrics = Tensor::stack(&[model.outputs()[0].clone(), model.outputs()[2].clone()], 0)?;
     let loss = model.outputs()[0].clone();
     apply_model_sgd(&mut model, &trainable, &loss, args.learning_rate)?;
@@ -482,7 +481,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let inference = Model::new(resnet18_infer)
         .inputs(resnet18_inputs(batch_size))
-        .trace_resident(&schema, &trainable)?;
+        .trace_resident(&trainable)?;
     let inference_metrics = Tensor::stack(
         &[
             inference.outputs()[0].clone(),
