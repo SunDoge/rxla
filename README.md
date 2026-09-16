@@ -45,6 +45,40 @@ handle across supported dtypes, including I32 index tensors. Indexing is
 expressed through operations such as `take`, `take_along_axis`, gather lowering,
 and dynamic slicing rather than a separate `Index` type.
 
+Models are ordinary Rust `apply` functions. Typed input extractors keep shapes
+and dtypes outside the mathematical body, while parameter shapes are inferred
+where the corresponding tensors are already available:
+
+```rust
+use rxla::{
+    DType, Tensor,
+    nn::{Cx, Model, ModelInput, Result},
+};
+
+fn apply(cx: &mut Cx, image: Tensor, label: Tensor) -> Result<(Tensor, Tensor)> {
+    let logits = cx.named("head")?.linear(10).apply(&image)?;
+    let loss = logits.cross_entropy_with_indices(&label, 1)?.mean(&[0], false)?;
+    Ok((loss, logits))
+}
+
+let (schema, model) = Model::new(apply)
+    .inputs((
+        ModelInput::new([32, 768]),
+        ModelInput::new([32]).with_dtype(DType::I32),
+    ))
+    .trace()?;
+
+assert_eq!(schema.parameters()[0].shape(), [10, 768]);
+assert_eq!(model.outputs().len(), 2);
+```
+
+The same handler mechanism supports one input, two through sixteen independent
+arguments, arrays, vectors, and application-defined structs. Runtime buffers
+use the symmetric `ModelInputValues` contract, and ordinary execution results
+can be reconstructed through `AppliedModel::decode_outputs`. See the
+[parameter-effect design](docs/PARAMETER-EFFECT-DESIGN.md) for the effect and
+ABI invariants.
+
 ## Architecture
 
 RXLA separates the frontend from execution without maintaining two competing
@@ -81,7 +115,8 @@ The foundational crates are:
 - `rxla-pjrt`: low-level PJRT client and buffer interface.
 - `rxla-xla-proto`: typed XLA configuration and artifact protobufs.
 - `rxla-cache`: filesystem compilation cache primitives.
-- `rxla-nn`: parameter effects, schemas, and neural-network operations.
+- `rxla-nn`: typed model handlers, parameter/state effects, schemas, and
+  neural-network operations.
 
 Experimental integration crates include `rxla-onnx`, `rxla-safetensors`,
 `rxla-train`, and `rxla-models`. They are not all part of the initial public

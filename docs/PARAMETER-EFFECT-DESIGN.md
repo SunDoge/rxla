@@ -162,6 +162,17 @@ only selected replacement parameters cross the visible output ABI. This is not
 a global optimizer registry: the transform explicitly declares stable paths
 under `__optimizer.adam`, and a session owns the resulting buffers.
 
+Selected model parameters are currently ordinary device-buffer inputs and
+updated parameter buffers are visible optimizer results. This involves no
+host payload copy, but the host still installs the returned handles for the
+next call. Making trainable parameters resident is a future parameter-effect
+interpretation, not a per-step fixed-input rebinding shortcut: it must choose
+resident storage while tracing, initialize it by canonical parameter identity,
+record optimizer writes as hidden state roots, and preserve the same storage
+policy when switching between training and inference programs. Until those
+contracts are implemented together, RXLA does not describe parameters as
+resident or claim an atomic parameter/state commit.
+
 `Cx` intentionally exposes only effect primitives and `named`. The layer
 vocabulary lives on the temporary named namespace, so adding layers does not
 turn `Cx` into an ever-growing god object. `Named` also dereferences to `Cx`,
