@@ -19,7 +19,9 @@ use snafu::Snafu;
 pub use state::{
     Parameter, ParameterId, PreparedStateGraph, Session, StateGraph, StateProgram, StateSlot,
 };
-pub use stateful::{StateCx, StateRng, StateStep, StateValue, StatefulModel, StatefulSession};
+pub use stateful::{
+    StateCx, StateRng, StateScope, StateStep, StateValue, StatefulModel, StatefulSession,
+};
 use std::sync::{Arc, Mutex};
 pub use typed_state::{F32, I32, State, StateDType, StateTransaction, StateUpdates};
 mod artifact;

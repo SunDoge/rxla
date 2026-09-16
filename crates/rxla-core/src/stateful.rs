@@ -2,6 +2,7 @@
 
 use super::*;
 use std::collections::BTreeMap;
+use std::ops::{Deref, DerefMut};
 
 struct InputTrace {
     nodes: Vec<(Op, Vec<usize>, TensorType)>,
@@ -150,6 +151,35 @@ pub struct StateCx {
     rngs: BTreeMap<String, RngStream>,
 }
 
+/// A temporary lexical state-effect namespace.
+///
+/// The parent path is restored when the guard is dropped, including during
+/// early returns and error propagation.
+pub struct StateScope<'a> {
+    cx: &'a mut StateCx,
+    parent_depth: usize,
+}
+
+impl Drop for StateScope<'_> {
+    fn drop(&mut self) {
+        self.cx.scope.truncate(self.parent_depth);
+    }
+}
+
+impl Deref for StateScope<'_> {
+    type Target = StateCx;
+
+    fn deref(&self) -> &Self::Target {
+        self.cx
+    }
+}
+
+impl DerefMut for StateScope<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.cx
+    }
+}
+
 struct StateDeclaration {
     slot: StateSlot,
     shape: Vec<i64>,
@@ -224,16 +254,30 @@ impl StateCx {
         Ok(StateValue { path, slot })
     }
 
-    pub fn scope<T>(
-        &mut self,
-        name: &str,
-        build: impl FnOnce(&mut Self) -> Result<T>,
-    ) -> Result<T> {
-        validate_state_name(name)?;
-        self.scope.push(name.to_owned());
-        let result = build(self);
-        self.scope.pop();
-        result
+    /// Enter a lexical state-effect namespace.
+    pub fn scope(&mut self, name: &str) -> Result<StateScope<'_>> {
+        self.scope_path([name])
+    }
+
+    /// Enter several lexical path segments with one RAII guard.
+    pub fn scope_path<I, S>(&mut self, segments: I) -> Result<StateScope<'_>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let segments = segments
+            .into_iter()
+            .map(|segment| segment.as_ref().to_owned())
+            .collect::<Vec<_>>();
+        for segment in &segments {
+            validate_state_name(segment)?;
+        }
+        let parent_depth = self.scope.len();
+        self.scope.extend(segments);
+        Ok(StateScope {
+            cx: self,
+            parent_depth,
+        })
     }
 
     pub fn read(&self, state: &StateValue) -> Result<Tensor> {
@@ -305,14 +349,15 @@ impl StateCx {
         validate_state_name(name)?;
         let path = self.path(name);
         if !self.rngs.contains_key(&path) {
-            let words = self.scope(name, |cx| {
-                Ok([
-                    cx.state("key0", &[], DType::I32)?,
-                    cx.state("key1", &[], DType::I32)?,
-                    cx.state("counter_low", &[], DType::I32)?,
-                    cx.state("counter_high", &[], DType::I32)?,
-                ])
-            })?;
+            let words = {
+                let mut scope = self.scope(name)?;
+                [
+                    scope.state("key0", &[], DType::I32)?,
+                    scope.state("key1", &[], DType::I32)?,
+                    scope.state("counter_low", &[], DType::I32)?,
+                    scope.state("counter_high", &[], DType::I32)?,
+                ]
+            };
             let values = words
                 .iter()
                 .map(|word| word.read(self))
@@ -781,14 +826,38 @@ mod tests {
     fn scopes_make_state_paths_stable_and_distinct() {
         let (mut cx, _, _, _) = StateCx::new(&[]).unwrap();
         let left = cx
-            .scope("left", |cx| cx.state("cache", &[2], DType::F32))
+            .scope("left")
+            .unwrap()
+            .state("cache", &[2], DType::F32)
             .unwrap();
         let right = cx
-            .scope("right", |cx| cx.state("cache", &[2], DType::F32))
+            .scope("right")
+            .unwrap()
+            .state("cache", &[2], DType::F32)
             .unwrap();
         assert_eq!(left.path(), "left.cache");
         assert_eq!(right.path(), "right.cache");
         assert_ne!(left.slot.identity(), right.slot.identity());
+    }
+
+    #[test]
+    fn scope_guards_restore_the_parent_path() {
+        let (mut cx, _, _, _) = StateCx::new(&[]).unwrap();
+        {
+            let mut outer = cx.scope("outer").unwrap();
+            let nested = outer
+                .scope_path(["branch", "block"])
+                .unwrap()
+                .state("cache", &[1], DType::F32)
+                .unwrap();
+            assert_eq!(nested.path(), "outer.branch.block.cache");
+
+            let sibling = outer.state("cache", &[1], DType::F32).unwrap();
+            assert_eq!(sibling.path(), "outer.cache");
+        }
+
+        let root = cx.state("cache", &[1], DType::F32).unwrap();
+        assert_eq!(root.path(), "cache");
     }
 
     #[test]
