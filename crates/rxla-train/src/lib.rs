@@ -3,7 +3,9 @@
 //! Training is functional: transforms consume an [`rxla_nn::AppliedModel`] and
 //! emit replacement parameter tensors as part of the compiled program.
 
+mod data_rng;
 mod model_adam;
+pub use data_rng::{DataRng, SampleRng};
 pub use model_adam::{
     AdamOptions, ModelAdamError, ModelAdamResult, ModelAdamState, ModelAdamStep, ModelAdamUpdate,
     prepare_model_adam,

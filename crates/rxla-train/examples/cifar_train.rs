@@ -12,7 +12,7 @@ use rxla_core::{
     Runtime, Tensor,
 };
 use rxla_nn::{Cx, Model, ParamSchema, Result as NnResult};
-use rxla_train::prepare_model_sgd;
+use rxla_train::{DataRng, prepare_model_sgd};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -34,6 +34,10 @@ struct Args {
 
     #[arg(long, default_value_t = 0.03)]
     learning_rate: f32,
+
+    /// Root seed for schedule-independent per-sample augmentation.
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
 
     /// Directory containing CIFAR-10 `data_batch_1.bin` through `data_batch_5.bin`.
     /// A deterministic synthetic batch is used when omitted.
@@ -88,7 +92,7 @@ impl Dataset {
         }
     }
 
-    fn batch(&self, step: usize) -> (Vec<u8>, Vec<i32>) {
+    fn batch(&self, step: usize) -> (Vec<u8>, Vec<i32>, Vec<usize>) {
         let samples = (0..BATCH as usize)
             .into_par_iter()
             .map(|offset| {
@@ -98,11 +102,13 @@ impl Dataset {
             .collect::<Vec<_>>();
         let mut images = Vec::with_capacity(BATCH as usize * 3072);
         let mut labels = Vec::with_capacity(BATCH as usize);
+        let mut indices = Vec::with_capacity(BATCH as usize);
         for (image, label) in samples {
             images.extend(image);
             labels.push(label);
+            indices.push((step * BATCH as usize + indices.len()) % self.images.len());
         }
-        (images, labels)
+        (images, labels, indices)
     }
 }
 
@@ -187,16 +193,10 @@ fn synthetic_batch() -> (Vec<u8>, Vec<i32>) {
 fn augment(
     runtime: &mut Runtime,
     images: &[u8],
-    step: usize,
+    flips: &[f32],
 ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let image = Tensor::from_slice([BATCH, 32, 32, 3], DType::U8, images)?;
-    let flip = Tensor::from_slice(
-        [BATCH, 1, 1, 1],
-        DType::F32,
-        (0..BATCH)
-            .map(|sample| ((sample as usize + step) % 2) as f32)
-            .collect::<Vec<_>>(),
-    )?;
+    let flip = Tensor::from_slice([BATCH, 1, 1, 1], DType::F32, flips)?;
     let image = image.cast(DType::F32)?.mul_scalar(1.0 / 255.0)?;
     let flipped = image.flip_left_right()?;
     let augmented = flip
@@ -211,9 +211,15 @@ fn prepare_batch(
     step: usize,
     cpu: &mut Runtime,
     gpu: &Client,
+    rng: DataRng,
 ) -> Result<(PendingHostUpload<f32>, PendingHostUpload<i32>), Box<dyn std::error::Error>> {
-    let (images, labels) = dataset.batch(step);
-    let images = augment(cpu, &images, step)?;
+    let (images, labels, sample_ids) = dataset.batch(step);
+    let epoch = (step * BATCH as usize / dataset.images.len()) as u64;
+    let flips = sample_ids
+        .into_iter()
+        .map(|sample| rng.sample(epoch, sample as u64).bernoulli(0, 0, 0.5) as u8 as f32)
+        .collect::<Vec<_>>();
+    let images = augment(cpu, &images, &flips)?;
     Ok((
         gpu.upload_pinned(&[BATCH, 32, 32, 3], images)?,
         gpu.upload_pinned(&[BATCH], labels)?,
@@ -241,9 +247,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(path) => Dataset::load_cifar10(&path)?,
         None => Dataset::synthetic(),
     };
+    let data_rng = DataRng::new(args.seed);
     let mut parameters = initialized_parameters(&gpu, &schema)?;
     let mut prepared = (args.steps != 0)
-        .then(|| prepare_batch(&dataset, 0, &mut augmentation_runtime, &gpu))
+        .then(|| prepare_batch(&dataset, 0, &mut augmentation_runtime, &gpu, data_rng))
         .transpose()?;
 
     for step_index in 0..args.steps {
@@ -258,7 +265,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             executable.submit(arguments.as_slice())?
         };
         prepared = (step_index + 1 < args.steps)
-            .then(|| prepare_batch(&dataset, step_index + 1, &mut augmentation_runtime, &gpu))
+            .then(|| {
+                prepare_batch(
+                    &dataset,
+                    step_index + 1,
+                    &mut augmentation_runtime,
+                    &gpu,
+                    data_rng,
+                )
+            })
             .transpose()?;
         let output = pending.wait()?;
         drop((images, labels));

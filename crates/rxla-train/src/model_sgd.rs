@@ -1,6 +1,6 @@
 //! Minimal functional SGD for effect-based models.
 
-use rxla_core::{Compiler, Executable, LoweredProgram, Tensor};
+use rxla_core::{Compiler, Executable, LoweredProgram, PreparedStateGraph, StateProgram, Tensor};
 use rxla_nn::{AppliedModel, ParameterId, ParameterSelection};
 use snafu::{Snafu, ensure};
 use std::rc::Rc;
@@ -75,6 +75,21 @@ impl ModelSgdStep {
     ) -> ModelSgdResult<Rc<Executable>> {
         Ok(model.compile_tensors(compiler, &self.outputs())?)
     }
+
+    /// Prepare parameter replacements and model state transitions together.
+    pub fn prepare_stateful(&self, model: &AppliedModel) -> ModelSgdResult<PreparedStateGraph> {
+        Ok(model.prepare_stateful_tensors(&self.outputs())?)
+    }
+
+    /// Compile one step whose visible outputs are replacement parameters and
+    /// whose hidden outputs commit model state and RNG transitions.
+    pub fn compile_stateful(
+        &self,
+        model: &AppliedModel,
+        compiler: &mut Compiler,
+    ) -> ModelSgdResult<StateProgram> {
+        Ok(model.compile_stateful_tensors(compiler, &self.outputs())?)
+    }
 }
 
 /// Differentiate a scalar loss with respect to `selection` and build plain SGD
@@ -115,7 +130,7 @@ pub fn prepare_model_sgd(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rxla_core::{CacheLimits, Client};
+    use rxla_core::{CacheLimits, Client, DType};
     use rxla_nn::{Cx, Model, Result};
 
     fn linear_loss(cx: &mut Cx) -> Result<Tensor> {
@@ -152,6 +167,63 @@ mod tests {
             prepare_model_sgd(&model, &schema.select_all(), &model.outputs()[0], f32::NAN),
             Err(ModelSgdError::InvalidLearningRate)
         ));
+    }
+
+    #[test]
+    fn stateful_sgd_retains_state_writes_as_hidden_roots() {
+        fn stateful_loss(cx: &mut Cx) -> Result<Tensor> {
+            let input = cx.input(&[1, 1])?;
+            let steps = cx.state("steps", &[], DType::F32)?;
+            steps.add_(cx, &cx.constant(&[], &[1.0])?)?;
+            let prediction = cx.named("linear")?.linear(1).bias(false).apply(&input)?;
+            Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
+        }
+
+        let (schema, model) = Model::new(stateful_loss).trace().unwrap();
+        let step =
+            prepare_model_sgd(&model, &schema.select_all(), &model.outputs()[0], 0.1).unwrap();
+
+        assert!(step.prepare(&model).is_err());
+        let prepared = step.prepare_stateful(&model).unwrap();
+        assert_eq!(prepared.output_spec(0).unwrap().shape, [1, 1]);
+        let slot = model.states().next().unwrap().1;
+        assert_eq!(prepared.state_type(slot).unwrap(), (DType::F32, vec![]));
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
+    fn stateful_sgd_executes_update_and_state_transition_together() {
+        fn stateful_loss(cx: &mut Cx) -> Result<Tensor> {
+            let input = cx.input(&[1, 1])?;
+            let steps = cx.state("steps", &[], DType::F32)?;
+            steps.add_(cx, &cx.constant(&[], &[1.0])?)?;
+            let prediction = cx.named("linear")?.linear(1).bias(false).apply(&input)?;
+            Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
+        }
+
+        let client = unsafe {
+            Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
+        }
+        .expect("load CPU plugin");
+        let (schema, model) = Model::new(stateful_loss).trace().unwrap();
+        let step =
+            prepare_model_sgd(&model, &schema.select_all(), &model.outputs()[0], 0.1).unwrap();
+        let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+        let program = step
+            .compile_stateful(&model, &mut compiler)
+            .expect("compile stateful SGD");
+        let mut session = model.session(&program).build().unwrap();
+        let input = client.buffer(&[1, 1], &[2.0]).unwrap();
+        let weight = client.buffer(&[1, 1], &[1.0]).unwrap();
+
+        let outputs = session.run(&[&input, &weight]).unwrap();
+        let updated_weight = outputs[0].to_vec::<f32>().unwrap()[0];
+        assert!((updated_weight - 0.2).abs() < 1e-6, "{updated_weight}");
+        let slot = model.states().next().unwrap().1;
+        assert_eq!(
+            session.state(slot).unwrap().to_vec::<f32>().unwrap(),
+            vec![1.0]
+        );
     }
 
     #[test]

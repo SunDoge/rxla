@@ -1,6 +1,8 @@
 //! Functional Adam for parameter-effect models.
 
-use rxla_core::{Compiler, DType, Executable, LoweredProgram, Tensor};
+use rxla_core::{
+    Compiler, DType, Executable, LoweredProgram, PreparedStateGraph, StateProgram, Tensor,
+};
 use rxla_nn::{AppliedModel, ParameterId, ParameterSelection};
 use snafu::{Snafu, ensure};
 use std::rc::Rc;
@@ -135,6 +137,21 @@ impl ModelAdamStep {
         compiler: &mut Compiler,
     ) -> ModelAdamResult<Rc<Executable>> {
         Ok(model.compile_tensors(compiler, &self.outputs())?)
+    }
+
+    /// Prepare Adam replacements and model state transitions together.
+    pub fn prepare_stateful(&self, model: &AppliedModel) -> ModelAdamResult<PreparedStateGraph> {
+        Ok(model.prepare_stateful_tensors(&self.outputs())?)
+    }
+
+    /// Compile one Adam step while preserving resident model state and RNG
+    /// transitions as hidden outputs.
+    pub fn compile_stateful(
+        &self,
+        model: &AppliedModel,
+        compiler: &mut Compiler,
+    ) -> ModelAdamResult<StateProgram> {
+        Ok(model.compile_stateful_tensors(compiler, &self.outputs())?)
     }
 }
 

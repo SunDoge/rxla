@@ -144,6 +144,23 @@ impl AppliedModel {
         Ok(self.state_graph.compile(compiler, &self.outputs)?)
     }
 
+    /// Lower graph-local transform outputs while retaining every final resident
+    /// state version as a hidden root.
+    pub fn prepare_stateful_tensors(&self, outputs: &[Tensor]) -> Result<PreparedStateGraph> {
+        Ok(self.state_graph.prepare(outputs)?)
+    }
+
+    /// Compile graph-local transform outputs and all resident state transitions
+    /// as one program. This is the state-aware counterpart to
+    /// [`Self::compile_tensors`].
+    pub fn compile_stateful_tensors(
+        &self,
+        compiler: &mut Compiler,
+        outputs: &[Tensor],
+    ) -> Result<StateProgram> {
+        Ok(self.state_graph.compile(compiler, outputs)?)
+    }
+
     pub fn session<'a>(&'a self, program: &'a StateProgram) -> ModelSessionBuilder<'a> {
         ModelSessionBuilder {
             model: self,
