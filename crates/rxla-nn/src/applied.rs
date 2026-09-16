@@ -344,6 +344,15 @@ impl AppliedModel {
         }
     }
 
+    /// Reuse the identity of a structurally identical schema.
+    ///
+    /// Compatible retraces use this after validation so selections created
+    /// from the source schema remain valid for the returned model.
+    pub(crate) fn adopt_schema_identity(&mut self, schema: &ModelSchema) {
+        debug_assert_eq!(&self.schema, schema);
+        self.schema = schema.clone();
+    }
+
     pub fn outputs(&self) -> &[Tensor] {
         &self.outputs
     }

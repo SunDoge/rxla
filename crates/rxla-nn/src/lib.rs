@@ -230,13 +230,14 @@ where
             .parameters()
             .map(|(_, parameter)| parameter.path().to_owned())
             .collect();
-        let applied =
+        let mut applied =
             trace_once_resident_selected(paths, |cx| self.apply.invoke(cx, &self.inputs))?;
         if applied.schema() != selection.schema() {
             return Err(<F as ModelHandler<I, Marker>>::Error::from(
                 Error::ModelSchemaMismatch,
             ));
         }
+        applied.adopt_schema_identity(selection.schema());
         Ok(applied)
     }
 }
@@ -932,6 +933,8 @@ mod tests {
         .unwrap();
         assert_eq!(calls.get(), 1);
         assert_eq!(compatible.resident_parameters().count(), 1);
+        assert_eq!(compatible.parameter_tensors(&selection).unwrap().len(), 1);
+        compatible.validate_resident_parameters(&selection).unwrap();
 
         let incompatible =
             Model::new(|cx: &mut Cx| cx.param("weight", &[3])).trace_resident(&selection);
