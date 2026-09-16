@@ -108,6 +108,34 @@ pub enum StorageKind {
     Pjrt,
 }
 
+/// Failures while inspecting or transferring managed tensor storage.
+#[derive(Debug, Snafu)]
+#[non_exhaustive]
+pub enum StorageError {
+    #[snafu(display("dtype {dtype:?} has no supported host representation"))]
+    UnsupportedStorageDType { dtype: DType },
+    #[snafu(display(
+        "layout element width {actual} does not match {dtype:?} storage width {expected}"
+    ))]
+    LayoutElementSize {
+        dtype: DType,
+        expected: usize,
+        actual: usize,
+    },
+    #[snafu(display("operation requires host storage"))]
+    ExpectedHostStorage,
+    #[snafu(display("PJRT client has no selected device"))]
+    NoSelectedDevice,
+    #[snafu(display("host packing allocation failed: {source}"))]
+    HostPackingAllocation {
+        source: std::collections::TryReserveError,
+    },
+    #[snafu(transparent)]
+    Pjrt { source: rxla_pjrt::Error },
+}
+
+pub type StorageResult<T> = std::result::Result<T, StorageError>;
+
 /// A scalar whose in-memory native-endian representation can be copied into or
 /// retained as tensor host storage.
 ///
@@ -372,37 +400,40 @@ impl Storage {
         }
     }
     /// Host metadata is explicit; native dtype comes from the opaque PJRT buffer.
-    pub fn dtype(&self) -> Result<DType> {
+    pub fn dtype(&self) -> StorageResult<DType> {
         match &*self.0 {
             StorageInner::Host { dtype, .. } => Ok(*dtype),
             StorageInner::Device(buffer) => Ok(buffer.dtype()?),
         }
     }
     /// Validate a raw-byte view against this storage's recorded dtype.
-    pub fn view(&self, layout: StridedLayout) -> Result<HostView<'_>> {
+    pub fn view(&self, layout: StridedLayout) -> StorageResult<HostView<'_>> {
         let dtype = self.dtype()?;
         let element_bytes = dtype
             .size_bytes()
-            .ok_or_else(|| err(format!("unsupported storage dtype {dtype:?}")))?;
+            .ok_or(StorageError::UnsupportedStorageDType { dtype })?;
         if layout.element_bytes() != element_bytes {
-            return Err(err("layout element size does not match storage dtype"));
+            return Err(StorageError::LayoutElementSize {
+                dtype,
+                expected: element_bytes,
+                actual: layout.element_bytes(),
+            });
         }
         Ok(HostView::new(
-            self.host_bytes()
-                .ok_or_else(|| err("expected host storage"))?,
+            self.host_bytes().ok_or(StorageError::ExpectedHostStorage)?,
             layout,
         )?)
     }
     /// Explicitly pack/upload host bytes in native endian order according to dtype.
     /// I32 and BF16 never pass through F32. Typed, aligned scratch exists only at
     /// this native transfer boundary, not in the retained storage representation.
-    pub fn upload(&self, layout: &StridedLayout, client: &Client) -> Result<Rc<Buffer>> {
+    pub fn upload(&self, layout: &StridedLayout, client: &Client) -> StorageResult<Rc<Buffer>> {
         let selected = client
             .info()?
             .addressable_devices
             .iter()
             .position(|device| device.selected)
-            .ok_or_else(|| err("PJRT client has no selected device"))?;
+            .ok_or(StorageError::NoSelectedDevice)?;
         self.upload_on_device(layout, client, selected)
     }
 
@@ -411,7 +442,7 @@ impl Storage {
         layout: &StridedLayout,
         client: &Client,
         device: usize,
-    ) -> Result<Rc<Buffer>> {
+    ) -> StorageResult<Rc<Buffer>> {
         let view = self.view(layout.clone())?;
         let shape = layout.shape().as_slice();
         let buffer = match self.dtype()? {
@@ -440,20 +471,20 @@ impl Storage {
                     bf16::from_bits(u16::from_ne_bytes(b.try_into().unwrap()))
                 })?,
             )?,
-            dtype => return Err(err(format!("cannot upload storage dtype {dtype:?}"))),
+            dtype => return Err(StorageError::UnsupportedStorageDType { dtype }),
         };
         Ok(Rc::new(buffer))
     }
 }
 
 // Private boundary conversion only. Byte reads avoid unaligned typed references.
-fn pack_values<T>(view: &HostView<'_>, decode: fn(&[u8]) -> T) -> Result<Vec<T>> {
+fn pack_values<T>(view: &HostView<'_>, decode: fn(&[u8]) -> T) -> StorageResult<Vec<T>> {
     let shape = view.layout().shape();
     let count = shape.numel()?;
     let mut values = Vec::new();
     values
         .try_reserve_exact(count)
-        .map_err(|_| err("host packing allocation failed"))?;
+        .map_err(|source| StorageError::HostPackingAllocation { source })?;
     let mut index: SmallVec<i64, 5> = std::iter::repeat_n(0, shape.rank()).collect();
     for _ in 0..count {
         values.push(decode(view.element(&index)?));
@@ -872,7 +903,7 @@ impl Tensor {
     }
     pub fn host_view(&self) -> Result<HostView<'_>> {
         match self.binding.get() {
-            Some(Binding::Host { storage, layout }) => storage.view(layout.clone()),
+            Some(Binding::Host { storage, layout }) => Ok(storage.view(layout.clone())?),
             _ => Err(err("tensor has no host storage")),
         }
     }
@@ -888,7 +919,7 @@ impl Tensor {
                 }
                 Ok(buffer.clone())
             }
-            Some(Binding::Host { storage, layout }) => storage.upload(layout, client),
+            Some(Binding::Host { storage, layout }) => Ok(storage.upload(layout, client)?),
             None => Err(err("symbolic tensor has no managed storage")),
         }
     }
@@ -903,7 +934,7 @@ impl Tensor {
                 Ok(buffer.clone())
             }
             Some(Binding::Host { storage, layout }) => {
-                storage.upload_on_device(layout, client, device)
+                Ok(storage.upload_on_device(layout, client, device)?)
             }
             None => Err(err("symbolic tensor has no managed storage")),
         }
@@ -1048,10 +1079,22 @@ mod tests {
         assert_eq!(x.dtype(), DType::F32);
         assert!(x.with_host_storage(storage, layout).is_err());
         let bf16 = Storage::host(DType::BF16, vec![0u8; 8]);
-        assert!(
-            bf16.view(StridedLayout::row_major(Shape::new(&[2]).unwrap(), 4).unwrap())
-                .is_err()
-        );
+        assert!(matches!(
+            bf16.view(StridedLayout::row_major(Shape::new(&[2]).unwrap(), 4).unwrap()),
+            Err(StorageError::LayoutElementSize {
+                dtype: DType::BF16,
+                expected: 2,
+                actual: 4,
+            })
+        ));
+
+        let unknown = DType::from_raw(99_999);
+        assert!(matches!(
+            Storage::host(unknown, Vec::<u8>::new()).view(
+                StridedLayout::row_major(Shape::new(&[0]).unwrap(), 1).unwrap()
+            ),
+            Err(StorageError::UnsupportedStorageDType { dtype }) if dtype == unknown
+        ));
     }
 
     #[test]

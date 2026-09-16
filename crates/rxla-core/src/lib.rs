@@ -73,6 +73,8 @@ pub enum Error {
     Ir { source: IrError },
     #[snafu(transparent)]
     Sharding { source: ShardingError },
+    #[snafu(transparent)]
+    Storage { source: StorageError },
     #[snafu(display("tensor has no expression node"))]
     MissingExpression,
     #[snafu(display("tensor belongs to an explicit Tracer; execute its Program"))]
@@ -103,8 +105,8 @@ pub use frontend::{
     Device, DeviceRuntime, Evaluable, Program, Runtime, RuntimeBuilder, TensorFunction, Tracer,
 };
 pub use tensor_handle::{
-    Storage, StorageKind, TensorBuildError, TensorBuilder, TensorDescriptor, TensorDownloadError,
-    TensorElement, TensorLayout,
+    Storage, StorageError, StorageKind, StorageResult, TensorBuildError, TensorBuilder,
+    TensorDescriptor, TensorDownloadError, TensorElement, TensorLayout,
 };
 fn err(message: impl Into<String>) -> Error {
     Error::InvalidArgument {
