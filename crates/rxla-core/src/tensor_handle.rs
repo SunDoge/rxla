@@ -636,8 +636,12 @@ impl Tensor {
         storage: Storage,
         layout: StridedLayout,
     ) -> Result<Self> {
-        if storage.dtype()? != dtype {
-            return Err(err("host tensor storage dtype mismatch"));
+        let actual = storage.dtype()?;
+        if actual != dtype {
+            return Err(Error::StorageDTypeMismatch {
+                declared: dtype,
+                actual,
+            });
         }
         storage.view(layout.clone())?;
         let value = Self {
@@ -834,7 +838,7 @@ impl Tensor {
             .map_err(|_| Error::GraphLockPoisoned)?;
         graph
             .parameter_number(trace.id)?
-            .ok_or_else(|| err("storage binding requires a symbolic input, not a computed value"))
+            .ok_or(Error::StorageBindingRequiresInput)
     }
     fn with_binding(&self, binding: Binding) -> Self {
         Self {
@@ -850,8 +854,14 @@ impl Tensor {
     /// graph semantics or checkpoints. Strides/offset describe a read-only view.
     pub fn with_host_storage(&self, storage: Storage, layout: StridedLayout) -> Result<Self> {
         self.input_index()?;
-        if layout.shape().as_slice() != self.shape() || storage.dtype()? != self.dtype() {
-            return Err(err("host input shape/dtype mismatch"));
+        let actual_dtype = storage.dtype()?;
+        if layout.shape().as_slice() != self.shape() || actual_dtype != self.dtype() {
+            return Err(Error::HostInputMetadata {
+                expected_shape: self.shape().to_vec(),
+                expected_dtype: self.dtype(),
+                actual_shape: layout.shape().as_slice().to_vec(),
+                actual_dtype,
+            });
         }
         storage.view(layout.clone())?;
         Ok(self.with_binding(Binding::Host { storage, layout }))
@@ -860,11 +870,16 @@ impl Tensor {
     /// validated when used with an executor. This does not create a strided view.
     pub fn with_device_storage(&self, storage: Storage) -> Result<Self> {
         self.input_index()?;
-        let buffer = storage
-            .buffer()
-            .ok_or_else(|| err("expected PJRT storage"))?;
-        if buffer.dtype()? != self.dtype() || buffer.dimensions()? != self.shape() {
-            return Err(err("device input shape/dtype mismatch"));
+        let buffer = storage.buffer().ok_or(Error::ExpectedDeviceStorage)?;
+        let actual_dtype = buffer.dtype()?;
+        let actual_shape = buffer.dimensions()?;
+        if actual_dtype != self.dtype() || actual_shape != self.shape() {
+            return Err(Error::DeviceInputMetadata {
+                expected_shape: self.shape().to_vec(),
+                expected_dtype: self.dtype(),
+                actual_shape,
+                actual_dtype,
+            });
         }
         let layout = buffer.memory_layout()?;
         Ok(self.with_binding(Binding::Device { storage, layout }))
@@ -904,7 +919,7 @@ impl Tensor {
     pub fn host_view(&self) -> Result<HostView<'_>> {
         match self.binding.get() {
             Some(Binding::Host { storage, layout }) => Ok(storage.view(layout.clone())?),
-            _ => Err(err("tensor has no host storage")),
+            _ => Err(Error::MissingHostStorage),
         }
     }
     /// Explicitly upload/pack a managed host input, or retain its same-client
@@ -913,30 +928,30 @@ impl Tensor {
     pub fn to_buffer(&self, client: &Client) -> Result<Rc<Buffer>> {
         match self.binding.get() {
             Some(Binding::Device { storage, .. }) => {
-                let buffer = storage.buffer().expect("device binding invariant");
+                let buffer = storage.buffer().ok_or(Error::ExpectedDeviceStorage)?;
                 if !buffer.belongs_to(client) {
-                    return Err(err("managed tensor belongs to a different client"));
+                    return Err(Error::ForeignClientStorage);
                 }
                 Ok(buffer.clone())
             }
             Some(Binding::Host { storage, layout }) => Ok(storage.upload(layout, client)?),
-            None => Err(err("symbolic tensor has no managed storage")),
+            None => Err(Error::MissingManagedStorage),
         }
     }
 
     pub(crate) fn to_buffer_on_device(&self, client: &Client, device: usize) -> Result<Rc<Buffer>> {
         match self.binding.get() {
             Some(Binding::Device { storage, .. }) => {
-                let buffer = storage.buffer().expect("device binding invariant");
+                let buffer = storage.buffer().ok_or(Error::ExpectedDeviceStorage)?;
                 if !buffer.belongs_to(client) {
-                    return Err(err("managed tensor belongs to a different client"));
+                    return Err(Error::ForeignClientStorage);
                 }
                 Ok(buffer.clone())
             }
             Some(Binding::Host { storage, layout }) => {
                 Ok(storage.upload_on_device(layout, client, device)?)
             }
-            None => Err(err("symbolic tensor has no managed storage")),
+            None => Err(Error::MissingManagedStorage),
         }
     }
     /// Return a new input descriptor owning resident storage; original unchanged.
@@ -1077,7 +1092,15 @@ mod tests {
         assert!(storage.view(layout.clone()).is_ok());
         let x = Graph::default().input(&[2]).unwrap();
         assert_eq!(x.dtype(), DType::F32);
-        assert!(x.with_host_storage(storage, layout).is_err());
+        assert!(matches!(
+            x.with_host_storage(storage, layout),
+            Err(Error::HostInputMetadata {
+                expected_shape,
+                expected_dtype: DType::F32,
+                actual_shape,
+                actual_dtype: DType::I32,
+            }) if expected_shape == [2] && actual_shape == [2]
+        ));
         let bf16 = Storage::host(DType::BF16, vec![0u8; 8]);
         assert!(matches!(
             bf16.view(StridedLayout::row_major(Shape::new(&[2]).unwrap(), 4).unwrap()),
@@ -1094,6 +1117,34 @@ mod tests {
                 StridedLayout::row_major(Shape::new(&[0]).unwrap(), 1).unwrap()
             ),
             Err(StorageError::UnsupportedStorageDType { dtype }) if dtype == unknown
+        ));
+    }
+
+    #[test]
+    fn tensor_storage_binding_failures_are_structured() {
+        let shape = Shape::new(&[1]).unwrap();
+        let layout = StridedLayout::row_major(shape, 4).unwrap();
+        assert!(matches!(
+            Tensor::from_host_storage(
+                DType::F32,
+                Storage::host(DType::I32, 1i32.to_ne_bytes()),
+                layout.clone(),
+            ),
+            Err(Error::StorageDTypeMismatch {
+                declared: DType::F32,
+                actual: DType::I32,
+            })
+        ));
+
+        let graph = Graph::default();
+        let computed = graph.constant(&[1], &[1.0]).unwrap().exp().unwrap();
+        assert!(matches!(
+            computed.with_host_storage(Storage::host(DType::F32, 1f32.to_ne_bytes()), layout,),
+            Err(Error::StorageBindingRequiresInput)
+        ));
+        assert!(matches!(
+            computed.host_view(),
+            Err(Error::MissingHostStorage)
         ));
     }
 

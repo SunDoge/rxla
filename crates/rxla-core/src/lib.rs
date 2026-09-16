@@ -91,6 +91,36 @@ pub enum Error {
     LazySessionMismatch,
     #[snafu(display("tensor graph lock is poisoned"))]
     GraphLockPoisoned,
+    #[snafu(display("storage can only be bound to a symbolic input"))]
+    StorageBindingRequiresInput,
+    #[snafu(display("declared tensor dtype {declared:?} does not match storage dtype {actual:?}"))]
+    StorageDTypeMismatch { declared: DType, actual: DType },
+    #[snafu(display(
+        "host input expects {expected_shape:?} {expected_dtype:?}, received {actual_shape:?} {actual_dtype:?}"
+    ))]
+    HostInputMetadata {
+        expected_shape: Vec<i64>,
+        expected_dtype: DType,
+        actual_shape: Vec<i64>,
+        actual_dtype: DType,
+    },
+    #[snafu(display("operation requires PJRT device storage"))]
+    ExpectedDeviceStorage,
+    #[snafu(display(
+        "device input expects {expected_shape:?} {expected_dtype:?}, received {actual_shape:?} {actual_dtype:?}"
+    ))]
+    DeviceInputMetadata {
+        expected_shape: Vec<i64>,
+        expected_dtype: DType,
+        actual_shape: Vec<i64>,
+        actual_dtype: DType,
+    },
+    #[snafu(display("tensor has no host storage"))]
+    MissingHostStorage,
+    #[snafu(display("managed tensor belongs to a different PJRT client"))]
+    ForeignClientStorage,
+    #[snafu(display("symbolic tensor has no managed storage"))]
+    MissingManagedStorage,
     #[snafu(display("invalid tensor operation: {message}"))]
     InvalidArgument { message: String },
 }
