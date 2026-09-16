@@ -153,14 +153,14 @@ fn basic_block(
         ..Default::default()
     };
     let hidden = block
-        .layer("conv1")?
+        .scope("conv1")?
         .conv2d(channels, [3, 3])
         .options(convolution)
         .bias(false)
         .apply(input)?;
-    let hidden = block.layer("bn1")?.batch_norm().apply(&hidden)?.relu()?;
+    let hidden = block.scope("bn1")?.batch_norm().apply(&hidden)?.relu()?;
     let hidden = block
-        .layer("conv2")?
+        .scope("conv2")?
         .conv2d(channels, [3, 3])
         .options(Conv2dOptions {
             padding: [[1, 1], [1, 1]],
@@ -168,7 +168,7 @@ fn basic_block(
         })
         .bias(false)
         .apply(&hidden)?;
-    let hidden = block.layer("bn2")?.batch_norm().apply(&hidden)?;
+    let hidden = block.scope("bn2")?.batch_norm().apply(&hidden)?;
     let residual = if stride == 1 {
         input.clone()
     } else {
@@ -184,7 +184,7 @@ fn basic_block(
 
 fn classifier(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor)> {
     let mut hidden = cx
-        .layer("stem_conv")?
+        .scope("stem_conv")?
         .conv2d(16, [3, 3])
         .options(Conv2dOptions {
             padding: [[1, 1], [1, 1]],
@@ -192,7 +192,7 @@ fn classifier(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, 
         })
         .bias(false)
         .apply(&images)?;
-    hidden = cx.layer("stem_bn")?.batch_norm().apply(&hidden)?.relu()?;
+    hidden = cx.scope("stem_bn")?.batch_norm().apply(&hidden)?.relu()?;
     for stage in 0..3 {
         let channels = 16 << stage;
         for block in 0..3 {
@@ -201,7 +201,7 @@ fn classifier(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, 
         }
     }
     let features = hidden.mean(&[1, 2], false)?;
-    let logits = cx.layer("head")?.linear(CLASSES).apply(&features)?;
+    let logits = cx.scope("head")?.linear(CLASSES).apply(&features)?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;

@@ -348,7 +348,7 @@ mod tests {
 
     fn linear_loss(cx: &mut Cx) -> Result<Tensor> {
         let input = cx.input(&[2, 3])?;
-        let prediction = cx.layer("linear")?.linear(1).bias(false).apply(&input)?;
+        let prediction = cx.scope("linear")?.linear(1).bias(false).apply(&input)?;
         Ok(prediction.square()?.sum(&[0, 1], false)?)
     }
 
@@ -446,7 +446,7 @@ mod tests {
         fn regression_loss(cx: &mut Cx) -> Result<Tensor> {
             let input = cx.input(&[1, 1])?;
             let target = cx.input(&[1, 1])?;
-            let prediction = cx.layer("linear")?.linear(1).bias(false).apply(&input)?;
+            let prediction = cx.scope("linear")?.linear(1).bias(false).apply(&input)?;
             Ok(prediction.sub(&target)?.square()?.sum(&[0, 1], false)?)
         }
 
@@ -507,7 +507,7 @@ mod tests {
         fn regression_loss(cx: &mut Cx) -> Result<Tensor> {
             let input = cx.input(&[1, 1])?;
             let target = cx.input(&[1, 1])?;
-            let prediction = cx.layer("linear")?.linear(1).bias(false).apply(&input)?;
+            let prediction = cx.scope("linear")?.linear(1).bias(false).apply(&input)?;
             Ok(prediction.sub(&target)?.square()?.sum(&[0, 1], false)?)
         }
 

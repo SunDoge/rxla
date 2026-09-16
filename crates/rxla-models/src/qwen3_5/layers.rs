@@ -2,7 +2,7 @@ use super::*;
 use rxla_core::{Conv2dOptions, RotaryLayout};
 
 fn projection(cx: &mut Cx, name: &str, input: &Tensor, width: i64, group: i64) -> Result<Tensor> {
-    cx.layer(name)?.quantized_linear(width, group).apply(input)
+    cx.scope(name)?.quantized_linear(width, group).apply(input)
 }
 
 fn partial_rope(input: &Tensor, angles: &Tensor, width: i64) -> Result<Tensor> {
@@ -51,7 +51,7 @@ pub(super) fn full_attention(
         .reshape(&[*batch, *sequence, config.attention_heads * config.head_dim])?
         .sigmoid()?;
     let query = cx
-        .layer("q_norm")?
+        .scope("q_norm")?
         .rms_norm()
         .epsilon(config.epsilon)
         .zero_centered(true)
@@ -66,7 +66,7 @@ pub(super) fn full_attention(
     )?
     .reshape(&[*batch, *sequence, config.key_value_heads, config.head_dim])?;
     let key = cx
-        .layer("k_norm")?
+        .scope("k_norm")?
         .rms_norm()
         .epsilon(config.epsilon)
         .zero_centered(true)

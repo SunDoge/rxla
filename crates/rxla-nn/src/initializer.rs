@@ -273,7 +273,7 @@ mod tests {
         }
         .unwrap();
         let definition =
-            Model::new(|cx: &mut Cx, input: Tensor| cx.layer("head")?.linear(2).apply(&input))
+            Model::new(|cx: &mut Cx, input: Tensor| cx.scope("head")?.linear(2).apply(&input))
                 .inputs(crate::ModelInput::new([1, 3]));
         let model = definition.trace().unwrap();
         let schema = model.schema();
@@ -306,7 +306,7 @@ mod tests {
         ));
 
         let definition =
-            Model::new(|cx: &mut Cx, input: Tensor| cx.layer("norm")?.batch_norm().apply(&input))
+            Model::new(|cx: &mut Cx, input: Tensor| cx.scope("norm")?.batch_norm().apply(&input))
                 .inputs(crate::ModelInput::new([1, 2, 2, 3]));
         let (_, model) = definition
             .trace_resident(|schema| {

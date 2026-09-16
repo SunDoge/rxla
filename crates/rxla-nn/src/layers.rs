@@ -283,15 +283,14 @@ impl LayerNorm<'_> {
     }
 }
 
-/// Builder entry point for one named layer with non-default options.
-pub struct Layer<'a> {
-    scope: Scope<'a>,
-}
-
-impl<'a> Layer<'a> {
+/// Neural-network builders available inside a lexical effect scope.
+///
+/// Keeping these methods on the public RAII guard lets downstream crates add
+/// their own builders with extension traits without growing [`Cx`].
+impl<'a> Scope<'a> {
     pub fn embedding(self, vocabulary: i64, width: i64) -> Embedding<'a> {
         Embedding {
-            scope: self.scope,
+            scope: self,
             vocabulary,
             width,
         }
@@ -299,7 +298,7 @@ impl<'a> Layer<'a> {
 
     pub fn linear(self, out_features: i64) -> Linear<'a> {
         Linear {
-            scope: self.scope,
+            scope: self,
             out_features,
             bias: true,
         }
@@ -307,7 +306,7 @@ impl<'a> Layer<'a> {
 
     pub fn quantized_linear(self, out_features: i64, group_size: i64) -> QuantizedLinear<'a> {
         QuantizedLinear {
-            scope: self.scope,
+            scope: self,
             out_features,
             group_size,
         }
@@ -315,7 +314,7 @@ impl<'a> Layer<'a> {
 
     pub fn conv2d(self, out_channels: i64, kernel: [i64; 2]) -> Conv2d<'a> {
         Conv2d {
-            scope: self.scope,
+            scope: self,
             out_channels,
             kernel,
             options: Conv2dOptions::default(),
@@ -325,7 +324,7 @@ impl<'a> Layer<'a> {
 
     pub fn group_norm(self, groups: i64) -> GroupNorm<'a> {
         GroupNorm {
-            scope: self.scope,
+            scope: self,
             groups,
             epsilon: 1e-5,
             affine: true,
@@ -334,7 +333,7 @@ impl<'a> Layer<'a> {
 
     pub fn batch_norm(self) -> BatchNorm<'a> {
         BatchNorm {
-            scope: self.scope,
+            scope: self,
             epsilon: 1e-5,
             momentum: 0.1,
             training: true,
@@ -343,7 +342,7 @@ impl<'a> Layer<'a> {
 
     pub fn layer_norm(self, normalized_rank: usize) -> LayerNorm<'a> {
         LayerNorm {
-            scope: self.scope,
+            scope: self,
             normalized_rank,
             epsilon: 1e-5,
             affine: true,
@@ -352,19 +351,10 @@ impl<'a> Layer<'a> {
 
     pub fn rms_norm(self) -> RmsNorm<'a> {
         RmsNorm {
-            scope: self.scope,
+            scope: self,
             epsilon: 1e-5,
             zero_centered: false,
         }
-    }
-}
-
-impl Cx {
-    /// Enter one named layer builder without changing the effect API surface.
-    pub fn layer(&mut self, name: &str) -> Result<Layer<'_>> {
-        Ok(Layer {
-            scope: self.scope(name)?,
-        })
     }
 }
 
@@ -587,7 +577,7 @@ mod tests {
 
     fn quantized_projection(cx: &mut Cx) -> Result<Tensor> {
         let input = cx.input(&[2, 64])?;
-        cx.layer("projection")?
+        cx.scope("projection")?
             .quantized_linear(32, 32)
             .apply(&input)
     }
@@ -605,12 +595,12 @@ mod tests {
     }
 
     #[test]
-    fn direct_named_ops_preserve_scoped_parameter_identity() {
+    fn scoped_builders_preserve_parameter_identity() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 8])?;
-            let encoder = cx.layer("encoder")?.linear(4);
+            let encoder = cx.scope("encoder")?.linear(4);
             let hidden = encoder.apply(&input)?;
-            cx.layer("head")?.linear(3).apply(&hidden)
+            cx.scope("head")?.linear(3).apply(&hidden)
         })
         .unwrap();
 
@@ -619,5 +609,28 @@ mod tests {
         assert_eq!(schema.get("encoder.bias").unwrap().shape(), [4]);
         assert_eq!(schema.get("head.weight").unwrap().shape(), [3, 4]);
         assert_eq!(schema.get("head.bias").unwrap().shape(), [3]);
+    }
+
+    #[test]
+    fn downstream_vocabulary_can_be_an_extension_trait_on_scope() {
+        trait ProjectionExt<'a> {
+            fn projection(self, width: i64) -> Linear<'a>;
+        }
+
+        impl<'a> ProjectionExt<'a> for Scope<'a> {
+            fn projection(self, width: i64) -> Linear<'a> {
+                self.linear(width).bias(false)
+            }
+        }
+
+        let (schema, output) = init(|cx| {
+            let input = cx.input(&[2, 8])?;
+            cx.scope("adapter")?.projection(4).apply(&input)
+        })
+        .unwrap();
+
+        assert_eq!(output.shape(), [2, 4]);
+        assert_eq!(schema.get("adapter.weight").unwrap().shape(), [4, 8]);
+        assert!(schema.get("adapter.bias").is_none());
     }
 }

@@ -218,7 +218,7 @@ fn basic_block(
     let mut stage = cx.scope(&format!("stage{stage_index}"))?;
     let mut block = stage.scope(&format!("block{block_index}"))?;
     let hidden = block
-        .layer("conv1")?
+        .scope("conv1")?
         .conv2d(channels, [3, 3])
         .options(Conv2dOptions {
             strides: [stride, stride],
@@ -228,13 +228,13 @@ fn basic_block(
         .bias(false)
         .apply(input)?;
     let hidden = block
-        .layer("bn1")?
+        .scope("bn1")?
         .batch_norm()
         .training(training)
         .apply(&hidden)?
         .relu()?;
     let hidden = block
-        .layer("conv2")?
+        .scope("conv2")?
         .conv2d(channels, [3, 3])
         .options(Conv2dOptions {
             padding: [[1, 1], [1, 1]],
@@ -243,7 +243,7 @@ fn basic_block(
         .bias(false)
         .apply(&hidden)?;
     let hidden = block
-        .layer("bn2")?
+        .scope("bn2")?
         .batch_norm()
         .training(training)
         .apply(&hidden)?;
@@ -251,7 +251,7 @@ fn basic_block(
         input.clone()
     } else {
         let projected = block
-            .layer("shortcut_conv")?
+            .scope("shortcut_conv")?
             .conv2d(channels, [1, 1])
             .options(Conv2dOptions {
                 strides: [stride, stride],
@@ -260,7 +260,7 @@ fn basic_block(
             .bias(false)
             .apply(input)?;
         block
-            .layer("shortcut_bn")?
+            .scope("shortcut_bn")?
             .batch_norm()
             .training(training)
             .apply(&projected)?
@@ -284,7 +284,7 @@ fn resnet18(
         .select(&images.flip_left_right()?, &images)?
         .normalize_nhwc(&[0.485, 0.456, 0.406], &[0.229, 0.224, 0.225])?;
     let mut hidden = cx
-        .layer("stem_conv")?
+        .scope("stem_conv")?
         .conv2d(64, [7, 7])
         .options(Conv2dOptions {
             strides: [2, 2],
@@ -294,7 +294,7 @@ fn resnet18(
         .bias(false)
         .apply(&images)?;
     hidden = cx
-        .layer("stem_bn")?
+        .scope("stem_bn")?
         .batch_norm()
         .training(training)
         .apply(&hidden)?
@@ -314,7 +314,7 @@ fn resnet18(
         }
     }
     let features = hidden.mean(&[1, 2], false)?;
-    let logits = cx.layer("head")?.linear(CLASSES).apply(&features)?;
+    let logits = cx.scope("head")?.linear(CLASSES).apply(&features)?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;

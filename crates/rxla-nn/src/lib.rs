@@ -20,7 +20,7 @@ mod initializer;
 pub use initializer::Initializer;
 mod layers;
 pub use layers::{
-    BatchNorm, Conv2d, Embedding, GroupNorm, Layer, LayerNorm, Linear, QuantizedLinear, RmsNorm,
+    BatchNorm, Conv2d, Embedding, GroupNorm, LayerNorm, Linear, QuantizedLinear, RmsNorm,
 };
 mod outputs;
 pub use outputs::{ModelOutputValues, ModelOutputs};
@@ -1124,7 +1124,7 @@ mod tests {
         let calls = Cell::new(0);
         let definition = Model::new(|cx: &mut Cx, input: Tensor| {
             calls.set(calls.get() + 1);
-            cx.layer("head")?.linear(3).apply(&input)
+            cx.scope("head")?.linear(3).apply(&input)
         })
         .inputs(ModelInput::new([2, 4]));
 
@@ -1140,7 +1140,7 @@ mod tests {
         let calls = Cell::new(0);
         let definition = Model::new(|cx: &mut Cx, input: Tensor| {
             calls.set(calls.get() + 1);
-            cx.layer("head")?.linear(3).apply(&input)
+            cx.scope("head")?.linear(3).apply(&input)
         })
         .inputs(ModelInput::new([2, 4]));
 
@@ -1321,7 +1321,7 @@ mod tests {
     fn linear_infers_input_features_at_its_use_site() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 4])?;
-            cx.layer("head")?.linear(3).apply(&input)
+            cx.scope("head")?.linear(3).apply(&input)
         })
         .unwrap();
         assert_eq!(output.shape(), [2, 3]);
@@ -1344,12 +1344,12 @@ mod tests {
         let model = Model::new(|cx: &mut Cx| {
             let input = cx.input(&[2, 4])?;
             let hidden = cx
-                .layer("hidden")?
+                .scope("hidden")?
                 .linear(8)
                 .bias(false)
                 .apply(&input)?
                 .relu()?;
-            cx.layer("head")?.linear(3).apply(&hidden)
+            cx.scope("head")?.linear(3).apply(&hidden)
         });
 
         let applied = model.trace().unwrap();
@@ -1367,7 +1367,7 @@ mod tests {
     fn one_context_composes_parameters_and_resident_state() {
         let model = Model::new(|cx: &mut Cx| {
             let input = cx.input(&[2, 4])?;
-            let output = cx.layer("head")?.linear(3).apply(&input)?;
+            let output = cx.scope("head")?.linear(3).apply(&input)?;
             let count = cx.state("steps", &[], DType::I32)?;
             let next = count.read(cx)?.wrapping_add_scalar(1)?;
             count.write(cx, &next)?;
@@ -1434,8 +1434,8 @@ mod tests {
         let calls = Cell::new(0);
         let definition = Model::new(|cx: &mut Cx, input: Tensor| {
             calls.set(calls.get() + 1);
-            let body = cx.layer("body")?.linear(3).bias(false).apply(&input)?;
-            cx.layer("head")?.linear(2).bias(false).apply(&body)
+            let body = cx.scope("body")?.linear(3).bias(false).apply(&input)?;
+            cx.scope("head")?.linear(2).bias(false).apply(&body)
         })
         .inputs(ModelInput::new([1, 3]));
         let (selection, applied) = definition.trace_resident_under("head").unwrap();
@@ -1471,7 +1471,7 @@ mod tests {
         }
         .unwrap();
         let definition = Model::new(|cx: &mut Cx, input: Tensor| {
-            cx.layer("head")?.linear(2).bias(false).apply(&input)
+            cx.scope("head")?.linear(2).bias(false).apply(&input)
         })
         .inputs(ModelInput::new([1, 3]));
         let (_, applied) = definition.trace_resident_all().unwrap();
@@ -1560,7 +1560,7 @@ mod tests {
         };
         let model = |cx: &mut Cx| {
             let input = cx.input(&[1, 8, 8, 4])?;
-            cx.layer("conv_in")?
+            cx.scope("conv_in")?
                 .conv2d(6, [3, 3])
                 .options(options)
                 .apply(&input)
@@ -1585,7 +1585,7 @@ mod tests {
     fn group_norm_nhwc_infers_affine_channel_shape() {
         let model = |cx: &mut Cx| {
             let input = cx.input(&[1, 8, 8, 32])?;
-            cx.layer("norm")?.group_norm(8).apply(&input)
+            cx.scope("norm")?.group_norm(8).apply(&input)
         };
         let (schema, output) = init(model).unwrap();
         assert_eq!(output.shape(), [1, 8, 8, 32]);
@@ -1600,7 +1600,7 @@ mod tests {
     fn layer_norm_infers_trailing_affine_shape() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 7, 32])?;
-            cx.layer("norm")?.layer_norm(1).apply(&input)
+            cx.scope("norm")?.layer_norm(1).apply(&input)
         })
         .unwrap();
         assert_eq!(output.shape(), [2, 7, 32]);
@@ -1627,7 +1627,7 @@ mod tests {
         let model = |cx: &mut Cx| {
             let input = cx.input(&[2, 3])?;
             Ok(cx
-                .layer("head")?
+                .scope("head")?
                 .linear(2)
                 .bias(false)
                 .apply(&input)?

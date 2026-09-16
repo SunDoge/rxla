@@ -230,7 +230,7 @@ resident state, and RNG effects:
 ```rust
 let model = Model::new(|cx: &mut Cx| {
     let x = cx.input(&[batch, width])?;
-    let y = cx.layer("head")?.linear(classes).apply(&x)?;
+    let y = cx.scope("head")?.linear(classes).apply(&x)?;
     let steps = cx.state("steps", &[], DType::I32)?;
     steps.write(cx, &steps.read(cx)?.wrapping_add_scalar(1)?)?;
     let noise = cx.rng("sampling")?.normal_f32(y.shape())?;

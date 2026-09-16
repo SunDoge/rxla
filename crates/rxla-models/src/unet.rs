@@ -119,7 +119,7 @@ pub fn unet(
         timestep_embedding(&mut scope, timestep, time_width)?
     };
     let mut hidden = cx
-        .layer("conv_in")?
+        .scope("conv_in")?
         .conv2d(base, [3, 3])
         .options(convolution(1, 1))
         .apply(sample)?;
@@ -155,7 +155,7 @@ pub fn unet(
         if stage + 1 < config.block_channels.len() {
             let mut scope = block.scope_path(["downsamplers", "0"])?;
             value = scope
-                .layer("conv")?
+                .scope("conv")?
                 .conv2d(out_channels, [3, 3])
                 .options(convolution(1, 2))
                 .apply(&value)?;
@@ -234,7 +234,7 @@ pub fn unet(
             value = value.upsample_nearest2d([2, 2])?;
             let mut scope = block.scope_path(["upsamplers", "0"])?;
             value = scope
-                .layer("conv")?
+                .scope("conv")?
                 .conv2d(out_channels, [3, 3])
                 .options(convolution(1, 1))
                 .apply(&value)?;
@@ -247,11 +247,11 @@ pub fn unet(
         });
     }
     let hidden = cx
-        .layer("conv_norm_out")?
+        .scope("conv_norm_out")?
         .group_norm(config.norm_groups)
         .epsilon(config.norm_epsilon)
         .apply(&hidden)?;
-    cx.layer("conv_out")?
+    cx.scope("conv_out")?
         .conv2d(config.output_channels, [3, 3])
         .options(convolution(1, 1))
         .apply(&hidden.silu()?)

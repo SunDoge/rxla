@@ -72,7 +72,7 @@ fn attention(cx: &mut Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> R
     let head_dim = width / heads;
     let project = |cx: &mut Cx, name: &str| -> Result<Tensor> {
         Ok(cx
-            .layer(name)?
+            .scope(name)?
             .linear(*width)
             .apply(input)?
             .reshape(&[*batch, *length, heads, head_dim])?)
@@ -84,7 +84,7 @@ fn attention(cx: &mut Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> R
         .scaled_dot_product_attention(&k, &v, Some(causal_bias), None)?
         .transpose(&[0, 2, 1, 3])?
         .reshape(&[*batch, *length, *width])?;
-    cx.layer("out_proj")?.linear(*width).apply(&hidden)
+    cx.scope("out_proj")?.linear(*width).apply(&hidden)
 }
 
 fn quick_gelu(input: &Tensor) -> Result<Tensor> {
@@ -98,7 +98,7 @@ fn encoder_layer(
     config: &ClipTextConfig,
 ) -> Result<Tensor> {
     let normalized = cx
-        .layer("layer_norm1")?
+        .scope("layer_norm1")?
         .layer_norm(1)
         .epsilon(config.epsilon)
         .apply(input)?;
@@ -108,18 +108,18 @@ fn encoder_layer(
     };
     let hidden = input.add(&attended)?;
     let normalized = cx
-        .layer("layer_norm2")?
+        .scope("layer_norm2")?
         .layer_norm(1)
         .epsilon(config.epsilon)
         .apply(&hidden)?;
     let feed_forward = {
         let mut scope = cx.scope("mlp")?;
         let projected = scope
-            .layer("fc1")?
+            .scope("fc1")?
             .linear(config.intermediate_width)
             .apply(&normalized)?;
         scope
-            .layer("fc2")?
+            .scope("fc2")?
             .linear(config.width)
             .apply(&quick_gelu(&projected)?)
     }?;
@@ -147,11 +147,11 @@ pub fn clip_text_encoder(
     let mut hidden = {
         let mut scope = cx.scope_path(["text_model", "embeddings"])?;
         let tokens = scope
-            .layer("token_embedding")?
+            .scope("token_embedding")?
             .embedding(config.vocabulary, config.width)
             .apply(token_ids)?;
         let positions = scope
-            .layer("position_embedding")?
+            .scope("position_embedding")?
             .embedding(config.max_positions, config.width)
             .apply(&positions)?;
         tokens.add(&positions)?
@@ -173,7 +173,7 @@ pub fn clip_text_encoder(
         }
     }
     cx.scope("text_model")?
-        .layer("final_layer_norm")?
+        .scope("final_layer_norm")?
         .layer_norm(1)
         .epsilon(config.epsilon)
         .apply(&hidden)

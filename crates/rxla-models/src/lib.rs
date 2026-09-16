@@ -20,8 +20,8 @@ pub mod pp_ocr_v6;
 /// Learned two-layer projection for a sinusoidal timestep embedding.
 /// The input width is inferred at the point of use.
 pub fn timestep_embedding(cx: &mut Cx, input: &Tensor, output_width: i64) -> Result<Tensor> {
-    let hidden = cx.layer("linear_1")?.linear(output_width).apply(input)?;
-    cx.layer("linear_2")?
+    let hidden = cx.scope("linear_1")?.linear(output_width).apply(input)?;
+    cx.scope("linear_2")?
         .linear(output_width)
         .apply(&hidden.silu()?)
 }
@@ -81,36 +81,36 @@ pub fn resnet2d(
         ..Default::default()
     };
     let normalized = cx
-        .layer("norm1")?
+        .scope("norm1")?
         .group_norm(options.groups)
         .epsilon(options.epsilon)
         .apply(input)?;
     let mut hidden = cx
-        .layer("conv1")?
+        .scope("conv1")?
         .conv2d(options.out_channels, [3, 3])
         .options(convolution)
         .apply(&normalized.silu()?)?;
     let time = cx
-        .layer("time_emb_proj")?
+        .scope("time_emb_proj")?
         .linear(options.out_channels)
         .apply(&timestep_embedding.silu()?)?
         .reshape(&[timestep_embedding.shape()[0], 1, 1, options.out_channels])?
         .broadcast_to(hidden.shape())?;
     hidden = hidden.add(&time)?;
     let normalized = cx
-        .layer("norm2")?
+        .scope("norm2")?
         .group_norm(options.groups)
         .epsilon(options.epsilon)
         .apply(&hidden)?;
     hidden = cx
-        .layer("conv2")?
+        .scope("conv2")?
         .conv2d(options.out_channels, [3, 3])
         .options(convolution)
         .apply(&normalized.silu()?)?;
     let residual = if input.shape()[3] == options.out_channels {
         input.clone()
     } else {
-        cx.layer("conv_shortcut")?
+        cx.scope("conv_shortcut")?
             .conv2d(options.out_channels, [1, 1])
             .apply(input)?
     };
@@ -165,21 +165,21 @@ fn cross_attention(cx: &mut Cx, query: &Tensor, context: &Tensor, head_dim: i64)
     let heads = width / head_dim;
     let context_length = context.shape()[1];
     let q = cx
-        .layer("to_q")?
+        .scope("to_q")?
         .linear(*width)
         .bias(false)
         .apply(query)?
         .reshape(&[*batch, *query_length, heads, head_dim])?
         .transpose(&[0, 2, 1, 3])?;
     let k = cx
-        .layer("to_k")?
+        .scope("to_k")?
         .linear(*width)
         .bias(false)
         .apply(context)?
         .reshape(&[*batch, context_length, heads, head_dim])?
         .transpose(&[0, 2, 1, 3])?;
     let v = cx
-        .layer("to_v")?
+        .scope("to_v")?
         .linear(*width)
         .bias(false)
         .apply(context)?
@@ -190,7 +190,7 @@ fn cross_attention(cx: &mut Cx, query: &Tensor, context: &Tensor, head_dim: i64)
         .transpose(&[0, 2, 1, 3])?
         .reshape(&[*batch, *query_length, *width])?;
     cx.scope("to_out")?
-        .layer("0")?
+        .scope("0")?
         .linear(*width)
         .apply(&hidden)
 }
@@ -215,12 +215,12 @@ fn feed_forward(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
     let projected = cx
         .scope("net")?
         .scope("0")?
-        .layer("proj")?
+        .scope("proj")?
         .linear(projected)
         .apply(input)?;
     let parts = projected.split(projected.shape().len() - 1, &[hidden, hidden])?;
     let gated = parts[0].mul(&parts[1].gelu()?)?;
-    cx.scope("net")?.layer("2")?.linear(width).apply(&gated)
+    cx.scope("net")?.scope("2")?.linear(width).apply(&gated)
 }
 
 fn transformer_block(
@@ -229,19 +229,19 @@ fn transformer_block(
     context: &Tensor,
     head_dim: i64,
 ) -> Result<Tensor> {
-    let normalized = cx.layer("norm1")?.layer_norm(1).apply(input)?;
+    let normalized = cx.scope("norm1")?.layer_norm(1).apply(input)?;
     let attention = {
         let mut scope = cx.scope("attn1")?;
         cross_attention(&mut scope, &normalized, &normalized, head_dim)?
     };
     let hidden = input.add(&attention)?;
-    let normalized = cx.layer("norm2")?.layer_norm(1).apply(&hidden)?;
+    let normalized = cx.scope("norm2")?.layer_norm(1).apply(&hidden)?;
     let attention = {
         let mut scope = cx.scope("attn2")?;
         cross_attention(&mut scope, &normalized, context, head_dim)?
     };
     let hidden = hidden.add(&attention)?;
-    let normalized = cx.layer("norm3")?.layer_norm(1).apply(&hidden)?;
+    let normalized = cx.scope("norm3")?.layer_norm(1).apply(&hidden)?;
     let mut ff = cx.scope("ff")?;
     Ok(hidden.add(&feed_forward(&mut ff, &normalized)?)?)
 }
@@ -268,12 +268,12 @@ pub fn spatial_transformer(
         unreachable!("rank checked above")
     };
     let normalized = cx
-        .layer("norm")?
+        .scope("norm")?
         .group_norm(options.groups)
         .epsilon(1e-6)
         .apply(input)?;
     let mut hidden = cx
-        .layer("proj_in")?
+        .scope("proj_in")?
         .conv2d(*channels, [1, 1])
         .apply(&normalized)?
         .reshape(&[*batch, height * width, *channels])?;
@@ -283,7 +283,7 @@ pub fn spatial_transformer(
     }
     let hidden = hidden.reshape(&[*batch, *height, *width, *channels])?;
     Ok(cx
-        .layer("proj_out")?
+        .scope("proj_out")?
         .conv2d(*channels, [1, 1])
         .apply(&hidden)?
         .add(input)?)

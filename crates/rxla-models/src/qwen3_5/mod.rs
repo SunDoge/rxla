@@ -212,7 +212,7 @@ pub fn qwen3_5(cx: &mut Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Resul
         let mut layers = language_model.scope("layers")?;
         let mut layer = layers.scope(&index.to_string())?;
         let normalized = layer
-            .layer("input_layernorm")?
+            .scope("input_layernorm")?
             .rms_norm()
             .epsilon(config.epsilon)
             .zero_centered(true)
@@ -229,7 +229,7 @@ pub fn qwen3_5(cx: &mut Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Resul
         };
         hidden = hidden.add(&mixed)?;
         let normalized = layer
-            .layer("post_attention_layernorm")?
+            .scope("post_attention_layernorm")?
             .rms_norm()
             .epsilon(config.epsilon)
             .zero_centered(true)
@@ -238,7 +238,7 @@ pub fn qwen3_5(cx: &mut Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Resul
         hidden = hidden.add(&mlp(&mut feed_forward, &normalized, config)?)?;
     }
     hidden = language_model
-        .layer("norm")?
+        .scope("norm")?
         .rms_norm()
         .epsilon(config.epsilon)
         .zero_centered(true)

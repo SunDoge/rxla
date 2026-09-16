@@ -15,19 +15,19 @@ fn convolution() -> Conv2dOptions {
 fn tiny_block(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
     let mut conv = cx.scope("conv")?;
     let hidden = conv
-        .layer("0")?
+        .scope("0")?
         .conv2d(input.shape()[3], [3, 3])
         .options(convolution())
         .apply(input)?
         .relu()?;
     let hidden = conv
-        .layer("2")?
+        .scope("2")?
         .conv2d(input.shape()[3], [3, 3])
         .options(convolution())
         .apply(&hidden)?
         .relu()?;
     let hidden = conv
-        .layer("4")?
+        .scope("4")?
         .conv2d(input.shape()[3], [3, 3])
         .options(convolution())
         .apply(&hidden)?;
@@ -41,7 +41,7 @@ fn transition(
     output_channels: i64,
     bias: bool,
 ) -> Result<Tensor> {
-    cx.layer(&layer.to_string())?
+    cx.scope(&layer.to_string())?
         .conv2d(output_channels, [3, 3])
         .options(convolution())
         .bias(bias)
