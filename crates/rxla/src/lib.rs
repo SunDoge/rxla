@@ -9,7 +9,13 @@
 //!   live in separately versioned crates rather than facade features.
 
 pub use rxla_core as core;
-pub use rxla_core::*;
+pub use rxla_core::{
+    Buffer, Client, ClientOptions, Compiler, Conv2dOptions, ConvTranspose2dOptions, DType, Device,
+    DeviceRuntime, Error, Evaluable, PendingEvaluation, PendingTensorEvaluation, Pool2dOptions,
+    Program, Result, Runtime, RuntimeBuilder, Storage, StorageError, StorageKind, StorageResult,
+    Tensor, TensorBuildError, TensorBuilder, TensorDescriptor, TensorDownloadError, TensorElement,
+    TensorFunction, TensorLayout, Tracer, bf16, f16,
+};
 pub use rxla_ir as ir;
 pub use rxla_nn as nn;
 pub use rxla_pjrt as pjrt;
