@@ -7,10 +7,13 @@ BatchNorm. The 160px stem uses 7x7 stride-two convolution followed by 3x3
 stride-two average pooling. This last detail differs from canonical ResNet-18's
 max pool because RXLA does not yet implement a max-pool VJP.
 
-JPEG decode, resize, random crop, and collation run in parallel on the CPU.
-Horizontal flip and ImageNet normalization are an RXLA Tensor program on the
-CPU PJRT backend. Pinned buffers upload to CUDA, where forward, backward,
-BatchNorm state transitions, and SGD execute as one compiled program.
+The input path is a bounded three-stage pipeline. Rayon performs JPEG decode,
+resize, random crop, and collation; a dedicated CPU PJRT runtime performs
+horizontal flip and ImageNet normalization as an RXLA Tensor program; the main
+thread performs pinned uploads and CUDA training. Owned host batches cross
+capacity-two channels, providing backpressure without sharing PJRT handles
+between threads. Forward, backward, BatchNorm state transitions, and SGD execute
+as one compiled CUDA program.
 
 ```bash
 cargo run -p rxla-train --release --example imagenette_train -- \
@@ -19,7 +22,8 @@ cargo run -p rxla-train --release --example imagenette_train -- \
   --dataset /data/users/me/datasets/imagenette2 \
   --batch-size 16 \
   --steps 600 \
-  --learning-rate 0.03
+  --learning-rate 0.03 \
+  --profile
 ```
 
 ## RTX 5080 validation
@@ -46,18 +50,24 @@ images/s on the same run shape, so the cleaner lowering is not yet a CUDA speed
 win. It does remove the nine-GEMM expansion of every 3x3 filter gradient and is
 covered by scalar-reference tests for stride, dilation, and asymmetric padding.
 
-Larger batches expose considerably more of the RTX 5080's throughput:
+The original serialized input loop and the bounded pipeline compare as follows.
+End-to-end measurements include input work and per-step metrics; the short
+batch-16 and batch-64 runs use 100 steps, and batch 128 uses 50 steps:
 
-| Batch | Training throughput |
-| ---: | ---: |
-| 16 | 433.9 images/s |
-| 64 | 707.3 images/s |
-| 128 | 759.3 images/s |
+| Batch | Serialized | Pipelined | Speedup | Pipelined steady state |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | 433.9 images/s | 1,043.4 images/s | 2.40x | 1,110.7 images/s |
+| 64 | 707.3 images/s | 1,630.0 images/s | 2.30x | 1,710.9 images/s |
+| 128 | 759.3 images/s | 1,989.6 images/s | 2.62x | 2,176.0 images/s |
+
+At batch 16, steady-state input wait is 0.62 ms and upload is 0.49 ms,
+compared with 10.91 ms in CUDA execution. At batch 128 the GPU accounts for
+91.8% of the measured step, so the input pipeline is no longer the primary
+bottleneck.
 
 These are end-to-end figures rather than isolated model kernel benchmarks. The
-flattening above batch 64, together with remaining XLA `gemm_fusion` register
-spills, leaves substantial optimization work in both the input pipeline and
-generated GPU program.
+remaining XLA `gemm_fusion` register spills leave substantial optimization work
+in the generated GPU program.
 
 The training throughput excludes compilation and initial directory scanning,
 but includes JPEG input work, CPU augmentation, transfers, CUDA execution, and

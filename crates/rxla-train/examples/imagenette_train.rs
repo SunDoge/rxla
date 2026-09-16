@@ -11,7 +11,9 @@ use rxla_nn::{AppliedModel, Cx, Model, ParamSchema, Result as NnResult};
 use rxla_train::{DataRng, prepare_model_sgd};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const CLASSES: i64 = 10;
 const IMAGE: i64 = 160;
@@ -35,6 +37,45 @@ struct Args {
     seed: u64,
     #[arg(long, default_value_t = 25)]
     log_every: usize,
+    /// Print a host-side breakdown after excluding the first ten steps.
+    #[arg(long)]
+    profile: bool,
+}
+
+#[derive(Default)]
+struct PhaseTimes {
+    samples: usize,
+    input_wait: Duration,
+    upload: Duration,
+    bind: Duration,
+    execute: Duration,
+    metrics: Duration,
+}
+
+impl PhaseTimes {
+    fn print(&self, batch_size: i64) {
+        if self.samples == 0 {
+            return;
+        }
+        let milliseconds = |duration: Duration| duration.as_secs_f64() * 1_000.0;
+        let total = self.input_wait + self.upload + self.bind + self.execute + self.metrics;
+        println!(
+            "profile: {samples} samples, mean step {total:.3} ms: input-wait {input_wait:.3} ms ({input_wait_share:.1}%), upload {upload:.3} ms ({upload_share:.1}%), bind {bind:.3} ms ({bind_share:.1}%), execute {execute:.3} ms ({execute_share:.1}%), metrics {metrics:.3} ms ({metrics_share:.1}%); measured throughput {throughput:.1} images/s",
+            samples = self.samples,
+            total = milliseconds(total) / self.samples as f64,
+            input_wait = milliseconds(self.input_wait) / self.samples as f64,
+            input_wait_share = self.input_wait.as_secs_f64() * 100.0 / total.as_secs_f64(),
+            upload = milliseconds(self.upload) / self.samples as f64,
+            upload_share = self.upload.as_secs_f64() * 100.0 / total.as_secs_f64(),
+            bind = milliseconds(self.bind) / self.samples as f64,
+            bind_share = self.bind.as_secs_f64() * 100.0 / total.as_secs_f64(),
+            execute = milliseconds(self.execute) / self.samples as f64,
+            execute_share = self.execute.as_secs_f64() * 100.0 / total.as_secs_f64(),
+            metrics = milliseconds(self.metrics) / self.samples as f64,
+            metrics_share = self.metrics.as_secs_f64() * 100.0 / total.as_secs_f64(),
+            throughput = self.samples as f64 * batch_size as f64 / total.as_secs_f64(),
+        );
+    }
 }
 
 #[derive(Clone)]
@@ -48,6 +89,13 @@ struct ImageFolder {
 }
 
 type HostBatch = (Vec<u8>, Vec<i32>, Vec<f32>);
+type AugmentedHostBatch = (Vec<f32>, Vec<i32>);
+type PreparedBatch = (
+    PendingHostUpload<f32>,
+    PendingHostUpload<i32>,
+    Duration,
+    Duration,
+);
 
 impl ImageFolder {
     fn load(root: &Path, classes: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
@@ -318,8 +366,22 @@ fn prepare_batch(
     training: bool,
     cpu: &mut Runtime,
     gpu: &Client,
-) -> Result<(PendingHostUpload<f32>, PendingHostUpload<i32>), Box<dyn std::error::Error>> {
-    let (images, labels, flips) = dataset.batch(step, batch_size as usize, rng, training)?;
+) -> Result<PreparedBatch, Box<dyn std::error::Error>> {
+    let started = Instant::now();
+    let host = dataset.batch(step, batch_size as usize, rng, training)?;
+    let decoded = started.elapsed();
+    let host = augment_host_batch(host, batch_size, cpu)?;
+    let started = Instant::now();
+    let (images, labels) = upload_batch(host, batch_size, gpu)?;
+    Ok((images, labels, decoded, started.elapsed()))
+}
+
+fn augment_host_batch(
+    host: HostBatch,
+    batch_size: i64,
+    cpu: &mut Runtime,
+) -> Result<AugmentedHostBatch, Box<dyn std::error::Error>> {
+    let (images, labels, flips) = host;
     let image = Tensor::from_slice([batch_size, IMAGE, IMAGE, 3], DType::U8, images)?;
     let flip = Tensor::from_slice([batch_size, 1, 1, 1], DType::F32, flips)?;
     let image = image.cast(DType::F32)?.mul_scalar(1.0 / 255.0)?;
@@ -328,10 +390,61 @@ fn prepare_batch(
         .select(&image.flip_left_right()?, &image)?
         .normalize_nhwc(&[0.485, 0.456, 0.406], &[0.229, 0.224, 0.225])?;
     let images = cpu.eval(&augmented)?.to_vec::<f32>()?;
-    Ok((
-        gpu.upload_pinned(&[batch_size, IMAGE, IMAGE, 3], images)?,
-        gpu.upload_pinned(&[batch_size], labels)?,
-    ))
+    Ok((images, labels))
+}
+
+fn upload_batch(
+    host: AugmentedHostBatch,
+    batch_size: i64,
+    gpu: &Client,
+) -> Result<(PendingHostUpload<f32>, PendingHostUpload<i32>), Box<dyn std::error::Error>> {
+    let (images, labels) = host;
+    let images = gpu.upload_pinned(&[batch_size, IMAGE, IMAGE, 3], images)?;
+    let labels = gpu.upload_pinned(&[batch_size], labels)?;
+    Ok((images, labels))
+}
+
+fn prefetch_batches(
+    dataset: Arc<ImageFolder>,
+    steps: usize,
+    batch_size: usize,
+    rng: DataRng,
+    cpu_plugin: String,
+) -> (
+    mpsc::Receiver<Result<AugmentedHostBatch, String>>,
+    [thread::JoinHandle<()>; 2],
+) {
+    let (decoded_sender, decoded_receiver) = mpsc::sync_channel(2);
+    let decoder = thread::spawn(move || {
+        for step in 0..steps {
+            let batch = dataset
+                .batch(step, batch_size, rng, true)
+                .map_err(|error| error.to_string());
+            if decoded_sender.send(batch).is_err() {
+                break;
+            }
+        }
+    });
+    let (augmented_sender, augmented_receiver) = mpsc::sync_channel(2);
+    let augmenter = thread::spawn(move || {
+        let mut cpu = match unsafe { Client::load(&cpu_plugin) } {
+            Ok(client) => Runtime::new(client),
+            Err(error) => {
+                let _ = augmented_sender.send(Err(error.to_string()));
+                return;
+            }
+        };
+        for decoded in decoded_receiver {
+            let augmented = decoded.and_then(|batch| {
+                augment_host_batch(batch, batch_size as i64, &mut cpu)
+                    .map_err(|error| error.to_string())
+            });
+            if augmented_sender.send(augmented).is_err() {
+                break;
+            }
+        }
+    });
+    (augmented_receiver, [decoder, augmenter])
 }
 
 fn correct(logits: &[f32], labels: &[i32]) -> usize {
@@ -376,7 +489,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("batch size, steps, and log interval must be positive".into());
     }
     let classes = class_names(&args.dataset.join("train"))?;
-    let train = ImageFolder::load(&args.dataset.join("train"), &classes)?;
+    let train = Arc::new(ImageFolder::load(&args.dataset.join("train"), &classes)?);
     let validation = ImageFolder::load(&args.dataset.join("val"), &classes)?;
     println!(
         "dataset: {} train, {} validation, classes={classes:?}",
@@ -407,17 +520,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut total_correct = 0;
     let mut first_loss = None;
     let mut last_loss = 0.0;
+    let mut phases = PhaseTimes::default();
+    let profile_after = args.steps.min(10);
+    let (batches, pipeline_workers) = prefetch_batches(
+        Arc::clone(&train),
+        args.steps,
+        batch_size as usize,
+        rng,
+        args.cpu_plugin.clone(),
+    );
 
     for step in 0..args.steps {
-        let (images, labels) =
-            prepare_batch(&train, step, batch_size, rng, true, &mut cpu_runtime, &gpu)?;
+        let phase = Instant::now();
+        let host = batches
+            .recv()
+            .map_err(|_| "input prefetch worker stopped")??;
+        let input_wait = phase.elapsed();
+        let phase = Instant::now();
+        let (images, labels) = upload_batch(host, batch_size, &gpu)?;
+        let uploaded = phase.elapsed();
+        let phase = Instant::now();
         let arguments = model.bind(
             &[images.buffer(), labels.buffer()],
             parameters
                 .iter()
                 .map(|(name, value)| (name.as_str(), value)),
         )?;
+        let bound = phase.elapsed();
+        let phase = Instant::now();
         let output = session.run(arguments.as_slice())?;
+        let executed = phase.elapsed();
+        let phase = Instant::now();
         last_loss = output[0].to_vec::<f32>()?[0];
         first_loss.get_or_insert(last_loss);
         let logits = output[1].to_vec::<f32>()?;
@@ -427,12 +560,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (update, value) in training.updates().iter().zip(output.into_iter().skip(2)) {
             parameters.insert(update.path().to_owned(), value);
         }
+        let measured = phase.elapsed();
+        if args.profile && step >= profile_after {
+            phases.samples += 1;
+            phases.input_wait += input_wait;
+            phases.upload += uploaded;
+            phases.bind += bound;
+            phases.execute += executed;
+            phases.metrics += measured;
+        }
         if step % args.log_every == 0 || step + 1 == args.steps {
             println!(
                 "step {step:>4}: loss {last_loss:.6}, accuracy {:.1}%",
                 batch_correct as f64 * 100.0 / batch_size as f64
             );
         }
+    }
+    for worker in pipeline_workers {
+        worker
+            .join()
+            .map_err(|_| "input pipeline worker panicked")?;
     }
     let seconds = started.elapsed().as_secs_f64();
     let trained = args.steps as f64 * batch_size as f64;
@@ -442,6 +589,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_correct as f64 * 100.0 / trained,
         trained / seconds,
     );
+    if args.profile {
+        phases.print(batch_size);
+    }
 
     let inference =
         Model::new(move |cx: &mut Cx| resnet18(cx, batch_size, false)).apply(&schema)?;
@@ -456,7 +606,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut validation_correct = 0;
     let mut validation_loss = 0.0;
     for step in 0..validation_steps {
-        let (images, labels) = prepare_batch(
+        let (images, labels, _, _) = prepare_batch(
             &validation,
             step,
             batch_size,
