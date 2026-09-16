@@ -1,4 +1,4 @@
-use rxla_core::vision::{nms, nms_by_class};
+use rxla_core::vision::{NmsError, nms, nms_by_class};
 
 #[test]
 fn classes_do_not_cross_suppress_and_cap_is_global() {
@@ -85,4 +85,40 @@ fn validates_even_when_no_output_requested() {
             assert!(nms(&[b], &[1.], 0.5, max_output).is_err());
         }
     }
+}
+
+#[test]
+fn validation_failures_preserve_the_offending_field_and_index() {
+    assert!(matches!(
+        nms(&[[0.; 4]], &[], 0.5, 0),
+        Err(NmsError::BoxScoreCount {
+            boxes: 1,
+            scores: 0
+        })
+    ));
+    assert!(matches!(
+        nms_by_class(&[[0.; 4]], &[1.], &[], 0.5, 0),
+        Err(NmsError::BoxClassCount {
+            boxes: 1,
+            classes: 0
+        })
+    ));
+    assert!(matches!(
+        nms(&[], &[], 1.5, 0),
+        Err(NmsError::InvalidThreshold { threshold: 1.5 })
+    ));
+    assert!(matches!(
+        nms(&[[0.; 4], [0.; 4]], &[1., f32::INFINITY], 0.5, 0),
+        Err(NmsError::InvalidScore {
+            index: 1,
+            value: f32::INFINITY
+        })
+    ));
+    assert!(matches!(
+        nms(&[[0.; 4], [2., 0., 1., 1.]], &[1., 1.], 0.5, 0),
+        Err(NmsError::InvalidBox {
+            index: 1,
+            value: [2., 0., 1., 1.]
+        })
+    ));
 }

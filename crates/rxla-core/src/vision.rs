@@ -1,6 +1,24 @@
 //! Explicit host-side vision utilities. No implicit device download or graph
 //! execution. These functions are not GPU kernels or differentiable operators.
-use crate::{Result, err};
+use snafu::{Snafu, ensure};
+
+/// Invalid inputs to host-side nonmaximum suppression.
+#[derive(Debug, Snafu, PartialEq)]
+#[non_exhaustive]
+pub enum NmsError {
+    #[snafu(display("NMS received {boxes} boxes but {classes} class IDs"))]
+    BoxClassCount { boxes: usize, classes: usize },
+    #[snafu(display("NMS received {boxes} boxes but {scores} scores"))]
+    BoxScoreCount { boxes: usize, scores: usize },
+    #[snafu(display("NMS IoU threshold {threshold} is not finite and in [0, 1]"))]
+    InvalidThreshold { threshold: f32 },
+    #[snafu(display("NMS score {index} is not finite: {value}"))]
+    InvalidScore { index: usize, value: f32 },
+    #[snafu(display("NMS box {index} is not finite ordered xyxy: {value:?}"))]
+    InvalidBox { index: usize, value: [f32; 4] },
+}
+
+pub type NmsResult<T> = std::result::Result<T, NmsError>;
 
 /// Greedy class-agnostic nonmaximum suppression of continuous xyxy boxes.
 /// Returns original indices in descending score order, breaking equal scores
@@ -21,7 +39,7 @@ pub fn nms(
     scores: &[f32],
     iou_threshold: f32,
     max_output: usize,
-) -> Result<Vec<usize>> {
+) -> NmsResult<Vec<usize>> {
     suppress(boxes, scores, None, iou_threshold, max_output)
 }
 
@@ -39,7 +57,7 @@ pub fn nms_by_class(
     classes: &[i32],
     iou_threshold: f32,
     max_output: usize,
-) -> Result<Vec<usize>> {
+) -> NmsResult<Vec<usize>> {
     suppress(boxes, scores, Some(classes), iou_threshold, max_output)
 }
 
@@ -49,32 +67,52 @@ fn suppress(
     classes: Option<&[i32]>,
     iou_threshold: f32,
     max_output: usize,
-) -> Result<Vec<usize>> {
-    if classes.is_some_and(|classes| classes.len() != boxes.len()) {
-        return Err(err("NMS box/class count mismatch"));
+) -> NmsResult<Vec<usize>> {
+    if let Some(classes) = classes {
+        ensure!(
+            classes.len() == boxes.len(),
+            BoxClassCountSnafu {
+                boxes: boxes.len(),
+                classes: classes.len(),
+            }
+        );
     }
-    if boxes.len() != scores.len() {
-        return Err(err("NMS box/score count mismatch"));
+    ensure!(
+        boxes.len() == scores.len(),
+        BoxScoreCountSnafu {
+            boxes: boxes.len(),
+            scores: scores.len(),
+        }
+    );
+    ensure!(
+        iou_threshold.is_finite() && (0. ..=1.).contains(&iou_threshold),
+        InvalidThresholdSnafu {
+            threshold: iou_threshold,
+        }
+    );
+    for (index, &value) in scores.iter().enumerate() {
+        ensure!(value.is_finite(), InvalidScoreSnafu { index, value });
     }
-    if !iou_threshold.is_finite() || !(0. ..=1.).contains(&iou_threshold) {
-        return Err(err("NMS IoU threshold must be finite in [0,1]"));
-    }
-    if scores.iter().any(|score| !score.is_finite())
-        || boxes
-            .iter()
-            .any(|b| b.iter().any(|v| !v.is_finite()) || b[2] < b[0] || b[3] < b[1])
-    {
-        return Err(err(
-            "NMS requires finite scores and ordered finite xyxy boxes",
-        ));
+    for (index, &value) in boxes.iter().enumerate() {
+        ensure!(
+            value.iter().all(|coordinate| coordinate.is_finite())
+                && value[2] >= value[0]
+                && value[3] >= value[1],
+            InvalidBoxSnafu { index, value }
+        );
     }
     if max_output == 0 {
         return Ok(Vec::new());
     }
     let mut order: Vec<_> = (0..boxes.len()).collect();
     order.sort_unstable_by(|&a, &b| {
-        // Validation above makes numeric comparison total, with +0 == -0.
-        scores[b].partial_cmp(&scores[a]).unwrap().then(a.cmp(&b))
+        if scores[a] == scores[b] {
+            // Numeric equality deliberately treats both signed zeros as a tie.
+            a.cmp(&b)
+        } else {
+            // total_cmp is panic-free; validation above excludes its NaN ordering.
+            scores[b].total_cmp(&scores[a])
+        }
     });
     let mut kept = Vec::with_capacity(max_output.min(boxes.len()));
     for index in order {
