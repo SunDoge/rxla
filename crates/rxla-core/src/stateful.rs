@@ -101,7 +101,7 @@ impl InputTrace {
         let mut values: Vec<Tensor> = Vec::with_capacity(self.nodes.len());
         for (op, operands, ty) in self.nodes {
             let value = match op {
-                Op::Parameter(_) => graph.input_dtype(&ty)?,
+                Op::Parameter(_) => graph.input_type(&ty)?,
                 op => {
                     let operands = operands
                         .iter()

@@ -1,13 +1,18 @@
 //! Applied model snapshots, compilation, and runtime argument binding.
 
 use super::*;
-use rxla_core::{Buffer, Compiler, DType, Executable, LoweredProgram};
+use rxla_core::{
+    Buffer, Compiler, DType, Executable, LoweredProgram, PreparedStateGraph, Session, StateGraph,
+    StateProgram, StateSlot, Tracer,
+};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 /// One apply trace plus its immutable Pliron program builder.
 pub struct AppliedModel {
     graph: Tracer,
+    state_graph: StateGraph,
+    states: Vec<(String, StateSlot)>,
     outputs: Vec<Tensor>,
     parameters: Vec<Tensor>,
     schema: ParamSchema,
@@ -25,6 +30,13 @@ pub struct ModelArguments<'a> {
 pub struct BoundParameters<'model, 'parameters> {
     model: &'model AppliedModel,
     values: Vec<&'parameters Buffer>,
+}
+
+/// Named initialization for a compiled unified stateful model.
+pub struct ModelSessionBuilder<'a> {
+    model: &'a AppliedModel,
+    program: &'a StateProgram,
+    overrides: BTreeMap<String, Buffer>,
 }
 
 impl<'a> ModelArguments<'a> {
@@ -46,13 +58,17 @@ impl<'model, 'parameters> BoundParameters<'model, 'parameters> {
 
 impl AppliedModel {
     pub(crate) fn new(
-        graph: Tracer,
+        state_graph: StateGraph,
+        states: Vec<(String, StateSlot)>,
         outputs: Vec<Tensor>,
         parameters: Vec<Tensor>,
         schema: ParamSchema,
     ) -> Self {
+        let graph = state_graph.tracer();
         Self {
             graph,
+            state_graph,
+            states,
             outputs,
             parameters,
             schema,
@@ -61,6 +77,14 @@ impl AppliedModel {
 
     pub fn outputs(&self) -> &[Tensor] {
         &self.outputs
+    }
+
+    pub fn states(&self) -> impl ExactSizeIterator<Item = (&str, &StateSlot)> {
+        self.states.iter().map(|(path, slot)| (path.as_str(), slot))
+    }
+
+    pub fn is_stateful(&self) -> bool {
+        !self.states.is_empty()
     }
 
     /// The frozen effect schema used to produce this program.
@@ -92,16 +116,50 @@ impl AppliedModel {
 
     /// Lower model outputs while preserving the frozen schema ABI exactly.
     pub fn prepare(&self) -> Result<LoweredProgram> {
+        ensure!(
+            self.states.is_empty(),
+            InvalidDefinitionSnafu {
+                message: "stateful models must use prepare_stateful"
+            }
+        );
         Ok(self.graph.prepare_many(&self.outputs)?)
+    }
+
+    pub fn prepare_stateful(&self) -> Result<PreparedStateGraph> {
+        Ok(self.state_graph.prepare(&self.outputs)?)
     }
 
     /// Compile this immutable model snapshot through the caller's cache-aware compiler.
     pub fn compile(&self, compiler: &mut Compiler) -> Result<Rc<Executable>> {
+        ensure!(
+            self.states.is_empty(),
+            InvalidDefinitionSnafu {
+                message: "stateful models must use compile_stateful"
+            }
+        );
         Ok(compiler.compile_many(&self.graph, &self.outputs)?)
+    }
+
+    pub fn compile_stateful(&self, compiler: &mut Compiler) -> Result<StateProgram> {
+        Ok(self.state_graph.compile(compiler, &self.outputs)?)
+    }
+
+    pub fn session<'a>(&'a self, program: &'a StateProgram) -> ModelSessionBuilder<'a> {
+        ModelSessionBuilder {
+            model: self,
+            program,
+            overrides: BTreeMap::new(),
+        }
     }
 
     /// Lower graph-local outputs produced by a model transformation.
     pub fn prepare_tensors(&self, outputs: &[Tensor]) -> Result<LoweredProgram> {
+        ensure!(
+            self.states.is_empty(),
+            InvalidDefinitionSnafu {
+                message: "stateful transforms require a state-aware training path"
+            }
+        );
         Ok(self.graph.prepare_many(outputs)?)
     }
 
@@ -111,6 +169,12 @@ impl AppliedModel {
         compiler: &mut Compiler,
         outputs: &[Tensor],
     ) -> Result<Rc<Executable>> {
+        ensure!(
+            self.states.is_empty(),
+            InvalidDefinitionSnafu {
+                message: "stateful transforms require a state-aware training path"
+            }
+        );
         Ok(compiler.compile_many(&self.graph, outputs)?)
     }
 
@@ -204,6 +268,7 @@ impl AppliedModel {
             match *argument {
                 ModelArgument::Input(index) => values.push(inputs[index]),
                 ModelArgument::Parameter(index) => values.push(parameters[index]),
+                ModelArgument::State(_) => {}
             }
         }
         Ok(ModelArguments { values })
@@ -211,6 +276,70 @@ impl AppliedModel {
 
     pub fn into_parts(self) -> (Tracer, Vec<Tensor>) {
         (self.graph, self.outputs)
+    }
+}
+
+impl ModelSessionBuilder<'_> {
+    pub fn state(mut self, name: impl Into<String>, value: Buffer) -> Result<Self> {
+        let name = name.into();
+        ensure!(
+            self.model.states.iter().any(|(path, _)| path == &name),
+            InvalidDefinitionSnafu {
+                message: format!("unknown state {name:?}")
+            }
+        );
+        ensure!(
+            self.overrides.insert(name.clone(), value).is_none(),
+            InvalidDefinitionSnafu {
+                message: format!("duplicate state initializer {name:?}")
+            }
+        );
+        Ok(self)
+    }
+
+    pub fn rng_seed(self, name: &str, seed: u64) -> Result<Self> {
+        self.rng_state(name, [seed as u32, (seed >> 32) as u32], 0)
+    }
+
+    pub fn rng_state(mut self, name: &str, key: [u32; 2], counter: u64) -> Result<Self> {
+        for (suffix, word) in [
+            ("key0", key[0]),
+            ("key1", key[1]),
+            ("counter_low", counter as u32),
+            ("counter_high", (counter >> 32) as u32),
+        ] {
+            let path = format!("{name}.{suffix}");
+            ensure!(
+                self.model.states.iter().any(|(state, _)| state == &path),
+                InvalidDefinitionSnafu {
+                    message: format!("unknown RNG stream {name:?}")
+                }
+            );
+            let value = self.program.client().buffer(&[], &[word as i32])?;
+            ensure!(
+                self.overrides.insert(path.clone(), value).is_none(),
+                InvalidDefinitionSnafu {
+                    message: format!("duplicate state initializer {path:?}")
+                }
+            );
+        }
+        Ok(self)
+    }
+
+    pub fn build(mut self) -> Result<Session> {
+        let slots = self
+            .model
+            .states
+            .iter()
+            .map(|(_, slot)| slot.clone())
+            .collect::<Vec<_>>();
+        let mut initial = self.program.zero_state(&slots)?;
+        for ((name, _), (_, value)) in self.model.states.iter().zip(&mut initial) {
+            if let Some(override_value) = self.overrides.remove(name) {
+                *value = override_value;
+            }
+        }
+        Ok(self.program.session(initial)?)
     }
 }
 

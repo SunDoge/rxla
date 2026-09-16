@@ -224,6 +224,27 @@ The session injects the seed without exposing `StateGraph` or requiring a host
 random-number upload. Use `rng_state` when exact raw key words or a nonzero
 counter are required.
 
+The public model-building path now uses the same `rxla_nn::Cx` for parameters,
+resident state, and RNG effects:
+
+```rust
+let model = Model::new(|cx: &mut Cx| {
+    let x = cx.input(&[batch, width])?;
+    let y = cx.named("head")?.linear(classes).apply(&x)?;
+    let steps = cx.state("steps", &[], DType::I32)?;
+    steps.write(cx, &steps.read(cx)?.wrapping_add_scalar(1)?)?;
+    let noise = cx.rng("sampling")?.normal_f32(y.shape())?;
+    Ok(y.add(&noise)?)
+});
+```
+
+`Model::trace` discovers all three effect classes in one schema. Stateless
+models retain `prepare`/`compile`; a model declaring state uses
+`prepare_stateful`/`compile_stateful`, then `applied.session(&program)` for named
+initialization, including `rng_seed`. The older `rxla_core::StatefulModel` and
+`StateCx` remain a compatibility layer for lazy-Tensor call sites; new model
+code should not combine that context with `rxla_nn::Cx`.
+
 ## First implementation verification targets
 
 Start with a state slot plus compiled-session wrapper, not a Monad-heavy public

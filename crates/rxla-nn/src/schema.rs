@@ -33,6 +33,26 @@ pub struct ModelInputSpec {
     pub(crate) dtype: DType,
 }
 
+/// One named resident state declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StateSpec {
+    pub(crate) path: String,
+    pub(crate) shape: Vec<i64>,
+    pub(crate) dtype: DType,
+}
+
+impl StateSpec {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+    pub fn shape(&self) -> &[i64] {
+        &self.shape
+    }
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+}
+
 impl ModelInputSpec {
     pub fn shape(&self) -> &[i64] {
         &self.shape
@@ -52,6 +72,7 @@ impl ModelInputSpec {
 pub enum ModelArgument {
     Input(usize),
     Parameter(usize),
+    State(usize),
 }
 
 /// Ordered, immutable declarations produced by [`crate::init`].
@@ -61,6 +82,7 @@ pub struct ParamSchema {
     pub(crate) parameters: Vec<ParameterSpec>,
     pub(crate) indices: BTreeMap<String, usize>,
     pub(crate) arguments: Vec<ModelArgument>,
+    pub(crate) states: Vec<StateSpec>,
 }
 
 impl ParamSchema {
@@ -71,6 +93,10 @@ impl ParamSchema {
 
     pub fn parameters(&self) -> &[ParameterSpec] {
         &self.parameters
+    }
+
+    pub fn states(&self) -> &[StateSpec] {
+        &self.states
     }
 
     pub fn get(&self, path: &str) -> Option<&ParameterSpec> {

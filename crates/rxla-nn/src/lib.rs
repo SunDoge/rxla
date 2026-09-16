@@ -4,18 +4,18 @@
 //! interpret the same `param` calls differently, so model code is written once
 //! without making parameter identity depend on call order.
 
-use rxla_core::{DType, Tensor, Tracer};
+use rxla_core::{DType, StateGraph, StateSlot, Tensor};
 use snafu::{OptionExt, Snafu, ensure};
 use std::collections::{BTreeMap, HashSet};
 
 mod applied;
-pub use applied::{AppliedModel, BoundParameters, ModelArguments};
+pub use applied::{AppliedModel, BoundParameters, ModelArguments, ModelSessionBuilder};
 mod layers;
 pub use layers::{
     Conv2d, Embedding, GroupNorm, LayerNorm, Linear, Named, QuantizedLinear, RmsNorm,
 };
 mod schema;
-pub use schema::{ModelArgument, ModelInputSpec, ParamSchema, ParameterSpec};
+pub use schema::{ModelArgument, ModelInputSpec, ParamSchema, ParameterSpec, StateSpec};
 mod selection;
 pub use selection::{ParameterId, ParameterSelection};
 
@@ -89,6 +89,8 @@ pub enum Error {
     },
     #[snafu(display("invalid model definition: {message}"))]
     InvalidDefinition { message: String },
+    #[snafu(display("state declaration for {path:?} is incompatible with the schema"))]
+    IncompatibleState { path: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -143,11 +145,38 @@ enum ParamMode {
 /// Model functions receive this same type during [`init`] and [`apply`]. The
 /// mode is selected by the caller, never inferred from prior invocations.
 pub struct Cx {
-    graph: Tracer,
+    graph: StateGraph,
     scope: Vec<String>,
     input_index: usize,
     effect_index: usize,
     mode: ParamMode,
+    states: BTreeMap<String, StateDeclaration>,
+    rngs: BTreeMap<String, RngStream>,
+}
+
+struct StateDeclaration {
+    slot: StateSlot,
+    shape: Vec<i64>,
+    dtype: DType,
+}
+
+/// Stable identity of a named resident value in a model trace.
+#[derive(Clone)]
+pub struct State {
+    path: String,
+    slot: StateSlot,
+}
+
+struct RngStream {
+    key: [Tensor; 2],
+    counters: [State; 2],
+    next: [Tensor; 2],
+    available: Tensor,
+}
+
+/// A named counter-based device RNG effect in the unified model context.
+pub struct Rng<'a> {
+    stream: &'a mut RngStream,
 }
 
 /// Values a model trace may return from [`apply`].
@@ -180,7 +209,7 @@ impl<const N: usize> TraceOutputs for [Tensor; N] {
 impl Cx {
     fn init() -> Self {
         Self {
-            graph: Tracer::default(),
+            graph: StateGraph::default(),
             scope: Vec::new(),
             input_index: 0,
             effect_index: 0,
@@ -188,12 +217,14 @@ impl Cx {
                 schema: ParamSchema::default(),
                 values: BTreeMap::new(),
             },
+            states: BTreeMap::new(),
+            rngs: BTreeMap::new(),
         }
     }
 
     fn apply(schema: ParamSchema) -> Self {
         Self {
-            graph: Tracer::default(),
+            graph: StateGraph::default(),
             scope: Vec::new(),
             input_index: 0,
             effect_index: 0,
@@ -202,6 +233,8 @@ impl Cx {
                 values: BTreeMap::new(),
                 read: HashSet::new(),
             },
+            states: BTreeMap::new(),
+            rngs: BTreeMap::new(),
         }
     }
 
@@ -329,7 +362,7 @@ impl Cx {
         self.input_index += 1;
         self.effect_index += 1;
         match dtype {
-            DType::F32 | DType::I32 => Ok(self.graph.input_dtype(shape, dtype)?),
+            DType::F32 | DType::I32 => Ok(self.graph.input_with_dtype(shape, dtype)?),
             DType::BF16 => Ok(self.graph.input_bf16_as_f32(shape)?),
             _ => UnsupportedInputDTypeSnafu { dtype }.fail(),
         }
@@ -343,6 +376,120 @@ impl Cx {
     /// Create a graph-local F32 constant without adding an ABI input.
     pub fn constant(&self, shape: &[i64], values: &[f32]) -> Result<Tensor> {
         Ok(self.graph.constant(shape, values)?)
+    }
+
+    /// Declare or read named resident state at the current lexical scope.
+    pub fn state(&mut self, name: &str, shape: &[i64], dtype: DType) -> Result<State> {
+        validate_name(name)?;
+        let path = self.path(name);
+        if let Some(existing) = self.states.get(&path) {
+            ensure!(
+                existing.shape == shape && existing.dtype == dtype,
+                IncompatibleStateSnafu { path }
+            );
+            return Ok(State {
+                path,
+                slot: existing.slot.clone(),
+            });
+        }
+        let state_index = match &mut self.mode {
+            ParamMode::Init { schema, .. } => {
+                let index = schema.states.len();
+                schema.states.push(StateSpec {
+                    path: path.clone(),
+                    shape: shape.to_vec(),
+                    dtype,
+                });
+                schema.arguments.push(ModelArgument::State(index));
+                index
+            }
+            ParamMode::Apply { schema, .. } => {
+                let (index, expected) = schema
+                    .states
+                    .iter()
+                    .enumerate()
+                    .find(|(_, state)| state.path == path)
+                    .context(IncompatibleStateSnafu { path: path.clone() })?;
+                ensure!(
+                    expected.shape == shape && expected.dtype == dtype,
+                    IncompatibleStateSnafu { path }
+                );
+                ensure!(
+                    schema.arguments.get(self.effect_index) == Some(&ModelArgument::State(index)),
+                    EffectMismatchSnafu {
+                        index: self.effect_index
+                    }
+                );
+                index
+            }
+        };
+        let _ = state_index;
+        let slot = self.graph.state_named(&path, shape, dtype)?;
+        self.effect_index += 1;
+        self.states.insert(
+            path.clone(),
+            StateDeclaration {
+                slot: slot.clone(),
+                shape: shape.to_vec(),
+                dtype,
+            },
+        );
+        Ok(State { path, slot })
+    }
+
+    /// Borrow a named Threefry stream. Repeated calls continue the same stream.
+    pub fn rng(&mut self, name: &str) -> Result<Rng<'_>> {
+        validate_name(name)?;
+        let path = self.path(name);
+        if !self.rngs.contains_key(&path) {
+            let words = self.scope(name, |cx| {
+                Ok([
+                    cx.state("key0", &[], DType::I32)?,
+                    cx.state("key1", &[], DType::I32)?,
+                    cx.state("counter_low", &[], DType::I32)?,
+                    cx.state("counter_high", &[], DType::I32)?,
+                ])
+            })?;
+            let values = words
+                .iter()
+                .map(|word| word.read(self))
+                .collect::<Result<Vec<_>>>()?;
+            self.rngs.insert(
+                path.clone(),
+                RngStream {
+                    key: [values[0].clone(), values[1].clone()],
+                    counters: [words[2].clone(), words[3].clone()],
+                    next: [values[2].clone(), values[3].clone()],
+                    available: self.graph.constant(&[], &[1.0])?,
+                },
+            );
+        }
+        Ok(Rng {
+            stream: self.rngs.get_mut(&path).expect("inserted above"),
+        })
+    }
+
+    fn validate_state(&self, state: &State) -> Result<()> {
+        match self.states.get(&state.path) {
+            Some(declaration) if declaration.slot.identity() == state.slot.identity() => Ok(()),
+            _ => InvalidDefinitionSnafu {
+                message: "state belongs to another model trace",
+            }
+            .fail(),
+        }
+    }
+
+    fn finish_rngs(&mut self) -> Result<()> {
+        for stream in std::mem::take(&mut self.rngs).into_values() {
+            self.graph.write_many_if(
+                &stream.available,
+                &[
+                    (&stream.counters[0].slot, stream.next[0].clone()),
+                    (&stream.counters[1].slot, stream.next[1].clone()),
+                ],
+            )?;
+        }
+        Ok(())
     }
 
     fn path(&self, name: &str) -> String {
@@ -398,6 +545,19 @@ impl Cx {
             .collect()
     }
 
+    fn state_slots(&self, schema: &ParamSchema) -> Vec<(String, StateSlot)> {
+        schema
+            .states()
+            .iter()
+            .map(|state| {
+                (
+                    state.path().to_owned(),
+                    self.states[state.path()].slot.clone(),
+                )
+            })
+            .collect()
+    }
+
     fn into_schema(self) -> ParamSchema {
         match self.mode {
             ParamMode::Init { schema, .. } => schema,
@@ -406,11 +566,96 @@ impl Cx {
     }
 }
 
-fn parameter_tensor(graph: &Tracer, shape: &[i64], dtype: DType) -> Result<Tensor> {
+impl State {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn read(&self, cx: &Cx) -> Result<Tensor> {
+        cx.validate_state(self)?;
+        Ok(cx.graph.read(&self.slot)?)
+    }
+
+    pub fn write(&self, cx: &mut Cx, value: &Tensor) -> Result<()> {
+        cx.validate_state(self)?;
+        Ok(cx.graph.write(&self.slot, value)?)
+    }
+
+    pub fn add_(&self, cx: &mut Cx, value: &Tensor) -> Result<()> {
+        let next = self.read(cx)?.add(value)?;
+        self.write(cx, &next)
+    }
+}
+
+impl Rng<'_> {
+    fn draw(&mut self, shape: &[i64]) -> Result<rxla_core::random::ThreefryBlocks> {
+        let draw = rxla_core::random::threefry2x32_blocks(
+            [&self.stream.key[0], &self.stream.key[1]],
+            [&self.stream.next[0], &self.stream.next[1]],
+            shape,
+        )?;
+        self.stream.available = self
+            .stream
+            .available
+            .mul(&draw.counter_wrapped.neg()?.add_scalar(1.0)?)?;
+        self.stream.next = draw.next_counter.clone();
+        Ok(draw)
+    }
+
+    pub fn blocks(&mut self, shape: &[i64]) -> Result<[Tensor; 2]> {
+        Ok(self.draw(shape)?.bits)
+    }
+
+    pub fn uniform_f32(&mut self, shape: &[i64]) -> Result<Tensor> {
+        let bits = self.draw(shape)?.bits;
+        Ok(rxla_core::random::uniform_f32_from_bits(&bits[0])?)
+    }
+
+    pub fn normal_f32(&mut self, shape: &[i64]) -> Result<Tensor> {
+        let bits = self.draw(shape)?.bits;
+        Ok(rxla_core::random::normal_f32_from_bits([
+            &bits[0], &bits[1],
+        ])?)
+    }
+
+    pub fn bernoulli(&mut self, shape: &[i64], probability: f32) -> Result<Tensor> {
+        ensure!(
+            (0.0..=1.0).contains(&probability),
+            InvalidDefinitionSnafu {
+                message: "device Bernoulli probability must be finite and in [0, 1]"
+            }
+        );
+        if probability == 0.0 || probability == 1.0 {
+            return Ok(self.stream.key[0]
+                .scalar(probability)?
+                .broadcast_to(shape)?);
+        }
+        let uniform = self.uniform_f32(shape)?;
+        Ok(uniform.lt_mask(&uniform.scalar(probability)?.broadcast_to(shape)?)?)
+    }
+
+    pub fn dropout(
+        &mut self,
+        input: &Tensor,
+        keep_probability: f32,
+    ) -> Result<rxla_core::random::DropoutSample> {
+        ensure!(
+            keep_probability.is_finite() && keep_probability > 0.0 && keep_probability <= 1.0,
+            InvalidDefinitionSnafu {
+                message: "dropout keep probability must be finite and in (0, 1]"
+            }
+        );
+        let keep_mask = self.bernoulli(input.shape(), keep_probability)?;
+        let output = input.dropout_with_mask(&keep_mask, keep_probability)?;
+        Ok(rxla_core::random::DropoutSample { output, keep_mask })
+    }
+}
+
+fn parameter_tensor(graph: &mut StateGraph, shape: &[i64], dtype: DType) -> Result<Tensor> {
     match dtype {
         DType::F32 => Ok(graph.input(shape)?),
         DType::BF16 => Ok(graph.input_bf16_as_f32(shape)?),
-        DType::U8 => Ok(graph.input_dtype(shape, DType::U8)?),
+        DType::U8 => Ok(graph.input_with_dtype(shape, DType::U8)?),
         _ => UnsupportedParameterDTypeSnafu { dtype }.fail(),
     }
 }
@@ -427,6 +672,7 @@ fn validate_name(name: &str) -> Result<()> {
 pub fn init<T>(build: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ParamSchema, T)> {
     let mut cx = Cx::init();
     let result = build(&mut cx)?;
+    cx.finish_rngs()?;
     Ok((cx.into_schema(), result))
 }
 
@@ -437,10 +683,13 @@ pub fn apply<T: TraceOutputs>(
 ) -> Result<AppliedModel> {
     let mut cx = Cx::apply(schema.clone());
     let outputs = build(&mut cx)?.into_outputs();
+    cx.finish_rngs()?;
     cx.finish_apply()?;
     let parameters = cx.parameter_tensors();
+    let states = cx.state_slots(schema);
     Ok(AppliedModel::new(
         cx.graph,
+        states,
         outputs,
         parameters,
         schema.clone(),
@@ -638,6 +887,62 @@ mod tests {
         assert_eq!(schema.parameters()[1].shape(), [3, 8]);
         assert_eq!(schema.parameters()[2].path(), "head.bias");
         assert_eq!(applied.outputs()[0].shape(), [2, 3]);
+    }
+
+    #[test]
+    fn one_context_composes_parameters_and_resident_state() {
+        let model = Model::new(|cx: &mut Cx| {
+            let input = cx.input(&[2, 4])?;
+            let output = cx.named("head")?.linear(3).apply(&input)?;
+            let count = cx.state("steps", &[], DType::I32)?;
+            let next = count.read(cx)?.wrapping_add_scalar(1)?;
+            count.write(cx, &next)?;
+            let noise = cx.rng("sampling")?.normal_f32(output.shape())?;
+            Ok(output.add(&noise.mul_scalar(0.0)?)?)
+        });
+
+        let (schema, applied) = model.trace().unwrap();
+        assert_eq!(schema.parameters()[0].path(), "head.weight");
+        assert_eq!(schema.states()[0].path(), "steps");
+        assert_eq!(schema.states()[1].path(), "sampling.key0");
+        assert!(applied.is_stateful());
+        assert!(applied.prepare().is_err());
+        let prepared = applied.prepare_stateful().unwrap();
+        let (_, steps) = applied.states().next().unwrap();
+        assert_eq!(prepared.state_type(steps).unwrap(), (DType::I32, vec![]));
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+    fn unified_context_state_and_rng_execute_as_one_program() {
+        let model = Model::new(|cx: &mut Cx| {
+            let steps = cx.state("steps", &[], DType::I32)?;
+            let next = steps.read(cx)?.wrapping_add_scalar(1)?;
+            steps.write(cx, &next)?;
+            let draw = cx.rng("sampling")?.uniform_f32(&[4])?;
+            Ok([draw, next])
+        });
+        let (_, applied) = model.trace().unwrap();
+        let client =
+            unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").expect("PJRT plugin path")) }
+                .unwrap();
+        let mut compiler = Compiler::new(client, CacheLimits::default());
+        let program = applied.compile_stateful(&mut compiler).unwrap();
+        let mut session = applied
+            .session(&program)
+            .rng_seed("sampling", 42)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let first = session.run(&[]).unwrap();
+        let second = session.run(&[]).unwrap();
+        assert_ne!(
+            first[0].to_vec::<f32>().unwrap(),
+            second[0].to_vec::<f32>().unwrap()
+        );
+        assert_eq!(first[1].to_vec::<i32>().unwrap(), [1]);
+        assert_eq!(second[1].to_vec::<i32>().unwrap(), [2]);
     }
 
     #[test]

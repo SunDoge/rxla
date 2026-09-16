@@ -9,7 +9,8 @@ pub struct StateSlot {
     index: usize,
 }
 impl StateSlot {
-    pub(crate) fn identity(&self) -> (usize, usize) {
+    #[doc(hidden)]
+    pub fn identity(&self) -> (usize, usize) {
         (Arc::as_ptr(&self.owner) as usize, self.index)
     }
 }
@@ -101,6 +102,13 @@ impl Default for StateGraph {
     }
 }
 impl StateGraph {
+    /// Borrow the ordinary dataflow view of this trace. State-aware callers
+    /// must still compile through `StateGraph` so final writes remain roots.
+    pub fn tracer(&self) -> Tracer {
+        Tracer {
+            graph: self.graph.clone(),
+        }
+    }
     /// Register a runtime F32 input with identity-based fixed binding support.
     /// The value remains a runtime argument, never a graph constant/cache key.
     pub fn parameter(&mut self, dims: &[i64]) -> Result<Parameter> {
@@ -167,7 +175,14 @@ impl StateGraph {
         self.input_count += 1;
         Ok(index)
     }
-    pub(crate) fn input_dtype(&mut self, ty: &TensorType) -> Result<Tensor> {
+    #[doc(hidden)]
+    pub fn input_with_dtype(&mut self, dims: &[i64], dtype: DType) -> Result<Tensor> {
+        let tensor = self.graph.input_dtype(dims, dtype)?;
+        self.arguments.push(Argument::Input(self.input_count));
+        self.input_count += 1;
+        Ok(tensor)
+    }
+    pub(crate) fn input_type(&mut self, ty: &TensorType) -> Result<Tensor> {
         let tensor = self.graph.input_dtype(&ty.dims, ty.dtype)?;
         self.arguments.push(Argument::Input(self.input_count));
         self.input_count += 1;
@@ -223,12 +238,8 @@ impl StateGraph {
     pub fn state_i32(&mut self, dims: &[i64]) -> Result<StateSlot> {
         self.state_named(&format!("state.{}", self.slots.len()), dims, DType::I32)
     }
-    pub(crate) fn state_named(
-        &mut self,
-        path: &str,
-        dims: &[i64],
-        dtype: DType,
-    ) -> Result<StateSlot> {
+    #[doc(hidden)]
+    pub fn state_named(&mut self, path: &str, dims: &[i64], dtype: DType) -> Result<StateSlot> {
         let index = self.slots.len();
         let value = self.graph.state_input(dims, dtype, index, path)?;
         Ok(self.register_state(value))
