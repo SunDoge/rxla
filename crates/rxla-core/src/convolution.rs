@@ -1,7 +1,7 @@
 use super::*;
 
 impl Tensor {
-    /// Input [N,H,W,Cin], kernel [Kh,Kw,Cin/groups,Cout], output [N,Oh,Ow,Cout].
+    /// Input `[N,H,W,Cin]`, kernel `[Kh,Kw,Cin/groups,Cout]`, output `[N,Oh,Ow,Cout]`.
     /// Output channels are contiguous by group. Depthwise convolution uses
     /// groups=Cin and Cout=Cin*multiplier. Bias is a separate broadcast/add.
     /// First-order reverse-mode supports both inputs and kernels, including

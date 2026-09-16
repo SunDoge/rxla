@@ -72,7 +72,7 @@ macro_rules! reshape_axes {
             }
 
             /// Merge axes start..=end, preserving row-major element order and dtype.
-            /// A scalar supports only flatten(0, 0), producing shape [1]. Other
+            /// A scalar supports only `flatten(0, 0)`, producing shape `[1]`. Other
             /// ranges must be ordered and within rank; a flattened dimension
             /// must fit i64. Empty dimensions remain empty. Records a reshape,
             /// not a host copy or synchronization; Tensor gradients follow reshape.

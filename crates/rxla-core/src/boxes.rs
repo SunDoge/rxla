@@ -75,23 +75,23 @@ impl Tensor {
         a.box_iou(&b)
     }
 
-    /// Elementwise continuous xyxy IoU for broadcast-compatible [..., 4]
+    /// Elementwise continuous xyxy IoU for broadcast-compatible `[..., 4]`
     /// operands. Returns their broadcast prefix, without inserting pairwise
-    /// axes. For [N, 4] predictions and targets this produces [N], not [N, N].
-    /// A single [4] box can broadcast across a batch. Uses the same finite-value,
+    /// axes. For `[N, 4]` predictions and targets this produces `[N]`, not `[N, N]`.
+    /// A single `[4]` box can broadcast across a batch. Uses the same finite-value,
     /// degenerate-box and piecewise-gradient rules as pairwise_box_iou.
     pub fn box_iou(&self, other: &Self) -> Result<Self> {
         self.box_overlap(other, false)
     }
 
-    /// Elementwise generalized IoU for broadcast-compatible [..., 4] xyxy
+    /// Elementwise generalized IoU for broadcast-compatible `[..., 4]` xyxy
     /// boxes: IoU - (enclosing_area - union) / enclosing_area. Unlike ordinary
     /// IoU, the enclosure term can supply gradients for disjoint boxes.
     /// Caller must supply ordered finite coordinates (x2 >= x1, y2 >= y1) and
     /// finite intermediate areas; no coordinate reordering is performed.
     /// Zero union/enclosure use safe denominators, with zero contribution for
     /// zero area. Empty sets work. Min/max boundary gradients are piecewise.
-    /// See https://giou.stanford.edu/ for the nondegenerate box definition.
+    /// See <https://giou.stanford.edu/> for the nondegenerate box definition.
     pub fn box_giou(&self, other: &Self) -> Result<Self> {
         self.box_overlap(other, true)
     }

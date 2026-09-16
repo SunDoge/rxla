@@ -27,7 +27,7 @@ pub type NmsResult<T> = std::result::Result<T, NmsError>;
 ///
 /// Boxes/scores must have equal lengths, finite values and ordered coordinates;
 /// degenerate boxes and negative scores are accepted. The threshold must be
-/// finite in [0,1]. Validation also runs for zero max_output. For class-aware
+/// finite in `[0,1]`. Validation also runs for zero max_output. For class-aware
 /// suppression, use nms_by_class or partition by class explicitly.
 ///
 /// Uses F64 geometry to avoid F32 area overflow for finite F32 coordinates,

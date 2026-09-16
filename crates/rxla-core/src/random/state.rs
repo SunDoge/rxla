@@ -237,7 +237,7 @@ impl ThreefrySequence {
     }
 
     /// Reserve `count` consecutive blocks as child key pairs, returned as two
-    /// I32 tensors of shape [count] (word0, word1). This is the explicit policy
+    /// I32 tensors of shape `[count]` (word0, word1). This is the explicit policy
     /// `blocks([count])`, not JAX split compatibility or a new RNG algorithm.
     /// Zero count consumes nothing; count must fit I32. Errors preserve cursor.
     /// Commit this sequence separately and use its returned acceptance to guard

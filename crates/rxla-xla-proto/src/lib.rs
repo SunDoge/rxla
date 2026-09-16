@@ -1,4 +1,5 @@
 //! Checked-in OpenXLA protobuf definitions. Regenerate with xtask, not build.rs.
+#![allow(rustdoc::broken_intra_doc_links, rustdoc::invalid_html_tags)]
 #![allow(clippy::all)]
 pub mod xla {
     include!("generated/xla.rs");

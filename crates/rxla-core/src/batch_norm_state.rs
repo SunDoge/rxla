@@ -67,7 +67,7 @@ impl BatchNormState {
     }
     /// Record EMA: `(1-rate)*old + rate*batch`, using detached batch mean and
     /// population variance (no unbiased correction). Rate is a finite construction
-    /// time number in [0,1], explicitly weighting the NEW batch. Rate 0 preserves
+    /// time number in `[0,1]`, explicitly weighting the NEW batch. Rate 0 preserves
     /// old values and rate 1 replaces them without 0*NaN contamination.
     /// Runtime statistic values are not validated or clamped.
     pub fn update(

@@ -1,7 +1,7 @@
 //! Composite model operations: no opaque kernels or separate compilation boundary.
 use super::*;
 
-/// Graph values from BatchNorm training. Statistics have shape [channels] and
+/// Graph values from BatchNorm training. Statistics have shape `[channels]` and
 /// remain differentiable; detach them when recording nondifferentiable running
 /// statistics. This does not own or implicitly update runtime state.
 pub struct BatchNormTraining {
@@ -111,7 +111,7 @@ impl Tensor {
     /// materializing probabilities or subtracting nearly equal large losses.
     /// There is no reduction: use mean/sum explicitly. Broadcasting is explicit.
     ///
-    /// The caller supplies finite targets in [0,1]; runtime values are neither
+    /// The caller supplies finite targets in `[0,1]`; runtime values are neither
     /// checked nor clamped. Other values compute the same weighted expression.
     /// Logits and soft targets are both differentiable; detach targets if needed.
     /// Intended for finite inputs: zero times infinity is not masked away, and
@@ -198,7 +198,7 @@ impl Tensor {
     }
 
     /// Training BatchNorm over all dimensions except `axis`, with F32 affine
-    /// weight and bias of shape [channels]. Uses two-pass population variance and
+    /// weight and bias of shape `[channels]`. Uses two-pass population variance and
     /// computes `(x - mean) * rsqrt(variance + epsilon) * weight + bias`.
     /// Returns batch statistics alongside the same-shape output; no running
     /// average, momentum, counter or mutable session update is implicit.

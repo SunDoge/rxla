@@ -501,8 +501,8 @@ impl Tensor {
     /// Select separately at each non-axis position. Input and indices must have
     /// equal rank and equal non-axis dimensions; broadcasting is explicit.
     /// The result has the indices' shape. Unlike `take`, indices are not shared
-    /// across batches. Indices clamp to [0, axis_size-1]; negatives do not wrap.
-    /// For logits [B,S,V], indices [B,S,1] select one value per token.
+    /// across batches. Indices clamp to `[0, axis_size-1]`; negatives do not wrap.
+    /// For logits `[B,S,V]`, indices `[B,S,1]` select one value per token.
     pub fn take_along_axis(&self, indices: &Tensor, axis: usize) -> Result<Self> {
         validate_take_along_axis(self.graph(), self.shape(), indices, axis)?;
         self.graph().node(
@@ -577,8 +577,8 @@ impl Tensor {
         ))
     }
     /// Gather along one axis, replacing that axis with the index tensor's shape.
-    /// Indices clamp to [0, axis_size-1]; negatives do not wrap. For embedding,
-    /// table.take(token_ids, 0) maps [B,S] IDs into [B,S,hidden] values.
+    /// Indices clamp to `[0, axis_size-1]`; negatives do not wrap. For embedding,
+    /// `table.take(token_ids, 0)` maps `[B,S]` IDs into `[B,S,hidden]` values.
     pub fn take(&self, indices: &Tensor, axis: usize) -> Result<Self> {
         if !Arc::ptr_eq(&self.graph().0, &indices.graph().0) {
             return Err(err("cross-graph index"));

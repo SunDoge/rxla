@@ -1,8 +1,8 @@
 use super::*;
 
 impl Tensor {
-    /// Additive causal mask from explicit query [Q] and key [K] positions.
-    /// Entry (i,j) is zero iff key_positions[j] <= self[i], else -infinity.
+    /// Additive causal mask from explicit query `[Q]` and key `[K]` positions.
+    /// Entry `(i,j)` is zero iff `key_positions[j] <= self[i]`, else -infinity.
     /// Comparison is signed I32, with no subtraction or float conversion; even
     /// extreme I32 positions are exact. Negative/duplicate/unsorted positions
     /// are compared as supplied, not treated as padding or validated cache slots.
