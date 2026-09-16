@@ -726,6 +726,117 @@ impl Client {
             .expect("selected device belongs to addressable devices");
         self.buffer_on_device(device_index, dims, data)
     }
+
+    /// Register owned host memory for DMA and start an asynchronous upload.
+    ///
+    /// The returned handle owns both the allocation and its native DMA mapping
+    /// until PJRT reports that the host bytes are no longer needed. Plugins
+    /// without `PJRT_Client_DmaMap` return an incompatible-plugin error.
+    pub fn upload_pinned<T: Element>(
+        &self,
+        dims: &[i64],
+        data: Vec<T>,
+    ) -> Result<PendingHostUpload<T>> {
+        let device_index = self
+            .0
+            .addressable_devices
+            .iter()
+            .position(|&device| device == self.0.device)
+            .expect("selected device belongs to addressable devices");
+        self.upload_pinned_on_device(device_index, dims, data)
+    }
+
+    pub fn upload_pinned_on_device<T: Element>(
+        &self,
+        device_index: usize,
+        dims: &[i64],
+        mut data: Vec<T>,
+    ) -> Result<PendingHostUpload<T>> {
+        let count = dims
+            .iter()
+            .try_fold(1usize, |count, &dimension| {
+                usize::try_from(dimension)
+                    .ok()
+                    .and_then(|dimension| count.checked_mul(dimension))
+            })
+            .context(InvalidArgumentSnafu {
+                message: "invalid or overflowing shape",
+            })?;
+        ensure!(
+            count == data.len(),
+            InvalidArgumentSnafu {
+                message: "shape/data length mismatch",
+            }
+        );
+        let device =
+            *self
+                .0
+                .addressable_devices
+                .get(device_index)
+                .context(InvalidArgumentSnafu {
+                    message: "addressable device index out of range",
+                })?;
+        let bytes = std::mem::size_of_val(data.as_slice());
+        let mapped = bytes != 0;
+        if mapped {
+            let mut map = args!(PJRT_Client_DmaMap_Args, PJRT_Client_DmaMap_Args_STRUCT_SIZE);
+            map.client = self.0.raw;
+            map.data = data.as_mut_ptr().cast();
+            map.size = bytes;
+            self.0
+                .plugin
+                .check(unsafe { function!(self.0.plugin.api(), PJRT_Client_DmaMap)(&mut map) })?;
+        }
+        let mut upload = args!(
+            PJRT_Client_BufferFromHostBuffer_Args,
+            PJRT_Client_BufferFromHostBuffer_Args_STRUCT_SIZE
+        );
+        upload.client = self.0.raw;
+        upload.device = device;
+        upload.data = data.as_ptr().cast();
+        upload.type_ = T::DTYPE.as_raw();
+        upload.dims = dims.as_ptr();
+        upload.num_dims = dims.len();
+        upload.host_buffer_semantics =
+            PJRT_HostBufferSemantics_PJRT_HostBufferSemantics_kImmutableUntilTransferCompletes;
+        if let Err(error) = self.0.plugin.check(unsafe {
+            function!(self.0.plugin.api(), PJRT_Client_BufferFromHostBuffer)(&mut upload)
+        }) {
+            if mapped {
+                let _ = dma_unmap(&self.0, data.as_mut_ptr().cast());
+            }
+            return Err(error);
+        }
+        if upload.done_with_host_buffer.is_null() {
+            if mapped {
+                let _ = dma_unmap(&self.0, data.as_mut_ptr().cast());
+            }
+            return InvalidPluginDataSnafu {
+                message: "plugin returned a null host upload completion event",
+            }
+            .fail();
+        }
+        let inner = match BufferInner::new(self.0.clone(), upload.buffer) {
+            Ok(inner) => inner,
+            Err(error) => {
+                let _ = self.0.plugin.wait(upload.done_with_host_buffer);
+                if mapped {
+                    let _ = dma_unmap(&self.0, data.as_mut_ptr().cast());
+                }
+                return Err(error);
+            }
+        };
+        let buffer = Buffer {
+            inner: Rc::new(inner),
+        };
+        Ok(PendingHostUpload {
+            client: self.0.clone(),
+            data: Some(data),
+            buffer: Some(buffer),
+            event: Some(upload.done_with_host_buffer),
+            mapped,
+        })
+    }
     pub fn buffer_on_device<T: Element>(
         &self,
         device_index: usize,
@@ -1613,6 +1724,65 @@ impl ExecutableInner {
 impl Drop for ExecutableInner {
     fn drop(&mut self) {
         let _ = self.destroy();
+    }
+}
+
+fn dma_unmap(client: &ClientInner, data: *mut std::ffi::c_void) -> Result<()> {
+    let mut unmap = args!(
+        PJRT_Client_DmaUnmap_Args,
+        PJRT_Client_DmaUnmap_Args_STRUCT_SIZE
+    );
+    unmap.client = client.raw;
+    unmap.data = data;
+    client
+        .plugin
+        .check(unsafe { function!(client.plugin.api(), PJRT_Client_DmaUnmap)(&mut unmap) })
+}
+
+/// An in-flight upload from an owned DMA-mapped host allocation.
+///
+/// The buffer handle can be submitted immediately: PJRT carries the readiness
+/// dependency into downstream execution. `wait` observes transfer errors and
+/// releases the host mapping. Dropping also waits, then releases it.
+#[must_use = "retain the pinned allocation until upload completion"]
+pub struct PendingHostUpload<T: Element> {
+    client: Rc<ClientInner>,
+    data: Option<Vec<T>>,
+    buffer: Option<Buffer>,
+    event: Option<*mut PJRT_Event>,
+    mapped: bool,
+}
+
+impl<T: Element> PendingHostUpload<T> {
+    pub fn buffer(&self) -> &Buffer {
+        self.buffer.as_ref().expect("buffer exists until wait")
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        let transfer = match self.event.take() {
+            Some(event) => self.client.plugin.wait(event),
+            None => Ok(()),
+        };
+        let unmap = if self.mapped {
+            self.mapped = false;
+            let data = self.data.as_mut().expect("host allocation retained");
+            dma_unmap(&self.client, data.as_mut_ptr().cast())
+        } else {
+            Ok(())
+        };
+        transfer.and(unmap)
+    }
+
+    pub fn wait(mut self) -> Result<Buffer> {
+        self.finish()?;
+        self.data.take();
+        Ok(self.buffer.take().expect("buffer exists until wait"))
+    }
+}
+
+impl<T: Element> Drop for PendingHostUpload<T> {
+    fn drop(&mut self) {
+        let _ = self.finish();
     }
 }
 

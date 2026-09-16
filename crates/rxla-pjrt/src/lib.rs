@@ -17,6 +17,6 @@ pub use half::{bf16, f16};
 pub use runtime::{
     Buffer, BufferMemoryLayout, Client, ClientInfo, ClientOptionValue, ClientOptions, DType,
     DeviceInfo, DeviceMemoryStats, Element, Error, Executable, OptimizedProgram, PendingExecution,
-    PjrtErrorCode, Plugin, PluginRegistry, Program,
+    PendingHostUpload, PjrtErrorCode, Plugin, PluginRegistry, Program,
 };
 pub use runtime::{ByteStrides, HostView, Shape, StridedLayout};

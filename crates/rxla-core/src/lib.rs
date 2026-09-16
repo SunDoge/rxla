@@ -7,8 +7,8 @@ pub use nn::BatchNormTraining;
 use prost::Message;
 pub use rxla_pjrt::{
     Buffer, BufferMemoryLayout, Client, ClientInfo, ClientOptionValue, ClientOptions, DType,
-    DeviceInfo, Error as PjrtError, PendingExecution, PjrtErrorCode, Plugin, PluginRegistry, bf16,
-    f16,
+    DeviceInfo, Error as PjrtError, PendingExecution, PendingHostUpload, PjrtErrorCode, Plugin,
+    PluginRegistry, bf16, f16,
 };
 use rxla_xla_proto::xla::{
     CompileOptionsProto, DeviceAssignmentProto, ExecutableBuildOptionsProto, HloModuleProto,
