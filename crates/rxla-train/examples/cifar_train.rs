@@ -280,7 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gpu = unsafe { Client::load(&args.gpu_plugin) }?;
     let mut augmentation_runtime = Runtime::new(cpu)?;
     let batch_size = args.batch_size;
-    let (schema, trainable, mut model) = Model::new(classifier)
+    let (_schema, trainable, mut model) = Model::new(classifier)
         .inputs(classifier_inputs(batch_size))
         .trace_resident(ParamSchema::select_all)?;
     let loss = model.outputs()[0].clone();
@@ -293,9 +293,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => Dataset::synthetic(batch_size),
     };
     let data_rng = DataRng::new(args.seed);
-    let session_builder = compiled
-        .session()
-        .parameters(schema.initialize(&gpu, args.seed)?)?;
+    let session_builder = compiled.session().initialize_parameters(args.seed)?;
     let mut session = session_builder.build()?;
     let mut prepared = (args.steps != 0)
         .then(|| {

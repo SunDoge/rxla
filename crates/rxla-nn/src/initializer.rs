@@ -290,9 +290,7 @@ mod tests {
         let compiled = model
             .compile(&mut Compiler::new(client.clone(), CacheLimits::default()))
             .unwrap();
-        let runner = compiled
-            .bind_parameters(first.iter().map(|(path, buffer)| (path.as_str(), buffer)))
-            .unwrap();
+        let runner = compiled.initialize_parameters(42).unwrap();
         let input = client.buffer(&[1, 3], &[1.0, 2.0, 3.0]).unwrap();
         let output: Buffer = runner.run(&input).unwrap();
         assert_eq!(output.dimensions().unwrap(), [1, 2]);
@@ -308,8 +306,13 @@ mod tests {
             Model::new(|cx: &mut Cx, input: Tensor| cx.layer("norm")?.batch_norm().apply(&input))
                 .inputs(crate::ModelInput::new([1, 2, 2, 3]));
         let (schema, _, model) = definition
-            .trace_resident(|schema| schema.select_all())
+            .trace_resident(|schema| {
+                schema
+                    .select_all()
+                    .matching(|_, parameter| parameter.path() == "norm.weight")
+            })
             .unwrap();
+        assert_eq!(model.resident_parameters().count(), 1);
         assert_eq!(
             schema.get("norm.weight").unwrap().initializer(),
             Some(Initializer::ones())
@@ -328,7 +331,7 @@ mod tests {
             .unwrap();
         let session = compiled
             .session()
-            .parameters(schema.initialize(&client, 42).unwrap())
+            .initialize_parameters(42)
             .unwrap()
             .build()
             .unwrap();

@@ -112,6 +112,20 @@ impl CompiledModel {
         &self.executable
     }
 
+    /// Initialize every declared parameter and retain the resulting buffers for
+    /// repeated execution.
+    pub fn initialize_parameters(&self, seed: u64) -> Result<BoundModel> {
+        let parameters = self
+            .model
+            .schema
+            .initialize(self.executable.client(), seed)?;
+        self.bind_parameters(
+            parameters
+                .iter()
+                .map(|(path, buffer)| (path.as_str(), buffer)),
+        )
+    }
+
     /// Bind named parameters once for repeated typed model execution.
     pub fn bind_parameters<'parameters>(
         &self,
@@ -223,6 +237,14 @@ impl<'a> CompiledModelSessionBuilder<'a> {
         Ok(Self {
             model: self.model,
             inner: self.inner.parameters(values)?,
+        })
+    }
+
+    /// Initialize only the parameters stored as resident session state.
+    pub fn initialize_parameters(self, seed: u64) -> Result<Self> {
+        Ok(Self {
+            model: self.model,
+            inner: self.inner.initialize_parameters(seed)?,
         })
     }
 
@@ -845,6 +867,33 @@ impl ModelSessionBuilder<'_> {
     {
         for (path, value) in values {
             self = self.parameter(path, value)?;
+        }
+        Ok(self)
+    }
+
+    /// Initialize only this trace's resident parameter set from schema policy.
+    pub fn initialize_parameters(mut self, seed: u64) -> Result<Self> {
+        let declarations = self
+            .model
+            .resident_parameters()
+            .filter(|(_, spec, _)| !self.parameter_overrides.contains_key(spec.path()))
+            .map(|(_, spec, _)| {
+                let initializer = spec
+                    .initializer()
+                    .context(MissingInitializerSnafu { path: spec.path() })?;
+                initializer.validate(spec.path(), spec.shape(), spec.dtype())?;
+                Ok((spec, initializer))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for (spec, initializer) in declarations {
+            let value = initializer.initialize(
+                self.program.client(),
+                spec.path(),
+                spec.shape(),
+                spec.dtype(),
+                crate::schema::stable_seed(seed, spec.path()),
+            )?;
+            self = self.parameter(spec.path(), value)?;
         }
         Ok(self)
     }

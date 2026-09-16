@@ -119,6 +119,12 @@ without a self-referential model/checkpoint wrapper. Built-in
 targets include `Buffer`, tuples, arrays and `Vec<Buffer>`; a domain result can
 implement the trait as well. A dynamic vector consumes all remaining buffers,
 so it belongs at the top level or at the final position of a custom decoder.
+For freshly trained models, `compiled.initialize_parameters(seed)` applies the
+schema policies on the executable's own client and returns the same bound
+runner. Stateful code uses
+`compiled.session().initialize_parameters(seed)?.build()`; this initializes
+only the selected resident parameters, not every parameter in the schema, and
+explicit per-parameter overrides may be installed first.
 
 Trainability belongs to a particular transformation, not permanently to a
 parameter declaration. The immutable schema provides typed parameter identities

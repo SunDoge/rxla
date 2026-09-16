@@ -684,6 +684,11 @@ pub struct Executable {
     output_count: usize,
 }
 impl Executable {
+    /// Client that owns this executable and all compatible input buffers.
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
     pub fn device_count(&self) -> usize {
         self.raw.device_count()
     }

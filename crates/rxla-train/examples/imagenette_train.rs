@@ -4,8 +4,7 @@ use clap::Parser;
 use image::{GenericImageView, imageops::FilterType};
 use rayon::prelude::*;
 use rxla_core::{
-    Buffer, CacheLimits, Client, Compiler, Conv2dOptions, DType, PendingHostUpload, Pool2dOptions,
-    Tensor,
+    CacheLimits, Client, Compiler, Conv2dOptions, DType, PendingHostUpload, Pool2dOptions, Tensor,
 };
 use rxla_nn::{AppliedModel, Cx, Model, ModelInput, ParamSchema, Result as NnResult};
 use rxla_train::{BoundedPipeline, DataRng, PipelineResult, apply_model_sgd};
@@ -397,9 +396,8 @@ fn initialize_session<'a>(
     model: &'a AppliedModel,
     program: &'a rxla_core::StateProgram,
     seed: u64,
-    parameters: Vec<(String, Buffer)>,
 ) -> Result<rxla_core::Session, Box<dyn std::error::Error>> {
-    let mut builder = model.session(program).parameters(parameters)?;
+    let mut builder = model.session(program).initialize_parameters(seed)?;
     builder = builder.rng_seed("augmentation", seed)?;
     Ok(builder.build()?)
 }
@@ -427,8 +425,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     apply_model_sgd(&mut model, &trainable, &loss, args.learning_rate)?;
     let mut compiler = Compiler::new(gpu.clone(), CacheLimits::default());
     let program = model.compile_stateful_tensors(&mut compiler, &[metrics])?;
-    let parameters = schema.initialize(&gpu, args.seed)?;
-    let mut session = initialize_session(&model, &program, args.seed, parameters)?;
+    let mut session = initialize_session(&model, &program, args.seed)?;
     let rng = DataRng::new(args.seed);
     let started = Instant::now();
     let mut total_correct = 0;
