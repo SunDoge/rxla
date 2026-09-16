@@ -387,7 +387,7 @@ impl AppliedModel {
             .filter_map(|(index, spec)| {
                 self.resident_parameters[index]
                     .as_ref()
-                    .map(|slot| (ParameterId::from_index(index), spec, slot))
+                    .map(|slot| (self.schema.id_at(index), spec, slot))
             })
     }
 

@@ -3,7 +3,21 @@
 use crate::{Initializer, MissingInitializerSnafu, ParameterId, ParameterSelection, Result};
 use rxla_core::{Buffer, Client, DType};
 use snafu::OptionExt;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+
+static NEXT_SCHEMA_IDENTITY: AtomicU64 = AtomicU64::new(1);
+
+fn next_schema_identity() -> u64 {
+    let identity = NEXT_SCHEMA_IDENTITY.fetch_add(1, Ordering::Relaxed);
+    assert_ne!(identity, 0, "model schema identity space exhausted");
+    identity
+}
 
 /// One immutable parameter declaration in a traced model schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,14 +100,53 @@ pub enum ModelArgument {
 }
 
 /// Ordered, immutable declarations produced by [`crate::init`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug)]
 struct ModelSchemaData {
+    identity: u64,
     pub(crate) inputs: Vec<ModelInputSpec>,
     pub(crate) parameters: Vec<ParameterSpec>,
     pub(crate) indices: BTreeMap<String, usize>,
     pub(crate) arguments: Vec<ModelArgument>,
     pub(crate) states: Vec<StateSpec>,
 }
+
+impl Default for ModelSchemaData {
+    fn default() -> Self {
+        Self {
+            identity: next_schema_identity(),
+            inputs: Vec::new(),
+            parameters: Vec::new(),
+            indices: BTreeMap::new(),
+            arguments: Vec::new(),
+            states: Vec::new(),
+        }
+    }
+}
+
+impl Clone for ModelSchemaData {
+    fn clone(&self) -> Self {
+        Self {
+            identity: next_schema_identity(),
+            inputs: self.inputs.clone(),
+            parameters: self.parameters.clone(),
+            indices: self.indices.clone(),
+            arguments: self.arguments.clone(),
+            states: self.states.clone(),
+        }
+    }
+}
+
+impl PartialEq for ModelSchemaData {
+    fn eq(&self, other: &Self) -> bool {
+        self.inputs == other.inputs
+            && self.parameters == other.parameters
+            && self.indices == other.indices
+            && self.arguments == other.arguments
+            && self.states == other.states
+    }
+}
+
+impl Eq for ModelSchemaData {}
 
 /// Cheaply cloned identity-bearing handle to one immutable effect schema.
 ///
@@ -171,12 +224,14 @@ impl ModelSchema {
             .indices
             .get(path)
             .copied()
-            .map(ParameterId::from_index)
+            .map(|index| ParameterId::new(self.0.identity, index))
     }
 
     /// Parameter declaration identified by [`ParameterId`].
     pub fn parameter(&self, id: ParameterId) -> Option<&ParameterSpec> {
-        self.0.parameters.get(id.index())
+        (id.schema_identity() == self.0.identity)
+            .then(|| self.0.parameters.get(id.index()))
+            .flatten()
     }
 
     /// Start an ordered selection containing every model parameter.
@@ -198,7 +253,11 @@ impl ModelSchema {
     }
 
     pub(crate) fn same_identity(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        self.0.identity == other.0.identity
+    }
+
+    pub(crate) fn id_at(&self, index: usize) -> ParameterId {
+        ParameterId::new(self.0.identity, index)
     }
 
     pub(crate) fn push_parameter(&mut self, spec: ParameterSpec) -> usize {

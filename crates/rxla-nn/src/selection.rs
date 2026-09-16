@@ -4,19 +4,25 @@ use super::{ModelSchema, ParameterSpec};
 
 /// Stable parameter identity within one immutable [`ModelSchema`].
 ///
-/// The newtype prevents parameter indices from being confused with model input
-/// or runtime ABI indices. It deliberately does not claim identity across two
-/// independently traced schemas.
+/// The identity carries its originating schema, so using an ID with an
+/// independently traced schema cannot silently address the same numeric slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ParameterId(usize);
+pub struct ParameterId {
+    schema: u64,
+    index: usize,
+}
 
 impl ParameterId {
-    pub(crate) const fn from_index(index: usize) -> Self {
-        Self(index)
+    pub(crate) const fn new(schema: u64, index: usize) -> Self {
+        Self { schema, index }
     }
 
     pub(crate) const fn index(self) -> usize {
-        self.0
+        self.index
+    }
+
+    pub(crate) const fn schema_identity(self) -> u64 {
+        self.schema
     }
 }
 
@@ -36,7 +42,7 @@ impl ParameterSelection {
         Self {
             schema: schema.clone(),
             ids: (0..schema.parameters().len())
-                .map(ParameterId::from_index)
+                .map(|index| schema.id_at(index))
                 .collect(),
         }
     }
@@ -127,5 +133,18 @@ mod tests {
         let id = schema.parameter_id("head.weight").unwrap();
         assert_eq!(schema.parameter(id).unwrap().path(), "head.weight");
         assert!(schema.select_under("head").contains(id));
+    }
+
+    #[test]
+    fn ids_reject_the_same_numeric_slot_from_another_schema() {
+        let (first, _) = init(branched).unwrap();
+        let (second, _) = init(branched).unwrap();
+        assert_eq!(first, second);
+
+        let first_id = first.parameter_id("body.weight").unwrap();
+        let second_id = second.parameter_id("body.weight").unwrap();
+        assert_ne!(first_id, second_id);
+        assert!(second.parameter(first_id).is_none());
+        assert!(!second.select_all().contains(first_id));
     }
 }
