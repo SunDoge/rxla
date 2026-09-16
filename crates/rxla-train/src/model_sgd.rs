@@ -244,6 +244,24 @@ pub fn prepare_model_sgd(
     Ok(ModelSgdStep { updates })
 }
 
+/// Add SGD writes to parameters already interpreted as resident model state.
+///
+/// The updates become hidden state roots. Compiling the mutated model with its
+/// ordinary outputs therefore produces one transaction containing forward,
+/// autodiff, parameter updates and any model state/RNG updates. No replacement
+/// parameter buffers are exposed in the execution result.
+pub fn apply_model_sgd(
+    model: &mut AppliedModel,
+    selection: &ParameterSelection<'_>,
+    loss: &Tensor,
+    learning_rate: f32,
+) -> ModelSgdResult<()> {
+    let step = prepare_model_sgd(model, selection, loss, learning_rate)?;
+    let values = step.outputs();
+    model.write_resident_parameters(selection, &values)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,6 +345,36 @@ mod tests {
         assert_eq!(prepared.output_spec(0).unwrap().shape, [1, 1]);
         let slot = model.states().next().unwrap().1;
         assert_eq!(prepared.state_type(slot).unwrap(), (DType::F32, vec![]));
+    }
+
+    #[test]
+    fn resident_sgd_hides_parameter_replacements_from_the_result_abi() {
+        let definition = Model::new(linear_loss);
+        let schema = definition.init().unwrap();
+        let selection = schema.select_under("linear");
+        let mut model = definition.apply_resident(&schema, &selection).unwrap();
+        let loss = model.outputs()[0].clone();
+
+        apply_model_sgd(&mut model, &selection, &loss, 0.1).unwrap();
+
+        let prepared = model.prepare_stateful().unwrap();
+        assert!(prepared.output_spec(0).is_some());
+        assert!(prepared.output_spec(1).is_none());
+        assert_eq!(prepared.input_indices(), [0]);
+        assert_eq!(model.resident_parameters().count(), 1);
+    }
+
+    #[test]
+    fn resident_sgd_rejects_an_input_backed_selection() {
+        let (schema, mut model) = Model::new(linear_loss).trace().unwrap();
+        let selection = schema.select_all();
+        let loss = model.outputs()[0].clone();
+        assert!(matches!(
+            apply_model_sgd(&mut model, &selection, &loss, 0.1),
+            Err(ModelSgdError::Model {
+                source: rxla_nn::Error::ParameterNotResident { .. }
+            })
+        ));
     }
 
     #[test]
@@ -440,6 +488,65 @@ mod tests {
         assert!(
             final_loss < initial_loss * 1e-6,
             "{initial_loss} -> {final_loss}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
+    fn resident_linear_sgd_initializes_once_and_commits_in_session() {
+        fn regression_loss(cx: &mut Cx) -> Result<Tensor> {
+            let input = cx.input(&[1, 1])?;
+            let prediction = cx.named("linear")?.linear(1).bias(false).apply(&input)?;
+            Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
+        }
+
+        let client = unsafe {
+            Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
+        }
+        .expect("load CPU plugin");
+        let definition = Model::new(regression_loss);
+        let schema = definition.init().unwrap();
+        let selection = schema.select_under("linear");
+        let mut model = definition.apply_resident(&schema, &selection).unwrap();
+        let slot = model.resident_parameters().next().unwrap().2.clone();
+        assert_eq!(
+            model.prepare_stateful().unwrap().state_type(&slot).unwrap(),
+            (DType::F32, vec![1, 1])
+        );
+        let loss = model.outputs()[0].clone();
+        apply_model_sgd(&mut model, &selection, &loss, 0.1).unwrap();
+        assert_eq!(
+            model.prepare_stateful().unwrap().state_type(&slot).unwrap(),
+            (DType::F32, vec![1, 1])
+        );
+
+        let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+        let program = model.compile_stateful(&mut compiler).unwrap();
+        let weight = client.buffer(&[1, 1], &[1.0]).unwrap();
+        let (_, _, weight_slot) = model.resident_parameters().next().unwrap();
+        assert_eq!(
+            program.state_type(weight_slot).unwrap(),
+            (weight.dtype().unwrap(), weight.dimensions().unwrap())
+        );
+        let mut session = model
+            .session(&program)
+            .parameter("linear.weight", weight)
+            .unwrap()
+            .build()
+            .unwrap();
+        let input = client.buffer(&[1, 1], &[2.0]).unwrap();
+
+        let first = session.run(&[&input]).unwrap()[0].to_vec::<f32>().unwrap()[0];
+        let mut last = first;
+        for _ in 0..20 {
+            last = session.run(&[&input]).unwrap()[0].to_vec::<f32>().unwrap()[0];
+        }
+        assert!(last < first * 1e-6, "{first} -> {last}");
+        let (_, _, slot) = model.resident_parameters().next().unwrap();
+        let trained = session.state(slot).unwrap().to_vec::<f32>().unwrap();
+        assert!(
+            trained.iter().all(|value| value.abs() < 1e-4),
+            "{trained:?}"
         );
     }
 }

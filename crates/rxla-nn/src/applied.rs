@@ -190,6 +190,40 @@ impl AppliedModel {
         )?)
     }
 
+    /// Atomically record next values for selected resident parameters.
+    ///
+    /// The selection and values use schema order. Every selected parameter must
+    /// have been made resident by `Model::apply_resident`; validation completes
+    /// before any symbolic slot is changed.
+    pub fn write_resident_parameters(
+        &mut self,
+        selection: &ParameterSelection<'_>,
+        values: &[Tensor],
+    ) -> Result<()> {
+        ensure!(
+            selection.schema() == &self.schema,
+            SelectionSchemaMismatchSnafu
+        );
+        ensure!(
+            selection.len() == values.len(),
+            ParameterUpdateCountSnafu {
+                expected: selection.len(),
+                actual: values.len(),
+            }
+        );
+        let updates = selection
+            .parameters()
+            .zip(values)
+            .map(|((id, spec), value)| {
+                self.resident_parameters[id.index()]
+                    .as_ref()
+                    .map(|slot| (slot, value))
+                    .with_context(|| ParameterNotResidentSnafu { path: spec.path() })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(self.state_graph.write_many(&updates)?)
+    }
+
     /// Lower model outputs while preserving the frozen schema ABI exactly.
     pub fn prepare(&self) -> Result<LoweredProgram> {
         ensure!(

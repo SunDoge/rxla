@@ -169,13 +169,14 @@ initialized once, by canonical schema path, through `ModelSessionBuilder`.
 F32, BF16 and U8 storage preserve the same symbolic semantics as input-backed
 parameters, so frozen and quantized inference weights can use this policy too.
 
-SGD and Adam still expose selected replacement parameters as visible optimizer
-results. Their resident optimizer state is committed atomically with model state
-and RNG, but parameter handles are still installed by the caller between steps.
-The next integration step is to record selected optimizer writes into the
-resident parameter slots. Only then will one training session atomically commit
-parameters, model state, RNG and optimizer state with no visible parameter
-results; the current implementation deliberately makes no such claim.
+Functional SGD and Adam continue to support input-backed parameters and expose
+selected replacements as visible optimizer results. `apply_model_sgd` is the
+resident alternative: it records each F32 replacement into the selected
+parameter's state slot, so the ordinary model outputs remain the entire visible
+result ABI. One session execution then atomically commits parameters, model
+state and RNG without host-side handle replacement. Adam has resident moments
+but has not yet adopted resident parameter writes, so its parameter replacements
+remain visible.
 
 `Cx` intentionally exposes only effect primitives and `named`. The layer
 vocabulary lives on the temporary named namespace, so adding layers does not

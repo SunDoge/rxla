@@ -13,7 +13,7 @@ pub use model_adam::{
 mod model_sgd;
 pub use model_sgd::{
     ModelSgdError, ModelSgdOutputPlan, ModelSgdResult, ModelSgdStep, ModelSgdUpdate,
-    prepare_model_sgd,
+    apply_model_sgd, prepare_model_sgd,
 };
 mod pipeline;
 pub use pipeline::{BoundedPipeline, PipelineError, PipelineResult};

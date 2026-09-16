@@ -56,6 +56,10 @@ pub enum Error {
     UnsupportedParameterDType { dtype: DType },
     #[snafu(display("resident parameter {path:?} has no session initializer"))]
     MissingResidentParameterInitializer { path: String },
+    #[snafu(display("parameter {path:?} is not resident in this model trace"))]
+    ParameterNotResident { path: String },
+    #[snafu(display("expected {expected} resident parameter updates, received {actual}"))]
+    ParameterUpdateCount { expected: usize, actual: usize },
     #[snafu(display("model input dtype {dtype:?} is unsupported"))]
     UnsupportedInputDType { dtype: DType },
     #[snafu(display("parameter declaration for {path:?} is incompatible with the schema"))]
