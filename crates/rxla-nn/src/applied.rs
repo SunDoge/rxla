@@ -123,15 +123,6 @@ impl AppliedModel {
             .collect())
     }
 
-    /// Append an explicit runtime input for an IR transformation.
-    ///
-    /// Transform inputs follow the model ABI and are intentionally absent from
-    /// [`ParamSchema`]: the transform that creates them owns their ordering and
-    /// binding contract. This is suitable for optimizer state, not model data.
-    pub fn transform_input(&self, shape: &[i64], dtype: DType) -> Result<Tensor> {
-        Ok(self.graph.input_dtype(shape, dtype)?)
-    }
-
     /// Append named resident state owned by a graph transformation.
     ///
     /// Unlike a model `Cx::state` effect, this does not modify `ParamSchema` or

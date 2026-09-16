@@ -28,7 +28,7 @@ pub use selection::{ParameterId, ParameterSelection};
 /// [`rxla_core::Program`]; keeping the names distinct avoids import aliases in
 /// applications that construct and run models in the same module.
 pub struct Model<F> {
-    build: F,
+    apply: F,
 }
 
 /// Recoverable parameter-effect and model-binding failures.
@@ -100,8 +100,9 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl<F> Model<F> {
-    pub fn new(build: F) -> Self {
-        Self { build }
+    /// Capture one model `apply` function for repeated effect interpretation.
+    pub fn new(apply: F) -> Self {
+        Self { apply }
     }
 }
 
@@ -123,12 +124,12 @@ where
 
     /// Discover the input/parameter effect schema from this model body.
     pub fn init(&self) -> Result<ParamSchema> {
-        init(|cx| (self.build)(cx)).map(|(schema, _)| schema)
+        init(|cx| (self.apply)(cx)).map(|(schema, _)| schema)
     }
 
     /// Trace this model body against a previously discovered schema.
     pub fn apply(&self, schema: &ParamSchema) -> Result<AppliedModel> {
-        apply(schema, |cx| (self.build)(cx))
+        apply(schema, |cx| (self.apply)(cx))
     }
 }
 
@@ -315,15 +316,11 @@ impl Cx {
         }
     }
 
-    /// Enter one lexical parameter scope for the duration of `build`.
-    pub fn scope<T>(
-        &mut self,
-        name: &str,
-        build: impl FnOnce(&mut Self) -> Result<T>,
-    ) -> Result<T> {
+    /// Enter one lexical parameter scope for the duration of `body`.
+    pub fn scope<T>(&mut self, name: &str, body: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         validate_name(name)?;
         self.scope.push(name.to_owned());
-        let result = build(self);
+        let result = body(self);
         self.scope.pop();
         result
     }
@@ -673,9 +670,9 @@ fn validate_name(name: &str) -> Result<()> {
 }
 
 /// Interpret parameter effects as declarations and return the frozen schema.
-pub fn init<T>(build: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ParamSchema, T)> {
+pub fn init<T>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ParamSchema, T)> {
     let mut cx = Cx::init();
-    let result = build(&mut cx)?;
+    let result = body(&mut cx)?;
     cx.finish_rngs()?;
     Ok((cx.into_schema(), result))
 }
@@ -683,10 +680,10 @@ pub fn init<T>(build: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ParamSchema,
 /// Interpret parameter effects as reads from `schema` and retain traced outputs.
 pub fn apply<T: TraceOutputs>(
     schema: &ParamSchema,
-    build: impl FnOnce(&mut Cx) -> Result<T>,
+    body: impl FnOnce(&mut Cx) -> Result<T>,
 ) -> Result<AppliedModel> {
     let mut cx = Cx::apply(schema.clone());
-    let outputs = build(&mut cx)?.into_outputs();
+    let outputs = body(&mut cx)?.into_outputs();
     cx.finish_rngs()?;
     cx.finish_apply()?;
     let parameters = cx.parameter_tensors();

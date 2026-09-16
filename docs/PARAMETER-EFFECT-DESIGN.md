@@ -1,6 +1,7 @@
 # Parameter declaration as a tracing effect
 
-Status: initial public tracing API implemented (2026-09-15).
+Status: public tracing API and resident optimizer effects implemented
+(2026-09-16).
 
 RXLA's primary model-construction API will not require an `nn.Module`-style
 construction phase that predeclares every parameter shape. A parameter is
@@ -45,13 +46,13 @@ The first implemented API exposes this directly:
 ```rust
 use rxla::{Tensor, model::{Cx, Model, Result}};
 
-fn classifier(cx: &mut Cx) -> Result<Tensor> {
+fn apply(cx: &mut Cx) -> Result<Tensor> {
     let x = cx.input(&[2, 4])?;
     let x = cx.named("hidden")?.linear(8).apply(&x)?.relu()?;
     cx.named("head")?.linear(3).apply(&x)
 }
 
-let (schema, applied) = Model::new(classifier).trace()?;
+let (schema, applied) = Model::new(apply).trace()?;
 assert_eq!(schema.parameters()[0].path(), "hidden.weight");
 assert_eq!(applied.outputs()[0].shape(), [2, 3]);
 # Ok::<(), rxla::nn::Error>(())
@@ -65,11 +66,11 @@ and deterministic, scope-based selections instead:
 
 ```rust
 # use rxla::{Tensor, model::{Cx, Result, init}};
-# fn classifier(cx: &mut Cx) -> Result<Tensor> {
+# fn apply(cx: &mut Cx) -> Result<Tensor> {
 #     let x = cx.input(&[2, 4])?;
 #     cx.named("head")?.linear(3).apply(&x)
 # }
-let (schema, _) = init(classifier)?;
+let (schema, _) = init(apply)?;
 let trainable = schema.select_under("head");
 for (id, parameter) in trainable.parameters() {
     println!("{id:?}: {}", parameter.path());
@@ -85,7 +86,7 @@ backbone, or update an adapter without changing its forward definition. Mutable
 non-parameter data belongs to a separate state effect; immutable assets belong
 to constants.
 
-The deliberately small initial training surface is functional SGD:
+The deliberately small initial training surface provides fused SGD and Adam:
 
 ```rust
 # use rxla::{Tensor, nn::{Cx, Model, Result}};
@@ -105,9 +106,15 @@ assert_eq!(stablehlo.output_count(), trainable.len());
 
 The lowered program contains forward, loss, reverse-mode autodiff and
 `parameter - learning_rate * gradient` together. A step therefore executes as
-one XLA program and returns device-resident replacement parameter buffers. No
-momentum, optimizer state, generic trainer or implicit multi-step loop is part
-of this initial contract.
+one XLA program and returns device-resident replacement parameter buffers.
+
+Adam uses the same transformation boundary, but its moments and step counter
+are named resident effects appended to the applied model. They are hidden state
+roots rather than extra public graph inputs or outputs. A stateful session
+therefore commits model state, RNG and optimizer state in the same execution;
+only selected replacement parameters cross the visible output ABI. This is not
+a global optimizer registry: the transform explicitly declares stable paths
+under `__optimizer.adam`, and a session owns the resulting buffers.
 
 `Cx` intentionally exposes only effect primitives and `named`. The layer
 vocabulary lives on the temporary named namespace, so adding layers does not
@@ -123,10 +130,11 @@ fn block(cx: &mut Cx, x: &Tensor) -> Result<Tensor> {
 }
 ```
 
-`AppliedModel::prepare` creates an ordinary immutable `LoweredProgram` from
-the Pliron graph, preserving the frozen effect ABI exactly. Parameters are
-therefore normal named ABI inputs at this stage; the legacy `StateGraph` is not
-part of this API.
+`AppliedModel::prepare` creates an ordinary immutable `LoweredProgram` for a
+stateless application. Once model or transform state exists, callers use
+`prepare_stateful`/`compile_stateful`; final state versions become hidden roots
+while parameters remain normal named ABI inputs. Both paths preserve the frozen
+parameter-effect ABI and lower through the same Pliron program.
 
 At execution, `AppliedModel::bind` accepts positional model-input buffers and
 path-addressed parameter buffers, validates their schema types, then produces
