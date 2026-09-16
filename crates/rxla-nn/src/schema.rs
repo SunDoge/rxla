@@ -1,7 +1,8 @@
 //! Immutable model effect schema and its typed parameter identities.
 
-use crate::{ParameterId, ParameterSelection};
-use rxla_core::DType;
+use crate::{Initializer, MissingInitializerSnafu, ParameterId, ParameterSelection, Result};
+use rxla_core::{Buffer, Client, DType};
+use snafu::OptionExt;
 use std::{collections::BTreeMap, sync::Arc};
 
 /// One immutable parameter declaration in a traced model schema.
@@ -10,6 +11,7 @@ pub struct ParameterSpec {
     pub(crate) path: String,
     pub(crate) shape: Vec<i64>,
     pub(crate) dtype: DType,
+    pub(crate) initializer: Option<Initializer>,
 }
 
 impl ParameterSpec {
@@ -23,6 +25,10 @@ impl ParameterSpec {
 
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+
+    pub fn initializer(&self) -> Option<Initializer> {
+        self.initializer
     }
 }
 
@@ -102,6 +108,32 @@ impl PartialEq for ParamSchema {
 impl Eq for ParamSchema {}
 
 impl ParamSchema {
+    /// Materialize every parameter from its declaration-time initializer.
+    ///
+    /// Seeds are derived from `seed` and the stable parameter path, so adding
+    /// an unrelated parameter does not perturb existing initial values.
+    pub fn initialize(&self, client: &Client, seed: u64) -> Result<Vec<(String, Buffer)>> {
+        self.parameters()
+            .iter()
+            .map(|parameter| {
+                let initializer = parameter.initializer.context(MissingInitializerSnafu {
+                    path: parameter.path(),
+                })?;
+                let parameter_seed = stable_seed(seed, parameter.path());
+                Ok((
+                    parameter.path.clone(),
+                    initializer.initialize(
+                        client,
+                        parameter.path(),
+                        parameter.shape(),
+                        parameter.dtype(),
+                        parameter_seed,
+                    )?,
+                ))
+            })
+            .collect()
+    }
+
     /// Input ABI in the order inputs are requested by the model trace.
     pub fn inputs(&self) -> &[ModelInputSpec] {
         &self.0.inputs
@@ -182,4 +214,12 @@ impl ParamSchema {
         data.arguments.push(ModelArgument::State(index));
         index
     }
+}
+
+fn stable_seed(mut seed: u64, path: &str) -> u64 {
+    for byte in path.bytes() {
+        seed ^= u64::from(byte);
+        seed = seed.wrapping_mul(0x100_0000_01b3);
+    }
+    seed
 }

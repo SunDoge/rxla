@@ -350,45 +350,6 @@ fn resnet18_inputs(batch_size: i64) -> (ModelInput, ModelInput) {
     )
 }
 
-fn initialized_parameters(
-    client: &Client,
-    schema: &ParamSchema,
-) -> Result<Vec<(String, Buffer)>, Box<dyn std::error::Error>> {
-    let mut result = Vec::with_capacity(schema.parameters().len());
-    let mut state = 0x4d59_5df4_d0f3_3173_u64;
-    for spec in schema.parameters() {
-        let count = spec.shape().iter().product::<i64>() as usize;
-        let fan_in = spec.shape().iter().skip(1).product::<i64>().max(1) as f32;
-        let parent = spec.path().rsplit('.').nth(1).unwrap_or_default();
-        let batch_norm_weight = spec.path().ends_with(".weight")
-            && (parent == "stem_bn" || parent.starts_with("bn") || parent == "shortcut_bn");
-        let scale = if batch_norm_weight {
-            1.0
-        } else if spec.path().ends_with("weight") {
-            (2.0 / fan_in).sqrt()
-        } else {
-            0.0
-        };
-        let values = (0..count)
-            .map(|_| {
-                if batch_norm_weight {
-                    return 1.0;
-                }
-                state = state
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407);
-                let unit = ((state >> 40) as f32) / ((1_u32 << 24) as f32);
-                (unit * 2.0 - 1.0) * scale
-            })
-            .collect::<Vec<_>>();
-        result.push((
-            spec.path().to_owned(),
-            client.buffer(spec.shape(), &values)?,
-        ));
-    }
-    Ok(result)
-}
-
 fn prepare_batch(
     dataset: &ImageFolder,
     step: usize,
@@ -479,7 +440,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     apply_model_sgd(&mut model, &trainable, &loss, args.learning_rate)?;
     let mut compiler = Compiler::new(gpu.clone(), CacheLimits::default());
     let program = model.compile_stateful_tensors(&mut compiler, &[metrics])?;
-    let parameters = initialized_parameters(&gpu, &schema)?;
+    let parameters = schema.initialize(&gpu, args.seed)?;
     let mut session = initialize_session(&model, &program, &schema, &gpu, args.seed, parameters)?;
     let rng = DataRng::new(args.seed);
     let started = Instant::now();

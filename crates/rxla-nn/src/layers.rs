@@ -24,7 +24,11 @@ impl Embedding<'_> {
         );
         Ok(self
             .cx
-            .param("weight", &[self.vocabulary, self.width])?
+            .param_initialized(
+                "weight",
+                &[self.vocabulary, self.width],
+                Initializer::normal(0.0, 1.0),
+            )?
             .take(indices, 0)?)
     }
 }
@@ -229,7 +233,15 @@ impl RmsNorm<'_> {
             }
         );
         let width = *input.shape().last().expect("rank checked above");
-        let weight = self.cx.param("weight", &[width])?;
+        let weight = self.cx.param_initialized(
+            "weight",
+            &[width],
+            if self.zero_centered {
+                Initializer::Zeros
+            } else {
+                Initializer::Ones
+            },
+        )?;
         let weight = if self.zero_centered {
             weight.add_scalar(1.0)?
         } else {
@@ -381,9 +393,27 @@ impl Cx {
             layer: "Linear",
             requirement: "an input with at least one dimension",
         })?;
-        let weight = self.param("weight", &[out_features, in_features])?;
+        ensure!(
+            in_features > 0 && out_features > 0,
+            InvalidLayerInputSnafu {
+                layer: "Linear",
+                requirement: "positive input and output feature dimensions",
+            }
+        );
+        let weight = self.param_initialized(
+            "weight",
+            &[out_features, in_features],
+            Initializer::KaimingUniform,
+        )?;
+        let bias_bound = (1.0 / in_features as f32).sqrt();
         let bias = bias
-            .then(|| self.param("bias", &[out_features]))
+            .then(|| {
+                self.param_initialized(
+                    "bias",
+                    &[out_features],
+                    Initializer::uniform(-bias_bound, bias_bound),
+                )
+            })
             .transpose()?;
         Ok(input.linear(&weight, bias.as_ref())?)
     }
@@ -417,7 +447,7 @@ impl Cx {
                 requirement: "positive channels/kernel and compatible groups",
             }
         );
-        let weight = self.param(
+        let weight = self.param_initialized(
             "weight",
             &[
                 out_channels,
@@ -425,12 +455,16 @@ impl Cx {
                 kernel[0],
                 kernel[1],
             ],
+            Initializer::KaimingUniform,
         )?;
         let output = input.conv2d_oihw(&weight, options)?;
         if !bias {
             return Ok(output);
         }
-        let bias = self.param("bias", &[out_channels])?;
+        let fan_in = (in_channels / options.groups) * kernel[0] * kernel[1];
+        let bound = (1.0 / fan_in as f32).sqrt();
+        let bias =
+            self.param_initialized("bias", &[out_channels], Initializer::uniform(-bound, bound))?;
         Ok(output.add(&bias.broadcast_to(output.shape())?)?)
     }
 
@@ -460,8 +494,8 @@ impl Cx {
         );
         let (weight, bias) = if affine {
             (
-                Some(self.param("weight", &[channels])?),
-                Some(self.param("bias", &[channels])?),
+                Some(self.param_initialized("weight", &[channels], Initializer::Ones)?),
+                Some(self.param_initialized("bias", &[channels], Initializer::Zeros)?),
             )
         } else {
             (None, None)
@@ -492,8 +526,8 @@ impl Cx {
             }
         );
         let channels = input.shape()[3];
-        let weight = self.param("weight", &[channels])?;
-        let bias = self.param("bias", &[channels])?;
+        let weight = self.param_initialized("weight", &[channels], Initializer::Ones)?;
+        let bias = self.param_initialized("bias", &[channels], Initializer::Zeros)?;
         let running_mean = self.state("running_mean", &[channels], DType::F32)?;
         let running_variance = self.state("running_variance", &[channels], DType::F32)?;
         if !training {
@@ -543,8 +577,8 @@ impl Cx {
         let normalized_shape = &input.shape()[input.shape().len() - normalized_rank..];
         let (weight, bias) = if affine {
             (
-                Some(self.param("weight", normalized_shape)?),
-                Some(self.param("bias", normalized_shape)?),
+                Some(self.param_initialized("weight", normalized_shape, Initializer::Ones)?),
+                Some(self.param_initialized("bias", normalized_shape, Initializer::Zeros)?),
             )
         } else {
             (None, None)

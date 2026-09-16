@@ -28,7 +28,7 @@ The model body is written once. It is never allowed to infer whether it is the
 "first" invocation by consulting global state or a mutable variable registry.
 Instead, an explicit interpreter chooses the meaning of the same effect:
 
-| Context | `cx.param("weight", shape, dtype)` |
+| Context | `cx.param[_initialized]("weight", shape, ...)` |
 | --- | --- |
 | schema/init trace | `DeclareParam`: validate and record schema, initializer and canonical path |
 | apply/compile trace | `ReadParam`: look up the already-frozen schema and emit its parameter SSA input |
@@ -40,6 +40,15 @@ lower-level `init` and `apply` methods remain available when checkpoint tooling
 needs to inspect or restore a schema between those phases. This is an API
 boundary, not a second model implementation: users never write a separate init
 function, repeat tracing closures, or manually plumb a parameter tree.
+
+Built-in trainable layers attach an `Initializer` to each parameter effect:
+affine and convolution weights use fan-in-scaled Kaiming uniform values, their
+biases use the matching uniform bound, and normalization scale/bias use
+ones/zeros. `ParamSchema::initialize(client, seed)` materializes the complete
+named buffer set deterministically. Seeds are derived from stable parameter
+paths, so inserting an unrelated layer does not perturb existing weights. A
+bare `cx.param` remains explicitly uninitialized for checkpoint-only or custom
+parameters; `cx.param_initialized` records a caller-selected policy.
 
 The first implemented API exposes this directly:
 

@@ -16,6 +16,8 @@ pub use applied::{
 };
 mod inputs;
 pub use inputs::{ModelHandler, ModelInput, ModelInputValues, ModelInputs};
+mod initializer;
+pub use initializer::Initializer;
 mod layers;
 pub use layers::{
     Conv2d, Embedding, GroupNorm, Layer, LayerNorm, Linear, QuantizedLinear, RmsNorm,
@@ -124,6 +126,10 @@ pub enum Error {
     OutputCount { expected: usize, actual: usize },
     #[snafu(display("output buffers do not match the requested result structure"))]
     OutputStructure,
+    #[snafu(display("parameter {path:?} has no initializer"))]
+    MissingInitializer { path: String },
+    #[snafu(display("invalid initializer for parameter {path:?}: {message}"))]
+    InvalidInitializer { path: String, message: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -374,12 +380,32 @@ impl Cx {
         self.param_dtype(name, shape, DType::F32)
     }
 
+    /// Declare/read an F32 parameter with a deterministic initialization policy.
+    pub fn param_initialized(
+        &mut self,
+        name: &str,
+        shape: &[i64],
+        initializer: Initializer,
+    ) -> Result<Tensor> {
+        self.param_dtype_initialized(name, shape, DType::F32, Some(initializer))
+    }
+
     /// Declare/read a parameter with its storage dtype.
     ///
     /// The current symbolic tensor surface supports F32 parameters, frozen
     /// BF16 storage exposed as F32 computation values, and raw U8 storage for
     /// explicitly dequantized inference layers. Other dtypes are rejected.
     pub fn param_dtype(&mut self, name: &str, shape: &[i64], dtype: DType) -> Result<Tensor> {
+        self.param_dtype_initialized(name, shape, dtype, None)
+    }
+
+    fn param_dtype_initialized(
+        &mut self,
+        name: &str,
+        shape: &[i64],
+        dtype: DType,
+        initializer: Option<Initializer>,
+    ) -> Result<Tensor> {
         validate_name(name)?;
         let path = self.path(name);
         ensure!(
@@ -390,6 +416,7 @@ impl Cx {
             path: path.clone(),
             shape: shape.to_vec(),
             dtype,
+            initializer,
         };
         let (graph, mode, resident_parameters) = (
             &mut self.graph,
@@ -1089,8 +1116,16 @@ mod tests {
         assert_eq!(output.shape(), [2, 3]);
         assert_eq!(schema.parameters()[0].path(), "head.weight");
         assert_eq!(schema.parameters()[0].shape(), [3, 4]);
+        assert_eq!(
+            schema.parameters()[0].initializer(),
+            Some(Initializer::KaimingUniform)
+        );
         assert_eq!(schema.parameters()[1].path(), "head.bias");
         assert_eq!(schema.parameters()[1].shape(), [3]);
+        assert!(matches!(
+            schema.parameters()[1].initializer(),
+            Some(Initializer::Uniform { .. })
+        ));
     }
 
     #[test]
