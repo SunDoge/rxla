@@ -949,13 +949,14 @@ For explicit plugin-specific creation parameters, use `Client::load_with_options
 and the typed `ClientOptions::set` builder; the `cuda_clients` example demonstrates
 two live GPU clients with BFC growth enabled instead of default preallocation.
 
-`Buffer::copy_to_f32`, `copy_to_i32` and `copy_to_bf16_bits` download into
-caller-owned slices, so repeated result retrieval can reuse host storage instead
-of allocating a new output Vec. They require the exact dtype and element count,
-reject mismatches before writing, and wait for native transfer completion before
-returning. BF16 values remain raw bits. Native transfer failures may partially
-modify the destination. These are synchronous APIs, not pinned-memory or async
-transfers, and do not establish a latency improvement over `to_vec_*`.
+`Buffer::copy_to<T: Element>` downloads into a caller-owned typed slice, so
+repeated result retrieval can reuse host storage instead of allocating a new
+output Vec. It requires the exact dtype and element count, rejects mismatches
+before writing, and waits for native transfer completion before returning.
+BF16 uses `half::bf16`, which preserves every encoding without passing through
+F32. Native transfer failures may partially modify the destination. This is a
+synchronous API, not pinned-memory or async transfer, and does not establish a
+latency improvement over `to_vec::<T>()`.
 
 `Executable::submit(&[&buffer])` returns an owned `PendingExecution`;
 `pending.wait()` waits for device completion and returns the output buffers or
@@ -1275,13 +1276,14 @@ TinyLlama reports snapshots before/after weight loading, after compilation and
 after execution, outside timed intervals; unsupported diagnostics are recorded
 without preventing inference. Its after-weight snapshot also includes KV state.
 
-The low-level PJRT crate now also recognizes `DType::BF16` and exposes
-`client.buffer_bf16_bits(shape, &[u16])` / `buffer.to_vec_bf16_bits()`. The u16s
-are raw BF16 encodings, not integer values; transfers do not round through F32.
+The low-level PJRT crate recognizes `DType::BF16`; `half::bf16` implements its
+sealed `Element` trait, so ordinary `client.buffer(shape, &[bf16])`,
+`buffer.to_vec::<bf16>()`, and `buffer.copy_to(&mut [bf16])` preserve native
+storage without rounding through F32. Raw encodings remain available explicitly
+through `bf16::from_bits` and `bf16::to_bits` at serialization/test boundaries.
 Native tests round-trip all 65536 bit patterns (including NaN payloads), scalars
 and empty tensors, reject wrong-type reads and invalid shapes, and verify buffers
 keep their client alive. CPU and selected CUDA gates include these tests.
-No new dependency or generated binding update is required.
 
 The safe Tensor arithmetic/AD remains F32 (with separate I32 indexing), but the trusted external HLO wrapper
 now accepts BF16 host arrays and preserves their input metadata in serialized
@@ -1292,9 +1294,9 @@ weight loading is unchanged. Adding a public DType variant also means downstream
 exhaustive matches must handle BF16. No model mixed-precision speedup or reduced
 model memory consumption has been measured by these transfer tests.
 
-For BF16 weight files, `Checkpoint::read_bf16_bits(name)` returns a `HostBf16`
-with shape and exact u16 encodings; `upload_bf16_bits(client, name)` uploads that
-representation directly. F16/F32/I32 files are rejected by these methods, not
+For BF16 weight files, `Checkpoint::read_bf16(name)` returns a `HostBf16` with
+shape and native `Vec<half::bf16>` values; `upload_bf16(client, name)` uploads
+that representation directly. F16/F32/I32 files are rejected by these methods, not
 implicitly cast. Normal `read_f32`/`upload_f32` conversion behavior is unchanged.
 `write_buffers` and `save_buffers_new` now preserve BF16 buffers alongside F32
 and I32 in the same safetensors file. BF16 offsets and transfer statistics count
@@ -1308,7 +1310,7 @@ added. This is weight/buffer I/O, not a BF16 optimizer or safe mixed-precision A
 
 For frozen weights, `Tracer::input_bf16_as_f32(shape)` and the corresponding
 `StateGraph` method declare a BF16 input and return an explicit HLO conversion
-to an ordinary F32 Tensor. Bind `upload_bf16_bits` buffers directly; no host F32
+to an ordinary F32 Tensor. Bind `upload_bf16` buffers directly; no host F32
 expansion is needed. `Session::bind_inputs` can retain these frozen buffers while
 F32 trainable parameters update. The converted Tensor is not a trainable input
 leaf: requesting its gradient is rejected, and differentiation stops at the

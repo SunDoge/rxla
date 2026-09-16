@@ -1,4 +1,4 @@
-use rxla_pjrt::Client;
+use rxla_pjrt::{Client, bf16};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -9,7 +9,12 @@ fn reusable_download_checks_types_lengths_and_preserves_bits() {
     let integers = [i32::MIN, i32::MAX, 16_777_217, -16_777_217];
     let i = client.buffer(&[4], &integers).unwrap();
     let bits: Vec<_> = (0..=u16::MAX).collect();
-    let b = client.buffer_bf16_bits(&[256, 256], &bits).unwrap();
+    let bf16_values = bits
+        .iter()
+        .copied()
+        .map(bf16::from_bits)
+        .collect::<Vec<_>>();
+    let b = client.buffer(&[256, 256], &bf16_values).unwrap();
     let mut floats = [123.; 6];
     for len in [0, 3, 5] {
         assert!(f.copy_to(&mut floats[..len]).is_err());
@@ -33,12 +38,19 @@ fn reusable_download_checks_types_lengths_and_preserves_bits() {
     assert_eq!(ints, [77; 4]);
     i.copy_to(&mut ints).unwrap();
     assert_eq!(ints, integers);
-    let mut bf16 = vec![42; bits.len()];
-    assert!(b.copy_to_bf16_bits(&mut bf16[..10]).is_err());
-    assert!(f.copy_to_bf16_bits(&mut bf16[..4]).is_err());
-    assert!(bf16.iter().all(|&v| v == 42));
-    b.copy_to_bf16_bits(&mut bf16).unwrap();
-    assert_eq!(bf16, bits);
+    let sentinel = bf16::from_bits(42);
+    let mut bf16_values = vec![sentinel; bits.len()];
+    assert!(b.copy_to(&mut bf16_values[..10]).is_err());
+    assert!(f.copy_to(&mut bf16_values[..4]).is_err());
+    assert!(bf16_values.iter().all(|&value| value == sentinel));
+    b.copy_to(&mut bf16_values).unwrap();
+    assert_eq!(
+        bf16_values
+            .into_iter()
+            .map(bf16::to_bits)
+            .collect::<Vec<_>>(),
+        bits
+    );
     client
         .buffer::<f32>(&[0, 2], &[])
         .unwrap()
@@ -50,9 +62,9 @@ fn reusable_download_checks_types_lengths_and_preserves_bits() {
         .copy_to::<i32>(&mut [])
         .unwrap();
     client
-        .buffer_bf16_bits(&[0], &[])
+        .buffer::<bf16>(&[0], &[])
         .unwrap()
-        .copy_to_bf16_bits(&mut [])
+        .copy_to::<bf16>(&mut [])
         .unwrap();
     let scalar = client.buffer(&[], &[19]).unwrap();
     drop(client);

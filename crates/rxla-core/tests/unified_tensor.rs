@@ -88,7 +88,11 @@ fn real_managed_integer_and_bf16_graphs() -> Result<(), Box<dyn std::error::Erro
         .to_device(&client)?;
     let reshape = b.reshape(&[1, 3])?;
     assert_eq!(
-        compiler.execute_bound(&reshape, &[&b])?[0].to_vec_bf16_bits()?,
+        compiler.execute_bound(&reshape, &[&b])?[0]
+            .to_vec::<rxla_core::bf16>()?
+            .into_iter()
+            .map(rxla_core::bf16::to_bits)
+            .collect::<Vec<_>>(),
         bits
     );
     assert_eq!(

@@ -57,11 +57,11 @@ pub struct HostI32 {
     pub values: Vec<i32>,
 }
 
-/// Exact BF16 storage. Each u16 is a floating-point encoding, not an integer
-/// value; no F32 conversion or NaN canonicalization is performed.
+/// Exact native BF16 storage. No F32 conversion or NaN canonicalization is
+/// performed; callers can inspect encodings with [`bf16::to_bits`].
 pub struct HostBf16 {
     pub shape: Vec<i64>,
-    pub bits: Vec<u16>,
+    pub values: Vec<bf16>,
 }
 
 /// Exact U8 payload used by explicitly quantized parameter schemas.
@@ -303,9 +303,9 @@ impl<R: Read + Seek> SafeTensors<R> {
         Ok(HostI32 { shape, values })
     }
 
-    /// Read only the selected BF16 payload as raw bit patterns. Other dtypes,
-    /// including F16 and F32, are rejected before payload I/O, not converted.
-    pub fn read_bf16_bits(&mut self, name: &str) -> Result<HostBf16> {
+    /// Read the selected payload as native BF16 values. Other dtypes, including
+    /// F16 and F32, are rejected before payload I/O, not converted.
+    pub fn read_bf16(&mut self, name: &str) -> Result<HostBf16> {
         let info = self
             .metadata
             .info(name)
@@ -332,11 +332,11 @@ impl<R: Read + Seek> SafeTensors<R> {
         self.reader.read_exact(&mut bytes).map_err(io)?;
         let read_time = read_start.elapsed();
         let decode_start = Instant::now();
-        let bits = bytes
+        let values = bytes
             .as_chunks::<2>()
             .0
             .iter()
-            .map(|&b| u16::from_le_bytes(b))
+            .map(|&bytes| bf16::from_bits(u16::from_le_bytes(bytes)))
             .collect();
         self.stats.reads = self.stats.reads.saturating_add(1);
         self.stats.payload_bytes = self.stats.payload_bytes.saturating_add(bytes.len() as u64);
@@ -345,22 +345,22 @@ impl<R: Read + Seek> SafeTensors<R> {
             .stats
             .decode_time
             .saturating_add(decode_start.elapsed());
-        Ok(HostBf16 { shape, bits })
+        Ok(HostBf16 { shape, values })
     }
 
     /// Upload BF16 without expanding to F32; uploaded byte statistics count two
     /// bytes per element. Does not mutate sessions or infer model key mappings.
-    pub fn upload_bf16_bits(&mut self, client: &Client, name: &str) -> Result<Buffer> {
-        let tensor = self.read_bf16_bits(name)?;
+    pub fn upload_bf16(&mut self, client: &Client, name: &str) -> Result<Buffer> {
+        let tensor = self.read_bf16(name)?;
         let upload_start = Instant::now();
         let buffer = client
-            .buffer_bf16_bits(&tensor.shape, &tensor.bits)
+            .buffer(&tensor.shape, &tensor.values)
             .map_err(|source| Error::Runtime { source })?;
         self.stats.uploads = self.stats.uploads.saturating_add(1);
         self.stats.uploaded_bytes = self
             .stats
             .uploaded_bytes
-            .saturating_add((tensor.bits.len() as u64).saturating_mul(2));
+            .saturating_add((tensor.values.len() as u64).saturating_mul(2));
         self.stats.upload_time = self
             .stats
             .upload_time

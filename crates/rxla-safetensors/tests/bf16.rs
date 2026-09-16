@@ -1,3 +1,4 @@
+use half::bf16;
 use rxla_safetensors::{Dtype, SafeTensors, save_buffers_new};
 use std::io::Cursor;
 
@@ -12,12 +13,19 @@ fn host_bf16_reader_is_exact_and_rejects_conversion() {
     }
     bytes.extend([0, 0]);
     let mut checkpoint = SafeTensors::new(Cursor::new(bytes)).unwrap();
-    assert!(checkpoint.read_bf16_bits("fp").is_err());
-    assert!(checkpoint.read_bf16_bits("missing").is_err());
+    assert!(checkpoint.read_bf16("fp").is_err());
+    assert!(checkpoint.read_bf16("missing").is_err());
     assert_eq!(checkpoint.stats().reads, 0);
-    let tensor = checkpoint.read_bf16_bits("bf").unwrap();
+    let tensor = checkpoint.read_bf16("bf").unwrap();
     assert_eq!(tensor.shape, [4]);
-    assert_eq!(tensor.bits, bits);
+    assert_eq!(
+        tensor
+            .values
+            .into_iter()
+            .map(bf16::to_bits)
+            .collect::<Vec<_>>(),
+        bits
+    );
     assert_eq!(checkpoint.stats().reads, 1);
     assert_eq!(checkpoint.stats().payload_bytes, 8);
 }
@@ -28,9 +36,14 @@ fn real_bf16_mixed_checkpoint_round_trip() {
     let client =
         unsafe { rxla_pjrt::Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let bits: Vec<_> = (0..=u16::MAX).collect();
-    let bf = client.buffer_bf16_bits(&[256, 256], &bits).unwrap();
-    let empty = client.buffer_bf16_bits(&[0, 3], &[]).unwrap();
-    let scalar = client.buffer_bf16_bits(&[], &[0x3f80]).unwrap();
+    let values = bits
+        .iter()
+        .copied()
+        .map(bf16::from_bits)
+        .collect::<Vec<_>>();
+    let bf = client.buffer(&[256, 256], &values).unwrap();
+    let empty = client.buffer::<bf16>(&[0, 3], &[]).unwrap();
+    let scalar = client.buffer(&[], &[bf16::ONE]).unwrap();
     let fp = client.buffer(&[2], &[1., -2.]).unwrap();
     let index = client.buffer(&[], &[16_777_217]).unwrap();
     let directory = tempfile::tempdir().unwrap();
@@ -50,31 +63,39 @@ fn real_bf16_mixed_checkpoint_round_trip() {
     let info = checkpoint.info("bf").unwrap();
     assert_eq!(info.dtype, Dtype::BF16);
     assert_eq!(info.data_offsets.1 - info.data_offsets.0, 2 * bits.len());
-    let restored = checkpoint.upload_bf16_bits(&client, "bf").unwrap();
-    assert_eq!(restored.to_vec_bf16_bits().unwrap(), bits);
+    let restored = checkpoint.upload_bf16(&client, "bf").unwrap();
+    assert_eq!(
+        restored
+            .to_vec::<bf16>()
+            .unwrap()
+            .into_iter()
+            .map(bf16::to_bits)
+            .collect::<Vec<_>>(),
+        bits
+    );
     assert_eq!(checkpoint.stats().uploaded_bytes, 2 * bits.len() as u64);
     assert_eq!(checkpoint.stats().payload_bytes, 2 * bits.len() as u64);
     assert!(
         checkpoint
-            .upload_bf16_bits(&client, "empty")
+            .upload_bf16(&client, "empty")
             .unwrap()
-            .to_vec_bf16_bits()
+            .to_vec::<bf16>()
             .unwrap()
             .is_empty()
     );
     assert_eq!(
         checkpoint
-            .upload_bf16_bits(&client, "scalar")
+            .upload_bf16(&client, "scalar")
             .unwrap()
-            .to_vec_bf16_bits()
+            .to_vec::<bf16>()
             .unwrap(),
-        [0x3f80]
+        [bf16::ONE]
     );
     assert_eq!(checkpoint.read_f32("fp").unwrap().values, [1., -2.]);
     assert_eq!(checkpoint.read_i32("index").unwrap().values, [16_777_217]);
     let before = checkpoint.stats();
-    assert!(checkpoint.upload_bf16_bits(&client, "fp").is_err());
-    assert!(checkpoint.upload_bf16_bits(&client, "index").is_err());
+    assert!(checkpoint.upload_bf16(&client, "fp").is_err());
+    assert!(checkpoint.upload_bf16(&client, "index").is_err());
     assert_eq!(checkpoint.stats().reads, before.reads);
     assert_eq!(checkpoint.stats().uploads, before.uploads);
 }

@@ -158,10 +158,10 @@ fn write_buffers_inner(
             Dtype::BF16 => write_words(
                 writer,
                 buffer
-                    .to_vec_bf16_bits()
+                    .to_vec::<half::bf16>()
                     .map_err(|source| Error::Runtime { source })?
                     .into_iter()
-                    .map(u16::to_le_bytes),
+                    .map(|value| value.to_bits().to_le_bytes()),
             )?,
             _ => unreachable!(),
         }

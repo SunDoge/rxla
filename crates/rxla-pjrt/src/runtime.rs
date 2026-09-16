@@ -729,29 +729,6 @@ impl Client {
         Ok(Self(Arc::new(inner)))
     }
 
-    /// Upload native BF16 storage from raw 16-bit encodings, without conversion
-    /// through F32. Each u16 is one BF16 bit pattern, not an integer value.
-    pub fn buffer_bf16_bits(&self, dims: &[i64], data: &[u16]) -> Result<Buffer> {
-        let data = data
-            .iter()
-            .copied()
-            .map(half::bf16::from_bits)
-            .collect::<Vec<_>>();
-        self.buffer(dims, &data)
-    }
-    pub fn buffer_bf16_bits_on_device(
-        &self,
-        device_index: usize,
-        dims: &[i64],
-        data: &[u16],
-    ) -> Result<Buffer> {
-        let data = data
-            .iter()
-            .copied()
-            .map(half::bf16::from_bits)
-            .collect::<Vec<_>>();
-        self.buffer_on_device(device_index, dims, &data)
-    }
     pub fn buffer<T: Element>(&self, dims: &[i64], data: &[T]) -> Result<Buffer> {
         let device_index = self
             .0
@@ -1293,36 +1270,6 @@ impl Buffer {
         ty.buffer = self.inner.raw.as_ptr();
         plugin.check(unsafe { function!(plugin.api(), PJRT_Buffer_ElementType)(&mut ty) })?;
         Ok(DType::from_raw(ty.type_))
-    }
-    /// Download raw BF16 bit patterns. Does not convert, round or reinterpret
-    /// them as F32. Rejects buffers of other dtypes before transferring payloads.
-    pub fn to_vec_bf16_bits(&self) -> Result<Vec<u16>> {
-        Ok(self
-            .to_vec::<half::bf16>()?
-            .into_iter()
-            .map(half::bf16::to_bits)
-            .collect())
-    }
-    /// Download into an existing slice, waiting for completion before returning.
-    /// The dtype and exact element count are checked before writing. A native
-    /// transfer failure may leave the destination partially modified.
-    /// Copy raw BF16 bits without numeric conversion.
-    pub fn copy_to_bf16_bits(&self, dst: &mut [u16]) -> Result<()> {
-        let values = self.to_vec::<half::bf16>()?;
-        ensure!(
-            values.len() == dst.len(),
-            InvalidArgumentSnafu {
-                message: format!(
-                    "destination has {} elements, expected {}",
-                    dst.len(),
-                    values.len()
-                ),
-            }
-        );
-        for (destination, value) in dst.iter_mut().zip(values) {
-            *destination = value.to_bits();
-        }
-        Ok(())
     }
     pub fn to_vec<T: Element>(&self) -> Result<Vec<T>> {
         self.to_vec_with_limit(usize::MAX)

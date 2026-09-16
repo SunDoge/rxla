@@ -43,7 +43,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let buffer = storage.upload(&StridedLayout::row_major(Shape::new(&[3])?, 2)?, &client)?;
     assert_eq!(buffer.dtype()?, DType::BF16);
-    assert_eq!(buffer.to_vec_bf16_bits()?, bits);
+    assert_eq!(
+        buffer
+            .to_vec::<rxla_core::bf16>()?
+            .into_iter()
+            .map(rxla_core::bf16::to_bits)
+            .collect::<Vec<_>>(),
+        bits
+    );
     let graph = Tracer::default();
     let x = graph.input(&[3, 2])?;
     let y = x.mul(&x)?;

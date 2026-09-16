@@ -106,7 +106,7 @@ impl<R: Read + Seek> SafeTensors<R> {
                 let buffer = match spec.dtype() {
                     DType::U8 => self.upload_u8(client, &source)?,
                     DType::F32 => self.upload_f32(client, &source)?,
-                    DType::BF16 => self.upload_bf16_bits(client, &source)?,
+                    DType::BF16 => self.upload_bf16(client, &source)?,
                     dtype => return Err(invalid(format!("unsupported parameter dtype {dtype:?}"))),
                 };
                 Ok((spec.path().to_owned(), buffer))

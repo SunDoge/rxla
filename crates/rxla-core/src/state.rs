@@ -698,7 +698,7 @@ impl StateProgram {
         match dtype {
             DType::F32 => Ok(self.client().buffer(shape, &vec![0.; len])?),
             DType::I32 => Ok(self.client().buffer(shape, &vec![0; len])?),
-            DType::BF16 => Ok(self.client().buffer_bf16_bits(shape, &vec![0; len])?),
+            DType::BF16 => Ok(self.client().buffer(shape, &vec![bf16::ZERO; len])?),
             DType::U8 => Ok(self.client().buffer(shape, &vec![0u8; len])?),
             dtype => Err(err(format!("cannot initialize state dtype {dtype:?}"))),
         }

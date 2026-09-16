@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bits = [0x8000u16, 0x7fc1, 0xff80, 0x0001];
     for source in [
         cpu.buffer(&[2, 2], &integers)?,
-        cpu.buffer_bf16_bits(&[2, 2], &bits)?,
+        cpu.buffer(&[2, 2], &bits.map(rxla_core::bf16::from_bits))?,
     ] {
         let remote = source.copy_to_client_via_host(&gpu)?;
         assert!(remote.belongs_to(&gpu) && !remote.belongs_to(&cpu));
@@ -52,7 +52,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let restored = remote.copy_to_client_via_host(&cpu)?;
         match restored.dtype()? {
             rxla_core::DType::I32 => assert_eq!(restored.to_vec::<i32>()?, integers),
-            rxla_core::DType::BF16 => assert_eq!(restored.to_vec_bf16_bits()?, bits),
+            rxla_core::DType::BF16 => assert_eq!(
+                restored
+                    .to_vec::<rxla_core::bf16>()?
+                    .into_iter()
+                    .map(rxla_core::bf16::to_bits)
+                    .collect::<Vec<_>>(),
+                bits
+            ),
             _ => unreachable!(),
         }
     }

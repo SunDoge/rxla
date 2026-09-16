@@ -1,4 +1,4 @@
-use rxla_pjrt::Client;
+use rxla_pjrt::{Client, bf16};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -7,7 +7,7 @@ fn real_host_staged_copy_preserves_scalars_empty_shapes_and_payloads() {
     let float = client.buffer(&[], &[-0.]).unwrap();
     let integer = client.buffer(&[2], &[i32::MIN, i32::MAX]).unwrap();
     let bf16 = client
-        .buffer_bf16_bits(&[4], &[0x8000, 0x7fc1, 0xff80, 1])
+        .buffer(&[4], &[0x8000, 0x7fc1, 0xff80, 1].map(bf16::from_bits))
         .unwrap();
     let empty = client.buffer::<f32>(&[2, 0, 3], &[]).unwrap();
     for (source, bytes) in [(float, 4), (integer, 8), (bf16, 8), (empty, 0)] {
@@ -49,8 +49,17 @@ fn real_host_staged_copy_preserves_scalars_empty_shapes_and_payloads() {
                 )
             }
             rxla_pjrt::DType::BF16 => assert_eq!(
-                copy.to_vec_bf16_bits().unwrap(),
-                source.to_vec_bf16_bits().unwrap()
+                copy.to_vec::<bf16>()
+                    .unwrap()
+                    .into_iter()
+                    .map(bf16::to_bits)
+                    .collect::<Vec<_>>(),
+                source
+                    .to_vec::<bf16>()
+                    .unwrap()
+                    .into_iter()
+                    .map(bf16::to_bits)
+                    .collect::<Vec<_>>()
             ),
             dtype => panic!("unsupported test dtype {dtype:?}"),
         }

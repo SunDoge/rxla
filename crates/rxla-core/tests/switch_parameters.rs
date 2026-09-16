@@ -23,7 +23,11 @@ fn real_parameter_switch_is_atomic_and_dtype_checked() {
         .session(vec![(s.clone(), client.buffer(&[], &[0.]).unwrap())])
         .unwrap();
     let old = Rc::new(client.buffer(&[], &[2.]).unwrap());
-    let new = Rc::new(client.buffer_bf16_bits(&[], &[0x4040]).unwrap());
+    let new = Rc::new(
+        client
+            .buffer(&[], &[rxla_core::bf16::from_bits(0x4040)])
+            .unwrap(),
+    );
     session
         .bind_parameters(vec![(p.clone(), old.clone())])
         .unwrap();

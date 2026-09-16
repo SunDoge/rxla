@@ -118,8 +118,16 @@ fn prepared_state_keeps_bf16_binding_identity_and_session_isolation() {
     let mut second = program
         .session(vec![(total.clone(), client.buffer(&[], &[10.]).unwrap())])
         .unwrap();
-    let first_weight = std::rc::Rc::new(client.buffer_bf16_bits(&[], &[0x4000]).unwrap()); // 2
-    let second_weight = std::rc::Rc::new(client.buffer_bf16_bits(&[], &[0x4040]).unwrap()); // 3
+    let first_weight = std::rc::Rc::new(
+        client
+            .buffer(&[], &[rxla_core::bf16::from_bits(0x4000)])
+            .unwrap(),
+    ); // 2
+    let second_weight = std::rc::Rc::new(
+        client
+            .buffer(&[], &[rxla_core::bf16::from_bits(0x4040)])
+            .unwrap(),
+    ); // 3
     first
         .bind_parameters(vec![(weight.clone(), first_weight.clone())])
         .unwrap();
@@ -159,7 +167,11 @@ fn prepared_state_keeps_bf16_binding_identity_and_session_isolation() {
     first
         .bind_parameters(vec![(
             weight.clone(),
-            std::rc::Rc::new(client.buffer_bf16_bits(&[], &[0x40a0]).unwrap()),
+            std::rc::Rc::new(
+                client
+                    .buffer(&[], &[rxla_core::bf16::from_bits(0x40a0)])
+                    .unwrap(),
+            ),
         )])
         .unwrap(); // 5
     assert_eq!(

@@ -15,7 +15,6 @@ fn real_bf16_transfer_preserves_all_bits_and_rejects_wrong_types() {
     let buffer = client.buffer(&[256, 256], &values).unwrap();
     assert_eq!(buffer.dtype().unwrap(), DType::BF16);
     assert_eq!(buffer.dimensions().unwrap(), [256, 256]);
-    assert_eq!(buffer.to_vec_bf16_bits().unwrap(), bits);
     assert_eq!(
         buffer
             .to_vec::<bf16>()
@@ -27,30 +26,26 @@ fn real_bf16_transfer_preserves_all_bits_and_rejects_wrong_types() {
     );
     assert!(buffer.to_vec::<f32>().is_err());
     assert!(buffer.to_vec::<i32>().is_err());
-    assert!(
-        client
-            .buffer(&[], &[1.])
-            .unwrap()
-            .to_vec_bf16_bits()
-            .is_err()
-    );
-    assert!(
-        client
-            .buffer(&[], &[1])
-            .unwrap()
-            .to_vec_bf16_bits()
-            .is_err()
-    );
+    assert!(client.buffer(&[], &[1.]).unwrap().to_vec::<bf16>().is_err());
+    assert!(client.buffer(&[], &[1]).unwrap().to_vec::<bf16>().is_err());
     for shape in [vec![-1], vec![2], vec![i64::MAX, i64::MAX]] {
-        assert!(client.buffer_bf16_bits(&shape, &[0x3f80]).is_err());
+        assert!(client.buffer(&shape, &[bf16::ONE]).is_err());
     }
-    let empty = client.buffer_bf16_bits(&[0, 2], &[]).unwrap();
+    let empty = client.buffer::<bf16>(&[0, 2], &[]).unwrap();
     assert_eq!(empty.dimensions().unwrap(), [0, 2]);
-    assert!(empty.to_vec_bf16_bits().unwrap().is_empty());
-    let scalar = client.buffer_bf16_bits(&[], &[0x3f80]).unwrap();
-    assert_eq!(scalar.to_vec_bf16_bits().unwrap(), [0x3f80]);
+    assert!(empty.to_vec::<bf16>().unwrap().is_empty());
+    let scalar = client.buffer(&[], &[bf16::ONE]).unwrap();
+    assert_eq!(scalar.to_vec::<bf16>().unwrap(), [bf16::ONE]);
     drop(client);
-    assert_eq!(buffer.to_vec_bf16_bits().unwrap(), bits);
+    assert_eq!(
+        buffer
+            .to_vec::<bf16>()
+            .unwrap()
+            .into_iter()
+            .map(bf16::to_bits)
+            .collect::<Vec<_>>(),
+        bits
+    );
 }
 
 #[test]
