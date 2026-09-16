@@ -24,7 +24,7 @@
 //! # Ok::<(), rxla_nn::Error>(())
 //! ```
 
-use crate::{Cx, ModelOutputs, Result};
+use crate::{Cx, ModelOutputs, NoModelInputs, Result};
 use rxla_core::{Buffer, DType, Tensor};
 
 /// One tensor input specification for a [`crate::Model`].
@@ -133,6 +133,18 @@ pub trait ModelHandler<I, Marker> {
     fn invoke(&self, cx: &mut Cx, inputs: &I) -> Result<Self::Outputs>;
 }
 
+impl<F, T> ModelHandler<NoModelInputs, fn() -> T> for F
+where
+    F: Fn(&mut Cx) -> Result<T>,
+    T: ModelOutputs,
+{
+    type Outputs = T;
+
+    fn invoke(&self, cx: &mut Cx, _: &NoModelInputs) -> Result<Self::Outputs> {
+        self(cx)
+    }
+}
+
 impl<F, I, T> ModelHandler<I, fn(I) -> T> for F
 where
     I: ModelInputs,
@@ -152,6 +164,14 @@ impl ModelInputs for ModelInput {
 
     fn declare(&self, cx: &mut Cx) -> Result<Self::Tensors> {
         cx.input_dtype(&self.shape, self.dtype)
+    }
+}
+
+impl ModelInputs for NoModelInputs {
+    type Tensors = ();
+
+    fn declare(&self, _: &mut Cx) -> Result<Self::Tensors> {
+        Ok(())
     }
 }
 

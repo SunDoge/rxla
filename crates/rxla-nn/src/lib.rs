@@ -178,76 +178,14 @@ impl<F> Model<F, NoModelInputs> {
     }
 }
 
-impl<F, T> Model<F, NoModelInputs>
-where
-    F: Fn(&mut Cx) -> Result<T>,
-    T: ModelOutputs,
-{
-    /// Discover parameter effects and produce the executable model trace.
-    ///
-    /// The frozen declarations are available through [`AppliedModel::schema`];
-    /// they are not returned as a duplicate top-level value.
-    ///
-    /// This is the ordinary one-call path. [`Self::init`] and [`Self::apply`]
-    /// remain available when callers need to inspect or restore a schema
-    /// between the two interpretations.
-    pub fn trace(&self) -> Result<AppliedModel> {
-        trace_once(|cx| (self.apply)(cx))
-    }
-
-    /// Trace once with every parameter stored as resident session state.
-    pub fn trace_resident_all(&self) -> Result<(ParameterSelection, AppliedModel)> {
-        let applied = trace_once_resident_all(|cx| (self.apply)(cx))?;
-        let selection = applied.schema().select_all();
-        Ok((selection, applied))
-    }
-
-    /// Trace once with parameters under one lexical scope stored as resident state.
-    pub fn trace_resident_under(&self, scope: &str) -> Result<(ParameterSelection, AppliedModel)> {
-        let applied = trace_once_resident_under(scope, |cx| (self.apply)(cx))?;
-        let selection = applied.schema().select_under(scope);
-        Ok((selection, applied))
-    }
-
-    /// Discover the schema and trace a caller-selected resident parameter set.
-    ///
-    /// The owned selection is returned for later transforms such as SGD or
-    /// Adam; it retains schema identity without borrowing the model's schema.
-    pub fn trace_resident(
-        &self,
-        select: impl FnOnce(&ParamSchema) -> ParameterSelection,
-    ) -> Result<(ParameterSelection, AppliedModel)> {
-        let schema = self.init()?;
-        let selection = select(&schema);
-        let applied = self.apply_resident(&schema, &selection)?;
-        Ok((selection, applied))
-    }
-
-    /// Discover the input/parameter effect schema from this model body.
-    pub fn init(&self) -> Result<ParamSchema> {
-        init(|cx| (self.apply)(cx)).map(|(schema, _)| schema)
-    }
-
-    /// Trace this model body against a previously discovered schema.
-    pub fn apply(&self, schema: &ParamSchema) -> Result<AppliedModel> {
-        apply(schema, |cx| (self.apply)(cx))
-    }
-
-    /// Trace with selected parameters stored as resident session state.
-    pub fn apply_resident(
-        &self,
-        schema: &ParamSchema,
-        selection: &ParameterSelection,
-    ) -> Result<AppliedModel> {
-        apply_resident(schema, selection, |cx| (self.apply)(cx))
-    }
-}
-
 impl<F, I> Model<F, I>
 where
     I: ModelInputs,
 {
-    /// Discover the schema and trace `apply` with structured lazy inputs.
+    /// Discover parameter/input effects and produce the executable model trace.
+    ///
+    /// The frozen declarations are available through [`AppliedModel::schema`].
+    /// Zero-input and structured-input models use this same interpretation path.
     pub fn trace<Marker>(&self) -> Result<AppliedModel>
     where
         F: ModelHandler<I, Marker>,
