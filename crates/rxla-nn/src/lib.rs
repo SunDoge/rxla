@@ -362,7 +362,7 @@ impl Cx {
         self.input_index += 1;
         self.effect_index += 1;
         match dtype {
-            DType::F32 | DType::I32 => Ok(self.graph.input_with_dtype(shape, dtype)?),
+            DType::F32 | DType::I32 | DType::U8 => Ok(self.graph.input_with_dtype(shape, dtype)?),
             DType::BF16 => Ok(self.graph.input_bf16_as_f32(shape)?),
             _ => UnsupportedInputDTypeSnafu { dtype }.fail(),
         }
@@ -727,6 +727,25 @@ mod tests {
         let applied = apply(&schema, classifier).unwrap();
         assert_eq!(applied.outputs()[0].shape(), [2, 3]);
         assert_eq!(applied.prepare().unwrap().input_count(), 2);
+    }
+
+    #[test]
+    fn byte_inputs_can_be_preprocessed_inside_the_model_program() {
+        fn preprocess(cx: &mut Cx) -> Result<Tensor> {
+            Ok(cx
+                .input_dtype(&[2, 2, 3], DType::U8)?
+                .cast(DType::F32)?
+                .mul_scalar(1.0 / 255.0)?)
+        }
+
+        let (schema, _) = init(preprocess).unwrap();
+        assert_eq!(schema.inputs()[0].dtype(), DType::U8);
+        let applied = apply(&schema, preprocess).unwrap();
+        let lowered = applied.prepare().unwrap();
+        assert_eq!(lowered.input_spec(0).unwrap().dtype, DType::U8);
+        assert_eq!(lowered.output_spec(0).unwrap().dtype, DType::F32);
+        let stablehlo = std::str::from_utf8(lowered.code()).unwrap();
+        assert!(stablehlo.contains("stablehlo.convert"));
     }
 
     #[test]

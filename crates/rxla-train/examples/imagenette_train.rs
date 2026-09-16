@@ -5,7 +5,7 @@ use image::{GenericImageView, imageops::FilterType};
 use rayon::prelude::*;
 use rxla_core::{
     Buffer, CacheLimits, Client, Compiler, Conv2dOptions, DType, PendingHostUpload, Pool2dOptions,
-    Runtime, Tensor,
+    Tensor,
 };
 use rxla_nn::{AppliedModel, Cx, Model, ParamSchema, Result as NnResult};
 use rxla_train::{BoundedPipeline, DataRng, PipelineResult, prepare_model_sgd};
@@ -20,8 +20,6 @@ const RESIZE: u32 = 176;
 
 #[derive(Parser)]
 struct Args {
-    #[arg(long, env = "PJRT_CPU_PLUGIN_PATH")]
-    cpu_plugin: String,
     #[arg(long, env = "PJRT_CUDA_PLUGIN_PATH")]
     gpu_plugin: String,
     #[arg(long, default_value = "/data/users/me/datasets/imagenette2")]
@@ -88,10 +86,15 @@ struct ImageFolder {
 }
 
 type HostBatch = (Vec<u8>, Vec<i32>, Vec<f32>);
-type AugmentedHostBatch = (Vec<f32>, Vec<i32>);
-type PreparedBatch = (
-    PendingHostUpload<f32>,
+type UploadedBatch = (
+    PendingHostUpload<u8>,
     PendingHostUpload<i32>,
+    PendingHostUpload<f32>,
+);
+type PreparedBatch = (
+    PendingHostUpload<u8>,
+    PendingHostUpload<i32>,
+    PendingHostUpload<f32>,
     Duration,
     Duration,
 );
@@ -278,8 +281,14 @@ fn basic_block(
 }
 
 fn resnet18(cx: &mut Cx, batch_size: i64, training: bool) -> NnResult<Vec<Tensor>> {
-    let images = cx.input(&[batch_size, IMAGE, IMAGE, 3])?;
+    let images = cx.input_dtype(&[batch_size, IMAGE, IMAGE, 3], DType::U8)?;
     let labels = cx.input_dtype(&[batch_size], DType::I32)?;
+    let flips = cx.input(&[batch_size, 1, 1, 1])?;
+    let images = images.cast(DType::F32)?.mul_scalar(1.0 / 255.0)?;
+    let images = flips
+        .broadcast_to(images.shape())?
+        .select(&images.flip_left_right()?, &images)?
+        .normalize_nhwc(&[0.485, 0.456, 0.406], &[0.229, 0.224, 0.225])?;
     let mut hidden = cx
         .named("stem_conv")?
         .conv2d(64, [7, 7])
@@ -368,44 +377,26 @@ fn prepare_batch(
     batch_size: i64,
     rng: DataRng,
     training: bool,
-    cpu: &mut Runtime,
     gpu: &Client,
 ) -> Result<PreparedBatch, Box<dyn std::error::Error>> {
     let started = Instant::now();
     let host = dataset.batch(step, batch_size as usize, rng, training)?;
     let decoded = started.elapsed();
-    let host = augment_host_batch(host, batch_size, cpu)?;
     let started = Instant::now();
-    let (images, labels) = upload_batch(host, batch_size, gpu)?;
-    Ok((images, labels, decoded, started.elapsed()))
-}
-
-fn augment_host_batch(
-    host: HostBatch,
-    batch_size: i64,
-    cpu: &mut Runtime,
-) -> Result<AugmentedHostBatch, Box<dyn std::error::Error>> {
-    let (images, labels, flips) = host;
-    let image = Tensor::from_slice([batch_size, IMAGE, IMAGE, 3], DType::U8, images)?;
-    let flip = Tensor::from_slice([batch_size, 1, 1, 1], DType::F32, flips)?;
-    let image = image.cast(DType::F32)?.mul_scalar(1.0 / 255.0)?;
-    let augmented = flip
-        .broadcast_to(image.shape())?
-        .select(&image.flip_left_right()?, &image)?
-        .normalize_nhwc(&[0.485, 0.456, 0.406], &[0.229, 0.224, 0.225])?;
-    let images = cpu.eval(&augmented)?.to_vec::<f32>()?;
-    Ok((images, labels))
+    let (images, labels, flips) = upload_batch(host, batch_size, gpu)?;
+    Ok((images, labels, flips, decoded, started.elapsed()))
 }
 
 fn upload_batch(
-    host: AugmentedHostBatch,
+    host: HostBatch,
     batch_size: i64,
     gpu: &Client,
-) -> Result<(PendingHostUpload<f32>, PendingHostUpload<i32>), Box<dyn std::error::Error>> {
-    let (images, labels) = host;
+) -> Result<UploadedBatch, Box<dyn std::error::Error>> {
+    let (images, labels, flips) = host;
     let images = gpu.upload_pinned(&[batch_size, IMAGE, IMAGE, 3], images)?;
     let labels = gpu.upload_pinned(&[batch_size], labels)?;
-    Ok((images, labels))
+    let flips = gpu.upload_pinned(&[batch_size, 1, 1, 1], flips)?;
+    Ok((images, labels, flips))
 }
 
 fn prefetch_batches(
@@ -413,20 +404,15 @@ fn prefetch_batches(
     steps: usize,
     batch_size: usize,
     rng: DataRng,
-    cpu_client: Client,
-) -> PipelineResult<BoundedPipeline<AugmentedHostBatch, String>> {
-    let decoded = BoundedPipeline::from_iter(
-        2,
+) -> PipelineResult<BoundedPipeline<HostBatch, String>> {
+    BoundedPipeline::from_iter(
+        4,
         (0..steps).map(move |step| {
             dataset
                 .batch(step, batch_size, rng, true)
                 .map_err(|error| error.to_string())
         }),
-    )?;
-    let mut cpu = Runtime::new(cpu_client);
-    decoded.map(2, move |batch| {
-        augment_host_batch(batch, batch_size as i64, &mut cpu).map_err(|error| error.to_string())
-    })
+    )
 }
 
 fn initialize_session<'a>(
@@ -464,9 +450,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         validation.samples.len()
     );
 
-    let cpu = unsafe { Client::load(&args.cpu_plugin) }?;
     let gpu = unsafe { Client::load(&args.gpu_plugin) }?;
-    let mut cpu_runtime = Runtime::new(cpu.clone());
     let batch_size = args.batch_size;
     let definition = Model::new(move |cx: &mut Cx| resnet18(cx, batch_size, true));
     let (schema, model) = definition.trace()?;
@@ -490,24 +474,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_loss = 0.0;
     let mut phases = PhaseTimes::default();
     let profile_after = args.steps.min(10);
-    let batches = prefetch_batches(
-        Arc::clone(&train),
-        args.steps,
-        batch_size as usize,
-        rng,
-        cpu,
-    )?;
+    let batches = prefetch_batches(Arc::clone(&train), args.steps, batch_size as usize, rng)?;
 
     for step in 0..args.steps {
         let phase = Instant::now();
         let host = batches.recv().ok_or("input pipeline stopped early")??;
         let input_wait = phase.elapsed();
         let phase = Instant::now();
-        let (images, labels) = upload_batch(host, batch_size, &gpu)?;
+        let (images, labels, flips) = upload_batch(host, batch_size, &gpu)?;
         let uploaded = phase.elapsed();
         let phase = Instant::now();
         let arguments = model.bind(
-            &[images.buffer(), labels.buffer()],
+            &[images.buffer(), labels.buffer(), flips.buffer()],
             parameters
                 .iter()
                 .map(|(name, value)| (name.as_str(), value)),
@@ -575,17 +553,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut validation_correct = 0;
     let mut validation_loss = 0.0;
     for step in 0..validation_steps {
-        let (images, labels, _, _) = prepare_batch(
-            &validation,
-            step,
-            batch_size,
-            rng,
-            false,
-            &mut cpu_runtime,
-            &gpu,
-        )?;
+        let (images, labels, flips, _, _) =
+            prepare_batch(&validation, step, batch_size, rng, false, &gpu)?;
         let arguments = inference.bind(
-            &[images.buffer(), labels.buffer()],
+            &[images.buffer(), labels.buffer(), flips.buffer()],
             parameters
                 .iter()
                 .map(|(name, value)| (name.as_str(), value)),

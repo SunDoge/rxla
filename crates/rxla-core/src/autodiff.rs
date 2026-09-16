@@ -234,7 +234,13 @@ impl Tensor {
                 Op::StateWrite { .. } => add(0, dy),
                 Op::Convert { .. } => {
                     let source = value(node.operands[0]);
-                    add(0, dy.cast(source.dtype())?);
+                    // Integer/byte inputs are data boundaries, not differentiable
+                    // floating-point leaves. Keep floating casts differentiable,
+                    // but do not manufacture an integer cotangent while sweeping
+                    // past image/token preprocessing.
+                    if matches!(source.dtype(), DType::F16 | DType::BF16 | DType::F32) {
+                        add(0, dy.cast(source.dtype())?);
+                    }
                 }
                 Op::WithGradient => add(1, dy),
                 Op::WithElementwiseDerivative => {
@@ -777,5 +783,24 @@ mod tests {
         let count = graph.0.lock().unwrap().len();
         assert!(loss.grad(&[x]).is_err());
         assert_eq!(graph.0.lock().unwrap().len(), count);
+    }
+
+    #[test]
+    fn byte_preprocessing_is_a_nondifferentiable_data_boundary() {
+        let graph = Graph::default();
+        let bytes = graph.input_dtype(&[2], DType::U8).unwrap();
+        let weight = graph.input(&[2]).unwrap();
+        let loss = bytes
+            .cast(DType::F32)
+            .unwrap()
+            .mul(&weight)
+            .unwrap()
+            .sum(&[0], false)
+            .unwrap();
+        let gradient = loss.grad(&[weight]).unwrap().remove(0);
+        assert_eq!(gradient.dtype(), DType::F32);
+        let lowered = graph.prepare(&gradient).unwrap();
+        assert_eq!(lowered.input_spec(0).unwrap().dtype, DType::U8);
+        assert_eq!(lowered.output_spec(0).unwrap().dtype, DType::F32);
     }
 }

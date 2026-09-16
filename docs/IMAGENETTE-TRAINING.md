@@ -7,17 +7,16 @@ BatchNorm. The 160px stem uses 7x7 stride-two convolution followed by 3x3
 stride-two average pooling. This last detail differs from canonical ResNet-18's
 max pool because RXLA does not yet implement a max-pool VJP.
 
-The input path uses the reusable `rxla_train::BoundedPipeline` to construct a
-bounded three-stage pipeline. Rayon performs JPEG decode, resize, random crop,
-and collation; a dedicated CPU PJRT runtime performs horizontal flip and
-ImageNet normalization as an RXLA Tensor program; the main thread performs
-pinned uploads and CUDA training. Owned host batches cross capacity-two
-channels, providing ordered backpressure. Forward, backward, BatchNorm state
-transitions, and SGD execute as one compiled CUDA program.
+The input path uses the reusable `rxla_train::BoundedPipeline`. Rayon performs
+JPEG decode, resize, random crop, and collation into U8 images plus explicit
+flip decisions. The main thread starts pinned uploads, while horizontal flip,
+U8-to-F32 conversion, ImageNet normalization, forward, backward, BatchNorm
+state transitions, and SGD all execute in one compiled CUDA program. A bounded
+capacity-four channel preserves order and backpressure without materializing
+normalized F32 images on the host.
 
 ```bash
 cargo run -p rxla-train --release --example imagenette_train -- \
-  --cpu-plugin "$PJRT_CPU_PLUGIN_PATH" \
   --gpu-plugin "$PJRT_CUDA_PLUGIN_PATH" \
   --dataset /data/users/me/datasets/imagenette2 \
   --batch-size 16 \
@@ -54,7 +53,7 @@ The original serialized input loop and the bounded pipeline compare as follows.
 End-to-end measurements include input work and per-step metrics; the short
 batch-16 and batch-64 runs use 100 steps, and batch 128 uses 50 steps:
 
-| Batch | Serialized | Pipelined | Speedup | Pipelined steady state |
+| Batch | Serialized | CPU-PJRT pipeline | Speedup | Pipelined steady state |
 | ---: | ---: | ---: | ---: | ---: |
 | 16 | 433.9 images/s | 1,118.1 images/s | 2.58x | 1,199.9 images/s |
 | 64 | 707.3 images/s | 1,630.0 images/s | 2.30x | 1,710.9 images/s |
@@ -66,6 +65,16 @@ upload is 0.51 ms, compared with 10.95 ms in CUDA execution. Accuracy is reduced
 host metric work falls from 2.35 ms to 0.98 ms. At batch 128 the GPU accounts for
 91.8% of the measured step, so the input pipeline is no longer the primary
 bottleneck.
+
+Moving tensor preprocessing into the training IR removes the separate CPU PJRT
+execution and cuts the image upload from F32 to U8. A subsequent batch-16,
+100-step run reached 1,197.3 images/s end to end and 1,243.2 images/s after the
+ten-step warmup, versus 1,118.1 and 1,199.9 images/s for the CPU-PJRT path. Its
+steady-state breakdown was 0.62 ms input wait, 0.33 ms upload, 10.96 ms CUDA
+execution, and 0.93 ms metrics. This is a 7.1% end-to-end improvement while also
+removing one executable and a host synchronization boundary. Short training
+runs are numerically nondeterministic on the CUDA convolution path, so loss and
+accuracy are correctness smoke signals rather than comparable benchmark metrics.
 
 These are end-to-end figures rather than isolated model kernel benchmarks. The
 remaining XLA `gemm_fusion` register spills leave substantial optimization work
