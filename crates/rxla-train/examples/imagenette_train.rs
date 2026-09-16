@@ -456,10 +456,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.learning_rate,
     )?;
     let metrics = Tensor::stack(&[model.outputs()[0].clone(), model.outputs()[2].clone()], 0)?;
-    let mut outputs = vec![metrics];
-    outputs.extend(training.outputs());
+    let outputs = training.outputs_with(&[metrics]);
     let mut compiler = Compiler::new(gpu.clone(), CacheLimits::default());
-    let program = model.compile_stateful_tensors(&mut compiler, &outputs)?;
+    let program = outputs.compile_stateful(&model, &mut compiler)?;
     let mut session = initialize_session(&model, &program, &schema, &gpu, args.seed)?;
     let mut parameters = initialized_parameters(&gpu, &schema)?;
     let rng = DataRng::new(args.seed);
@@ -490,14 +489,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let output = session.run(arguments.as_slice())?;
         let executed = phase.elapsed();
         let phase = Instant::now();
-        let metrics = output[0].to_vec::<f32>()?;
+        let visible = outputs.commit(output, &mut parameters)?;
+        let metrics = visible[0].to_vec::<f32>()?;
         last_loss = metrics[0];
         first_loss.get_or_insert(last_loss);
         let batch_correct = metrics[1] as usize;
         total_correct += batch_correct;
-        for (update, value) in training.updates().iter().zip(output.into_iter().skip(1)) {
-            parameters.insert(update.path().to_owned(), value);
-        }
         let measured = phase.elapsed();
         if args.profile && step >= profile_after {
             phases.samples += 1;

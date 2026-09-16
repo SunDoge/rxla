@@ -1,8 +1,11 @@
 //! Minimal functional SGD for effect-based models.
 
-use rxla_core::{Compiler, Executable, LoweredProgram, PreparedStateGraph, StateProgram, Tensor};
+use rxla_core::{
+    Buffer, Compiler, Executable, LoweredProgram, PreparedStateGraph, StateProgram, Tensor,
+};
 use rxla_nn::{AppliedModel, ParameterId, ParameterSelection};
 use snafu::{Snafu, ensure};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[derive(Debug, Snafu)]
@@ -14,6 +17,17 @@ pub enum ModelSgdError {
     InvalidLoss,
     #[snafu(display("model SGD learning rate must be finite and nonnegative"))]
     InvalidLearningRate,
+    #[snafu(display(
+        "model SGD execution returned {actual} buffers, expected {expected} ({visible} visible and {updates} updates)"
+    ))]
+    UnexpectedOutputCount {
+        actual: usize,
+        expected: usize,
+        visible: usize,
+        updates: usize,
+    },
+    #[snafu(display("model SGD parameter store is missing {path:?}"))]
+    MissingParameter { path: String },
     #[snafu(transparent)]
     Model { source: rxla_nn::Error },
     #[snafu(transparent)]
@@ -52,6 +66,16 @@ pub struct ModelSgdStep {
     updates: Vec<ModelSgdUpdate>,
 }
 
+/// One explicit visible-result layout followed by this SGD step's replacements.
+///
+/// The same value supplies compilation roots and decodes execution results, so
+/// the visible/update boundary cannot diverge between those two operations.
+pub struct ModelSgdOutputPlan<'step> {
+    step: &'step ModelSgdStep,
+    tensors: Vec<Tensor>,
+    visible: usize,
+}
+
 impl ModelSgdStep {
     pub fn updates(&self) -> &[ModelSgdUpdate] {
         &self.updates
@@ -64,6 +88,99 @@ impl ModelSgdStep {
             .collect()
     }
 
+    /// Compose caller-visible results with the optimizer replacement ABI.
+    ///
+    /// The visible prefix is returned unchanged by
+    /// [`ModelSgdOutputPlan::commit`]; callers never need to calculate where
+    /// parameter replacements begin.
+    pub fn outputs_with<'step>(&'step self, visible: &[Tensor]) -> ModelSgdOutputPlan<'step> {
+        let tensors = visible
+            .iter()
+            .cloned()
+            .chain(self.updates.iter().map(|update| update.value.clone()))
+            .collect();
+        ModelSgdOutputPlan {
+            step: self,
+            tensors,
+            visible: visible.len(),
+        }
+    }
+}
+
+impl ModelSgdOutputPlan<'_> {
+    /// Ordered compilation roots: visible results, then parameter replacements.
+    pub fn tensors(&self) -> &[Tensor] {
+        &self.tensors
+    }
+
+    pub fn visible_count(&self) -> usize {
+        self.visible
+    }
+
+    pub fn prepare(&self, model: &AppliedModel) -> ModelSgdResult<LoweredProgram> {
+        Ok(model.prepare_tensors(self.tensors())?)
+    }
+
+    pub fn compile(
+        &self,
+        model: &AppliedModel,
+        compiler: &mut Compiler,
+    ) -> ModelSgdResult<Arc<Executable>> {
+        Ok(model.compile_tensors(compiler, self.tensors())?)
+    }
+
+    /// Prepare visible results, replacements, and model state transitions.
+    pub fn prepare_stateful(&self, model: &AppliedModel) -> ModelSgdResult<PreparedStateGraph> {
+        Ok(model.prepare_stateful_tensors(self.tensors())?)
+    }
+
+    /// Compile visible results, replacements, and model state transitions.
+    pub fn compile_stateful(
+        &self,
+        model: &AppliedModel,
+        compiler: &mut Compiler,
+    ) -> ModelSgdResult<StateProgram> {
+        Ok(model.compile_stateful_tensors(compiler, self.tensors())?)
+    }
+
+    /// Validate and atomically install parameter replacements from one run.
+    ///
+    /// No parameter is changed unless the complete output ABI is present and
+    /// every selected path already exists in `parameters`. The returned buffers
+    /// are exactly the caller-visible prefix supplied to
+    /// [`ModelSgdStep::outputs_with`].
+    pub fn commit(
+        &self,
+        mut outputs: Vec<Buffer>,
+        parameters: &mut BTreeMap<String, Buffer>,
+    ) -> ModelSgdResult<Vec<Buffer>> {
+        let expected = self.tensors.len();
+        ensure!(
+            outputs.len() == expected,
+            UnexpectedOutputCountSnafu {
+                actual: outputs.len(),
+                expected,
+                visible: self.visible,
+                updates: self.step.updates.len(),
+            }
+        );
+        for update in &self.step.updates {
+            ensure!(
+                parameters.contains_key(update.path()),
+                MissingParameterSnafu {
+                    path: update.path().to_owned(),
+                }
+            );
+        }
+        let replacements = outputs.split_off(self.visible);
+        for (update, value) in self.step.updates.iter().zip(replacements) {
+            parameters.insert(update.path().to_owned(), value);
+        }
+        Ok(outputs)
+    }
+}
+
+impl ModelSgdStep {
     pub fn prepare(&self, model: &AppliedModel) -> ModelSgdResult<LoweredProgram> {
         Ok(model.prepare_tensors(&self.outputs())?)
     }
@@ -167,6 +284,28 @@ mod tests {
             prepare_model_sgd(&model, &schema.select_all(), &model.outputs()[0], f32::NAN),
             Err(ModelSgdError::InvalidLearningRate)
         ));
+
+        let step =
+            prepare_model_sgd(&model, &schema.select_all(), &model.outputs()[0], 0.1).unwrap();
+        let outputs = step.outputs_with(model.outputs());
+        assert_eq!(
+            outputs.tensors().len(),
+            model.outputs().len() + step.updates().len()
+        );
+        assert_eq!(outputs.visible_count(), 1);
+        let error = match outputs.commit(Vec::new(), &mut BTreeMap::new()) {
+            Ok(_) => panic!("truncated SGD outputs unexpectedly committed"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ModelSgdError::UnexpectedOutputCount {
+                actual: 0,
+                expected: 2,
+                visible: 1,
+                updates: 1,
+            }
+        ));
     }
 
     #[test]
@@ -244,15 +383,24 @@ mod tests {
         let (schema, model) = Model::new(regression_loss).trace().unwrap();
         let selection = schema.select_under("linear");
         let step = prepare_model_sgd(&model, &selection, &model.outputs()[0], 0.1).unwrap();
+        let output_plan = step.outputs_with(&[]);
         let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
         let loss_executable = model.compile(&mut compiler).unwrap();
-        let step_executable = step.compile(&model, &mut compiler).unwrap();
+        let step_executable = output_plan.compile(&model, &mut compiler).unwrap();
         let input = client.buffer(&[1, 1], &[2.0]).unwrap();
         let target = client.buffer(&[1, 1], &[4.0]).unwrap();
-        let mut weight = client.buffer(&[1, 1], &[0.0]).unwrap();
+        let mut parameters = BTreeMap::from([(
+            "linear.weight".to_owned(),
+            client.buffer(&[1, 1], &[0.0]).unwrap(),
+        )]);
 
         let initial_arguments = model
-            .bind(&[&input, &target], [("linear.weight", &weight)])
+            .bind(
+                &[&input, &target],
+                parameters
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value)),
+            )
             .unwrap();
         let initial_loss = loss_executable
             .execute(initial_arguments.as_slice())
@@ -262,16 +410,29 @@ mod tests {
 
         for _ in 0..8 {
             let arguments = model
-                .bind(&[&input, &target], [("linear.weight", &weight)])
+                .bind(
+                    &[&input, &target],
+                    parameters
+                        .iter()
+                        .map(|(name, value)| (name.as_str(), value)),
+                )
                 .unwrap();
-            weight = step_executable
-                .execute(arguments.as_slice())
-                .unwrap()
-                .remove(0);
+            let outputs = step_executable.execute(arguments.as_slice()).unwrap();
+            assert!(
+                output_plan
+                    .commit(outputs, &mut parameters)
+                    .unwrap()
+                    .is_empty()
+            );
         }
 
         let final_arguments = model
-            .bind(&[&input, &target], [("linear.weight", &weight)])
+            .bind(
+                &[&input, &target],
+                parameters
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value)),
+            )
             .unwrap();
         let final_loss = loss_executable.execute(final_arguments.as_slice()).unwrap()[0]
             .to_vec::<f32>()

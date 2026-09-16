@@ -322,10 +322,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &model.outputs()[0],
         args.learning_rate,
     )?;
-    let mut outputs = model.outputs().to_vec();
-    outputs.extend(training.outputs());
+    let outputs = training.outputs_with(model.outputs());
     let mut compiler = Compiler::new(gpu.clone(), CacheLimits::default());
-    let program = model.compile_stateful_tensors(&mut compiler, &outputs)?;
+    let program = outputs.compile_stateful(&model, &mut compiler)?;
 
     let dataset = match args.dataset {
         Some(path) => Dataset::load_cifar10(&path)?,
@@ -384,7 +383,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|(name, value)| (name.as_str(), value)),
         )?;
         let output = session.run(arguments.as_slice())?;
-        let logits = output[1].to_vec::<f32>()?;
+        let visible = outputs.commit(output, &mut parameters)?;
+        let logits = visible[1].to_vec::<f32>()?;
         let targets = labels.buffer().to_vec::<i32>()?;
         let correct = logits
             .as_chunks::<10>()
@@ -399,13 +399,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .count();
         drop((images, labels));
-        let loss = output[0].to_vec::<f32>()?[0];
+        let loss = visible[0].to_vec::<f32>()?[0];
         initial_loss.get_or_insert(loss);
         final_loss = Some(loss);
         total_correct += correct;
-        for (update, value) in training.updates().iter().zip(output.into_iter().skip(2)) {
-            parameters.insert(update.path().to_owned(), value);
-        }
         if step_index % args.log_every == 0 || step_index + 1 == args.steps {
             println!(
                 "step {step_index:>4}: loss {loss:.6}, accuracy {:.1}%",
