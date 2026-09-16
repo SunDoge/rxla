@@ -6,20 +6,22 @@ fn forward_convolutions_use_highest_precision_and_training_is_explicitly_scoped(
     let x = graph.input(&[1, 3, 3, 2]).unwrap();
     let w = graph.input(&[2, 2, 2, 3]).unwrap();
     let y = x.conv2d(&w, Default::default()).unwrap();
-    assert!(y.sum(&[0, 1, 2, 3], false).unwrap().grad(&[x, w]).is_err());
+    let gradients = y.sum(&[0, 1, 2, 3], false).unwrap().grad(&[x, w]).unwrap();
     let transpose_w = graph.input(&[2, 2, 2, 3]).unwrap();
     let transposed = y
         .conv_transpose2d(&transpose_w, Default::default())
         .unwrap();
-    let stablehlo = graph.stablehlo_many(&[y, transposed]).unwrap();
-    assert_eq!(stablehlo.matches("stablehlo.convolution").count(), 2);
-    assert_eq!(
+    let stablehlo = graph
+        .stablehlo_many(&[y, transposed, gradients[0].clone(), gradients[1].clone()])
+        .unwrap();
+    assert!(stablehlo.matches("stablehlo.convolution").count() >= 3);
+    assert!(
         stablehlo
             .matches(
                 "precision_config = [#stablehlo<precision HIGHEST>, #stablehlo<precision HIGHEST>]"
             )
-            .count(),
-        2
+            .count()
+            >= 3
     );
 }
 

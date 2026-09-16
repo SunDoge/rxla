@@ -2215,6 +2215,8 @@ dependencies = [
 name = "rxla-train"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "clap",
+ "rayon",
  "rxla-core",
  "rxla-nn",
  "snafu",

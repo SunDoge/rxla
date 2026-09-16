@@ -581,22 +581,33 @@ impl Tensor {
                                 .broadcast_to(kernel.shape())?,
                         );
                     } else {
-                        add(
-                            0,
-                            self.graph().node(
-                                Op::Conv2dInputGradient(*options),
-                                vec![dy.node_id(), kernel.node_id()],
-                                input.shape(),
-                            )?,
-                        );
-                        add(
-                            1,
-                            self.graph().node(
-                                Op::Conv2dKernelGradient(*options),
-                                vec![input.node_id(), dy.node_id()],
-                                kernel.shape(),
-                            )?,
-                        );
+                        if options.groups == 1 {
+                            add(
+                                0,
+                                conv2d_input_gradient(&dy, &kernel, input.shape(), *options)?,
+                            );
+                            add(
+                                1,
+                                conv2d_kernel_gradient(&input, &dy, kernel.shape(), *options)?,
+                            );
+                        } else {
+                            add(
+                                0,
+                                self.graph().node(
+                                    Op::Conv2dInputGradient(*options),
+                                    vec![dy.node_id(), kernel.node_id()],
+                                    input.shape(),
+                                )?,
+                            );
+                            add(
+                                1,
+                                self.graph().node(
+                                    Op::Conv2dKernelGradient(*options),
+                                    vec![input.node_id(), dy.node_id()],
+                                    kernel.shape(),
+                                )?,
+                            );
+                        }
                     }
                 }
                 Op::Conv2dOihw(options) => {
@@ -617,25 +628,32 @@ impl Tensor {
                         );
                     } else {
                         let hwio = kernel.transpose(&[2, 3, 1, 0])?;
-                        add(
-                            0,
-                            self.graph().node(
-                                Op::Conv2dInputGradient(*options),
-                                vec![dy.node_id(), hwio.node_id()],
-                                input.shape(),
-                            )?,
-                        );
                         let hwio_shape = [
                             kernel.shape()[2],
                             kernel.shape()[3],
                             kernel.shape()[1],
                             kernel.shape()[0],
                         ];
-                        let gradient = self.graph().node(
-                            Op::Conv2dKernelGradient(*options),
-                            vec![input.node_id(), dy.node_id()],
-                            &hwio_shape,
-                        )?;
+                        let (input_gradient, gradient) = if options.groups == 1 {
+                            (
+                                conv2d_input_gradient(&dy, &hwio, input.shape(), *options)?,
+                                conv2d_kernel_gradient(&input, &dy, &hwio_shape, *options)?,
+                            )
+                        } else {
+                            (
+                                self.graph().node(
+                                    Op::Conv2dInputGradient(*options),
+                                    vec![dy.node_id(), hwio.node_id()],
+                                    input.shape(),
+                                )?,
+                                self.graph().node(
+                                    Op::Conv2dKernelGradient(*options),
+                                    vec![input.node_id(), dy.node_id()],
+                                    &hwio_shape,
+                                )?,
+                            )
+                        };
+                        add(0, input_gradient);
                         add(1, gradient.transpose(&[3, 2, 0, 1])?);
                     }
                 }
@@ -706,6 +724,70 @@ impl Tensor {
             })
             .collect()
     }
+}
+
+fn conv2d_input_gradient(
+    output_gradient: &Tensor,
+    kernel: &Tensor,
+    input_shape: &[i64],
+    options: Conv2dOptions,
+) -> Result<Tensor> {
+    let mut output_padding = [0; 2];
+    for axis in 0..2 {
+        let effective = (kernel.shape()[axis] - 1) * options.dilation[axis] + 1;
+        let base = (output_gradient.shape()[axis + 1] - 1) * options.strides[axis] + effective
+            - options.padding[axis][0]
+            - options.padding[axis][1];
+        output_padding[axis] = input_shape[axis + 1] - base;
+    }
+    output_gradient.conv_transpose2d(
+        kernel,
+        ConvTranspose2dOptions {
+            strides: options.strides,
+            padding: options.padding,
+            dilation: options.dilation,
+            output_padding,
+        },
+    )
+}
+
+fn conv2d_kernel_gradient(
+    input: &Tensor,
+    output_gradient: &Tensor,
+    kernel_shape: &[i64],
+    options: Conv2dOptions,
+) -> Result<Tensor> {
+    let padded = input.pad(
+        &[[0, 0], options.padding[0], options.padding[1], [0, 0]],
+        0.0,
+    )?;
+    let positions =
+        output_gradient.shape()[0] * output_gradient.shape()[1] * output_gradient.shape()[2];
+    let gradient = output_gradient.reshape(&[positions, output_gradient.shape()[3]])?;
+    let mut locations = Vec::with_capacity((kernel_shape[0] * kernel_shape[1]) as usize);
+    for row in 0..kernel_shape[0] {
+        for column in 0..kernel_shape[1] {
+            let start_row = row * options.dilation[0];
+            let start_column = column * options.dilation[1];
+            let patch = padded.slice(
+                &[0, start_row, start_column, 0],
+                &[
+                    input.shape()[0],
+                    start_row + (output_gradient.shape()[1] - 1) * options.strides[0] + 1,
+                    start_column + (output_gradient.shape()[2] - 1) * options.strides[1] + 1,
+                    input.shape()[3],
+                ],
+                &[1, options.strides[0], options.strides[1], 1],
+            )?;
+            locations.push(
+                patch
+                    .reshape(&[positions, input.shape()[3]])?
+                    .transpose(&[1, 0])?
+                    .matmul(&gradient)?,
+            );
+        }
+    }
+    Tensor::stack(&locations, 0)?.reshape(kernel_shape)
 }
 
 #[cfg(test)]

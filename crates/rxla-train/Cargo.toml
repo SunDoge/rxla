@@ -9,3 +9,7 @@ description = "Functional training transforms for RXLA parameter-effect models"
 rxla-nn = { path = "../rxla-nn", version = "=0.1.0-alpha.1" }
 rxla-core = { path = "../rxla-core", version = "=0.1.0-alpha.1", default-features = false }
 snafu = { workspace = true }
+
+[dev-dependencies]
+clap = { workspace = true, features = ["env"] }
+rayon = { workspace = true }

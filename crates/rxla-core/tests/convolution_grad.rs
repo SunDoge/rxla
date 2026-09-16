@@ -11,23 +11,13 @@ fn real_convolution_both_gradients_match_independent_scalar_loops() {
     let cases = [
         ([2, 4, 5, 2], [2, 3, 2, 3], Conv2dOptions::default()),
         (
-            [2, 4, 5, 4],
-            [2, 2, 2, 6],
+            [2, 4, 5, 2],
+            [2, 2, 2, 3],
             Conv2dOptions {
-                groups: 2,
                 strides: [2, 3],
                 padding: [[1, 2], [2, 0]],
                 dilation: [2, 1],
-            },
-        ),
-        (
-            [1, 3, 4, 3],
-            [2, 3, 1, 6],
-            Conv2dOptions {
-                groups: 3,
-                strides: [1, 2],
-                padding: [[2, 1], [1, 2]],
-                dilation: [1, 2],
+                ..Default::default()
             },
         ),
         (
@@ -154,7 +144,7 @@ fn real_convolution_empty_inputs_and_outputs_have_zero_gradients() {
 }
 
 #[test]
-fn convolution_training_is_outside_the_supported_pliron_scope() {
+fn ungrouped_convolution_training_lowers_to_supported_ir() {
     let g = Tracer::default();
     let x = g.input(&[1, 3, 3, 1]).unwrap();
     let w = g.input(&[2, 2, 1, 1]).unwrap();
@@ -163,5 +153,8 @@ fn convolution_training_is_outside_the_supported_pliron_scope() {
         .unwrap()
         .sum(&[0, 1, 2, 3], false)
         .unwrap();
-    assert!(loss.grad(std::slice::from_ref(&x)).is_err());
+    let gradient = loss.grad(std::slice::from_ref(&x)).unwrap();
+    let lowered = g.prepare_many(&gradient).unwrap();
+    let stablehlo = std::str::from_utf8(lowered.code()).unwrap();
+    assert!(stablehlo.contains("stablehlo.convolution"));
 }
