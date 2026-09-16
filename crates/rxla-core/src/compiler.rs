@@ -1,6 +1,6 @@
 use super::*;
 use std::collections::{HashMap, VecDeque};
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Immutable lowered program with its pre-encoded cache key. Lowering requires
@@ -164,13 +164,14 @@ pub struct CacheStats {
 /// including constants, shapes, dtypes and output order. Runtime buffer contents are not keys. Compiler options
 /// participate in cache keys when supplied. Separate instances never share
 /// in-memory executables, even when
-/// their clients use the same plugin. Like PJRT handles, this object is !Send/!Sync.
+/// their clients use the same plugin. Executables and keys are shared through
+/// `Arc`, so an exclusively owned compiler can move between worker threads.
 pub struct Compiler {
     pub(super) client: Client,
     limits: CacheLimits,
-    entries: HashMap<Rc<[u8]>, Rc<Executable>>,
+    entries: HashMap<Arc<[u8]>, Arc<Executable>>,
     // Keys share storage with the map; oldest access is at the front.
-    recency: VecDeque<Rc<[u8]>>,
+    recency: VecDeque<Arc<[u8]>>,
     stats: CacheStats,
     f16_attention: bool,
     compute_dtype: Option<DType>,
@@ -250,7 +251,7 @@ impl Compiler {
         let position = self
             .recency
             .iter()
-            .position(|k| Rc::ptr_eq(k, &key))
+            .position(|k| Arc::ptr_eq(k, &key))
             .expect("cache recency matches entries");
         self.recency.remove(position);
         self.stats.key_bytes -= key.len();
@@ -274,7 +275,7 @@ impl Compiler {
         self.stats.key_bytes = 0;
     }
 
-    pub fn compile(&mut self, tracer: &Tracer, output: &Tensor) -> Result<Rc<Executable>> {
+    pub fn compile(&mut self, tracer: &Tracer, output: &Tensor) -> Result<Arc<Executable>> {
         self.compile_many(tracer, std::slice::from_ref(output))
     }
 
@@ -282,7 +283,7 @@ impl Compiler {
     /// Cache keys and executable identity are identical to ordinary compilation.
     /// Lookup still hashes/compares key bytes and updates the LRU; callers that
     /// already own the desired executable should execute that handle directly.
-    pub fn compile_lowered(&mut self, program: &LoweredProgram) -> Result<Rc<Executable>> {
+    pub fn compile_lowered(&mut self, program: &LoweredProgram) -> Result<Arc<Executable>> {
         let key = program.cache_key();
         self.compile_encoded(
             &program.code,
@@ -297,7 +298,7 @@ impl Compiler {
         &mut self,
         program: &LoweredProgram,
         options: &[u8],
-    ) -> Result<Rc<Executable>> {
+    ) -> Result<Arc<Executable>> {
         let program_key = program.cache_key();
         let mut key = Vec::with_capacity(16 + program_key.len() + options.len());
         key.extend_from_slice(b"rxla-options\0");
@@ -313,7 +314,7 @@ impl Compiler {
         )
     }
 
-    pub fn compile_many(&mut self, tracer: &Tracer, outputs: &[Tensor]) -> Result<Rc<Executable>> {
+    pub fn compile_many(&mut self, tracer: &Tracer, outputs: &[Tensor]) -> Result<Arc<Executable>> {
         self.compile_graph_outputs(&tracer.graph, outputs)
     }
 
@@ -321,7 +322,7 @@ impl Compiler {
         &mut self,
         graph: &Graph,
         outputs: &[Tensor],
-    ) -> Result<Rc<Executable>> {
+    ) -> Result<Arc<Executable>> {
         let lowered = graph.direct_lowered_for(outputs, true, self.lowering_target()?)?;
         self.compile_lowered(&lowered)
     }
@@ -330,7 +331,7 @@ impl Compiler {
         &mut self,
         graph: &Graph,
         outputs: &[Tensor],
-    ) -> Result<(Rc<Executable>, Vec<usize>)> {
+    ) -> Result<(Arc<Executable>, Vec<usize>)> {
         let (lowered, parameters) = graph.prepare_pruned(outputs)?;
         Ok((self.compile_lowered(&lowered)?, parameters))
     }
@@ -342,7 +343,7 @@ impl Compiler {
         key_bytes: &[u8],
         output_count: usize,
         compile_options: Option<&[u8]>,
-    ) -> Result<Rc<Executable>> {
+    ) -> Result<Arc<Executable>> {
         let span = tracing::debug_span!(
             "xla.compile",
             outputs = output_count,
@@ -359,7 +360,7 @@ impl Compiler {
             let position = self
                 .recency
                 .iter()
-                .position(|k| Rc::ptr_eq(k, &key))
+                .position(|k| Arc::ptr_eq(k, &key))
                 .expect("cache recency matches entries");
             self.recency.remove(position);
             self.recency.push_back(key);
@@ -388,7 +389,7 @@ impl Compiler {
         #[cfg(not(feature = "disk-cache"))]
         let restored: Option<Executable> = None;
         let executable = if let Some(executable) = restored {
-            Rc::new(executable)
+            Arc::new(executable)
         } else {
             self.stats.misses = self.stats.misses.saturating_add(1);
             let start = Instant::now();
@@ -402,7 +403,7 @@ impl Compiler {
             );
             self.stats.compile_time = self.stats.compile_time.saturating_add(start.elapsed());
             let executable = match result {
-                Ok(executable) => Rc::new(executable),
+                Ok(executable) => Arc::new(executable),
                 Err(error) => {
                     tracing::debug!("backend compilation failed");
                     self.stats.compile_failures = self.stats.compile_failures.saturating_add(1);
@@ -436,7 +437,7 @@ impl Compiler {
             self.stats.evictions = self.stats.evictions.saturating_add(1);
         }
         self.stats.key_bytes += key_bytes.len();
-        let key: Rc<[u8]> = key_bytes.into();
+        let key: Arc<[u8]> = key_bytes.into();
         self.recency.push_back(key.clone());
         self.entries.insert(key, executable.clone());
         self.stats.entries = self.entries.len();

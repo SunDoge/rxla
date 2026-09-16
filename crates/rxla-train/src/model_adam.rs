@@ -5,7 +5,7 @@ use rxla_core::{
 };
 use rxla_nn::{AppliedModel, ParameterId, ParameterSelection};
 use snafu::{Snafu, ensure};
-use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AdamOptions {
@@ -135,7 +135,7 @@ impl ModelAdamStep {
         &self,
         model: &AppliedModel,
         compiler: &mut Compiler,
-    ) -> ModelAdamResult<Rc<Executable>> {
+    ) -> ModelAdamResult<Arc<Executable>> {
         Ok(model.compile_tensors(compiler, &self.outputs())?)
     }
 

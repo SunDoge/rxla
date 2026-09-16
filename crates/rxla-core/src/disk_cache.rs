@@ -635,7 +635,7 @@ mod tests {
             [3.]
         );
         let cached = compiler.compile(&graph, &y).unwrap();
-        assert!(std::rc::Rc::ptr_eq(&executable, &cached));
+        assert!(std::sync::Arc::ptr_eq(&executable, &cached));
         assert_eq!(compiler.stats().misses, 1);
         compiler.clear();
         let recompiled = compiler.compile(&graph, &y).unwrap();
@@ -708,7 +708,7 @@ mod tests {
         assert_eq!(other.disk_cache().unwrap().inspect().unwrap().compatible, 1);
         assert_eq!(executable.run(&[&[3.]]).unwrap(), [5.]);
         let cached = compiler.compile(&graph, &next).unwrap();
-        assert!(std::rc::Rc::ptr_eq(&executable, &cached));
+        assert!(std::sync::Arc::ptr_eq(&executable, &cached));
         compiler.clear();
         compiler.compile(&graph, &next).unwrap();
         assert_eq!(compiler.stats().misses, 2);

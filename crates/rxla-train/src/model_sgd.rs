@@ -3,7 +3,7 @@
 use rxla_core::{Compiler, Executable, LoweredProgram, PreparedStateGraph, StateProgram, Tensor};
 use rxla_nn::{AppliedModel, ParameterId, ParameterSelection};
 use snafu::{Snafu, ensure};
-use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
@@ -72,7 +72,7 @@ impl ModelSgdStep {
         &self,
         model: &AppliedModel,
         compiler: &mut Compiler,
-    ) -> ModelSgdResult<Rc<Executable>> {
+    ) -> ModelSgdResult<Arc<Executable>> {
         Ok(model.compile_tensors(compiler, &self.outputs())?)
     }
 

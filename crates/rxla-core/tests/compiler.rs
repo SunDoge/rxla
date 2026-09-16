@@ -1,5 +1,5 @@
 use rxla_core::{CacheLimits, Client, Compiler, Tensor, Tracer};
-use std::rc::Rc;
+use std::sync::Arc;
 
 fn graph(value: f32) -> (Tracer, Tensor) {
     let g = Tracer::default();
@@ -143,7 +143,7 @@ fn real_prepared_snapshot_shares_keys_and_freezes_typed_input_abi() {
         let ordinary = compiler.compile_many(&g, &outputs).unwrap();
         let before = compiler.stats().compile_time;
         let cached = compiler.compile_lowered(&prepared).unwrap();
-        assert!(Rc::ptr_eq(&ordinary, &cached));
+        assert!(Arc::ptr_eq(&ordinary, &cached));
         assert_eq!(compiler.stats().compile_time, before);
         assert_eq!(cached.input_count(), 2);
         // Snapshot must not acquire parameters added to the source graph later.
@@ -202,7 +202,7 @@ fn real_cache_hits_lru_and_lifetimes() {
     assert!(!compiled_time.is_zero());
     // Separately constructed but byte-identical graphs reuse the same executable.
     let (identical, y_identical) = graph(1.);
-    assert!(Rc::ptr_eq(
+    assert!(Arc::ptr_eq(
         &ea,
         &compiler.compile(&identical, &y_identical).unwrap()
     ));
@@ -210,9 +210,9 @@ fn real_cache_hits_lru_and_lifetimes() {
     assert_eq!(ea.run(&[&[1., 2.]]).unwrap(), [2., 3.]);
     assert_eq!(ea.run(&[&[10., 20.]]).unwrap(), [11., 21.]);
     let ec = compiler.compile(&c, &yc).unwrap(); // evicts B, not recently touched A
-    assert!(Rc::ptr_eq(&ea, &compiler.compile(&a, &ya).unwrap()));
+    assert!(Arc::ptr_eq(&ea, &compiler.compile(&a, &ya).unwrap()));
     let eb2 = compiler.compile(&b, &yb).unwrap();
-    assert!(!Rc::ptr_eq(&eb, &eb2));
+    assert!(!Arc::ptr_eq(&eb, &eb2));
     let stats = compiler.stats();
     assert_eq!(
         (stats.hits, stats.misses, stats.evictions, stats.entries),
@@ -263,7 +263,7 @@ fn real_cache_byte_limits_and_disable() {
         let mut compiler = Compiler::new(client.clone(), limits);
         let a = compiler.compile(&g, &y).unwrap();
         let b = compiler.compile(&g, &y).unwrap();
-        assert!(!Rc::ptr_eq(&a, &b));
+        assert!(!Arc::ptr_eq(&a, &b));
         assert_eq!(compiler.stats().bypasses, 2);
         assert_eq!(compiler.stats().entries, 0);
     }
@@ -279,26 +279,26 @@ fn real_cache_output_order_shape_and_client_isolation() {
     let y = x.add_scalar(1.).unwrap();
     let xy = compiler.compile_many(&g, &[x.clone(), y.clone()]).unwrap();
     let yx = compiler.compile_many(&g, &[y.clone(), x.clone()]).unwrap();
-    assert!(!Rc::ptr_eq(&xy, &yx));
+    assert!(!Arc::ptr_eq(&xy, &yx));
     assert_eq!(
         yx.run_many(&[&[2., 3.]]).unwrap(),
         [vec![3., 4.], vec![2., 3.]]
     );
-    assert!(Rc::ptr_eq(
+    assert!(Arc::ptr_eq(
         &xy,
         &compiler.compile_many(&g, &[x, y]).unwrap()
     ));
     let (a, ya) = graph(1.);
     let original = compiler.compile(&a, &ya).unwrap();
     let mut other = Compiler::new(client, CacheLimits::default());
-    assert!(!Rc::ptr_eq(&original, &other.compile(&a, &ya).unwrap()));
+    assert!(!Arc::ptr_eq(&original, &other.compile(&a, &ya).unwrap()));
     let differently_shaped = Tracer::default();
     let z = differently_shaped
         .input(&[1, 2])
         .unwrap()
         .add_scalar(1.)
         .unwrap();
-    assert!(!Rc::ptr_eq(
+    assert!(!Arc::ptr_eq(
         &original,
         &compiler.compile(&differently_shaped, &z).unwrap()
     ));
@@ -313,15 +313,15 @@ fn real_dead_branch_pruning_preserves_cache_and_input_abi() {
     let first = compiler.compile(&g, &y).unwrap();
     let dead = y.mul_scalar(200.).unwrap().exp().unwrap();
     let same = compiler.compile(&g, &y).unwrap();
-    assert!(Rc::ptr_eq(&first, &same));
+    assert!(Arc::ptr_eq(&first, &same));
     assert_eq!(same.run(&[&[2., 3.]]).unwrap(), [3., 4.]);
     // A previously pruned tensor remains a valid output of the original graph.
     let other = compiler.compile(&g, &dead).unwrap();
-    assert!(!Rc::ptr_eq(&same, &other));
+    assert!(!Arc::ptr_eq(&same, &other));
     assert_eq!(other.run(&[&[-1., -1.]]).unwrap(), [1., 1.]);
     let _index = g.input_i32_scalar().unwrap();
     let with_unused_input = compiler.compile(&g, &y).unwrap();
-    assert!(!Rc::ptr_eq(&same, &with_unused_input));
+    assert!(!Arc::ptr_eq(&same, &with_unused_input));
     let x = client.buffer(&[2], &[5., 6.]).unwrap();
     let i = client.buffer(&[], &[99]).unwrap();
     assert!(with_unused_input.execute(&[&x]).is_err());
@@ -337,7 +337,7 @@ fn real_dead_branch_pruning_preserves_cache_and_input_abi() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_selective_invalidation_preserves_executables_and_lru() {
     use rxla_core::{CacheLimits, Client, Compiler, Tracer};
-    use std::rc::Rc;
+    use std::sync::Arc;
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(
         client,
@@ -361,11 +361,11 @@ fn real_selective_invalidation_preserves_executables_and_lru() {
     assert!(compiler.stats().key_bytes < before.key_bytes);
     assert_eq!(compiler.stats().evictions, 0);
     assert_eq!(held.run(&[&[4.]]).unwrap(), [5.]);
-    assert!(Rc::ptr_eq(&other, &compiler.compile(&graph, &b).unwrap()));
+    assert!(Arc::ptr_eq(&other, &compiler.compile(&graph, &b).unwrap()));
     let fresh = compiler.compile(&graph, &a).unwrap();
-    assert!(!Rc::ptr_eq(&held, &fresh));
+    assert!(!Arc::ptr_eq(&held, &fresh));
     compiler.compile(&graph, &c).unwrap(); // B, not A, is oldest.
-    assert!(Rc::ptr_eq(&fresh, &compiler.compile(&graph, &a).unwrap()));
+    assert!(Arc::ptr_eq(&fresh, &compiler.compile(&graph, &a).unwrap()));
     compiler.compile(&graph, &b).unwrap();
     assert_eq!(compiler.stats().misses, 5);
     assert_eq!(compiler.stats().hits, 2);

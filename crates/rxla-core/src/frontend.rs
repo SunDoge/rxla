@@ -19,7 +19,7 @@ use rxla_xla_proto::xla::{
     CompileOptionsProto, DeviceAssignmentProto, ExecutableBuildOptionsProto,
     device_assignment_proto::ComputationDevice,
 };
-use std::{collections::BTreeMap, rc::Rc};
+use std::{collections::BTreeMap, sync::Arc};
 
 /// A concrete device selected through a PJRT client.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -201,7 +201,7 @@ impl TensorFunction {
 
     /// Compile without executing. Ordinary callers can rely on first-call
     /// compilation; serving systems may use this during explicit warmup.
-    pub fn compile(&self, runtime: &mut Runtime) -> Result<Rc<Executable>> {
+    pub fn compile(&self, runtime: &mut Runtime) -> Result<Arc<Executable>> {
         self.program.compile(runtime)
     }
 
@@ -271,7 +271,7 @@ impl Program {
         &self.lowered
     }
 
-    pub fn compile(&self, runtime: &mut Runtime) -> Result<Rc<Executable>> {
+    pub fn compile(&self, runtime: &mut Runtime) -> Result<Arc<Executable>> {
         runtime.compile(self)
     }
 
@@ -727,7 +727,7 @@ impl Runtime {
         Ok(self.backend_for_device(device)?.compiler.stats())
     }
 
-    pub fn compile(&mut self, program: &Program) -> Result<Rc<Executable>> {
+    pub fn compile(&mut self, program: &Program) -> Result<Arc<Executable>> {
         let device = self.default_device.clone();
         self.compile_on(&device, program)
     }
@@ -745,7 +745,7 @@ impl Runtime {
         graph.compile(&mut backend.compiler, outputs)
     }
 
-    fn compile_on(&mut self, device: &Device, program: &Program) -> Result<Rc<Executable>> {
+    fn compile_on(&mut self, device: &Device, program: &Program) -> Result<Arc<Executable>> {
         let plan = self.plan(program)?;
         let target_lowered = program.lower_for_compile(rxla_ir::LoweringTarget::Portable)?;
         if plan.requires_spmd_partitioning() {
@@ -952,7 +952,7 @@ impl DeviceRuntime<'_> {
         )?)
     }
 
-    pub fn compile(&mut self, program: &Program) -> Result<Rc<Executable>> {
+    pub fn compile(&mut self, program: &Program) -> Result<Arc<Executable>> {
         self.runtime.compile_on(&self.device, program)
     }
 
@@ -1114,6 +1114,12 @@ impl Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_can_be_owned_by_a_worker_thread() {
+        fn assert_send<T: Send>() {}
+        assert_send::<Runtime>();
+    }
 
     #[test]
     fn tracer_builds_common_programs_directly_in_pliron() {

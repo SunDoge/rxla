@@ -1,6 +1,6 @@
 //! Stateful facade, functional compilation, and non-donating session execution.
 use super::*;
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 
 /// Identity of an F32 or I32 state slot. Clones identify the same slot, not copies.
 #[derive(Clone)]
@@ -530,7 +530,7 @@ fn validate_buffer(client: &Client, buffer: &Buffer, ty: &TensorType) -> Result<
     Ok(())
 }
 struct Plan {
-    executable: Rc<Executable>,
+    executable: Arc<Executable>,
     owner: Arc<()>,
     arguments: Vec<Argument>,
     input_parameters: Vec<Option<usize>>,

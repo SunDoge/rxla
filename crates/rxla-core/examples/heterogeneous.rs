@@ -24,10 +24,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let infer = gpu_compiler.compile_lowered(&prepared_model)?;
     let cpu_infer = cpu_compiler.compile_lowered(&prepared_model)?;
     // Identical HLO bytes do not mean shared executable/device ownership.
-    assert!(!std::rc::Rc::ptr_eq(&infer, &cpu_infer));
+    assert!(!std::sync::Arc::ptr_eq(&infer, &cpu_infer));
     for (compiler, executable) in [(&mut cpu_compiler, &cpu_infer), (&mut gpu_compiler, &infer)] {
         let compiled_time = compiler.stats().compile_time;
-        assert!(std::rc::Rc::ptr_eq(
+        assert!(std::sync::Arc::ptr_eq(
             executable,
             &compiler.compile_lowered(&prepared_model)?
         ));

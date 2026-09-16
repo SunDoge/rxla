@@ -68,7 +68,7 @@ fn real_partial_rules_share_forward_cache_but_separate_backward_cache() {
     let forward = compiler.compile(&graph, &first).unwrap();
     for expression in [&second, &poisoned] {
         let reused = compiler.compile(&graph, expression).unwrap();
-        assert!(std::rc::Rc::ptr_eq(&forward, &reused));
+        assert!(std::sync::Arc::ptr_eq(&forward, &reused));
     }
     assert_eq!(compiler.stats().misses, 1);
     assert_eq!(compiler.stats().hits, 2);
@@ -95,7 +95,7 @@ fn real_partial_rules_share_forward_cache_but_separate_backward_cache() {
     });
     let backward_one = compiler.compile(&graph, &gradients[0]).unwrap();
     let backward_two = compiler.compile(&graph, &gradients[1]).unwrap();
-    assert!(!std::rc::Rc::ptr_eq(&backward_one, &backward_two));
+    assert!(!std::sync::Arc::ptr_eq(&backward_one, &backward_two));
     assert_eq!(
         backward_one.execute(&[&input]).unwrap()[0]
             .to_vec::<f32>()

@@ -1,5 +1,5 @@
 use rxla_core::{Client, Runtime, Tracer};
-use std::{rc::Rc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Loading native code requires trusting the operator-selected plugin.
@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     for _ in 0..1000 {
         let cached = program.compile(&mut runtime)?;
-        assert!(Rc::ptr_eq(&executable, &cached));
+        assert!(Arc::ptr_eq(&executable, &cached));
     }
     let warm = start.elapsed() / 1000;
     assert_eq!(runtime.stats().compile_time, compile_time);

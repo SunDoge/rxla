@@ -6,7 +6,7 @@ use rxla_core::{
     StateProgram, StateSlot, Tracer,
 };
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// One apply trace plus its immutable Pliron program builder.
 pub struct AppliedModel {
@@ -130,7 +130,7 @@ impl AppliedModel {
     }
 
     /// Compile this immutable model snapshot through the caller's cache-aware compiler.
-    pub fn compile(&self, compiler: &mut Compiler) -> Result<Rc<Executable>> {
+    pub fn compile(&self, compiler: &mut Compiler) -> Result<Arc<Executable>> {
         ensure!(
             self.states.is_empty(),
             InvalidDefinitionSnafu {
@@ -185,7 +185,7 @@ impl AppliedModel {
         &self,
         compiler: &mut Compiler,
         outputs: &[Tensor],
-    ) -> Result<Rc<Executable>> {
+    ) -> Result<Arc<Executable>> {
         ensure!(
             self.states.is_empty(),
             InvalidDefinitionSnafu {
