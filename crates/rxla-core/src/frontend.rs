@@ -103,7 +103,77 @@ pub struct Program {
     source: rxla_ir::SemanticProgram,
 }
 
+/// A reusable one-input/one-output Tensor computation.
+///
+/// The builder receives an ordinary symbolic [`Tensor`]; graph ownership and
+/// placeholder creation remain internal. Calling the function accepts either a
+/// host-backed or device-resident Tensor, compiles on first use, and reuses the
+/// runtime's executable cache on subsequent calls.
+#[derive(Clone)]
+pub struct TensorFunction {
+    program: Program,
+}
+
+impl TensorFunction {
+    /// Trace a reusable Tensor function for one statically shaped input.
+    pub fn new<F>(shape: impl AsRef<[i64]>, dtype: DType, build: F) -> Result<Self>
+    where
+        F: FnOnce(&Tensor) -> Result<Tensor>,
+    {
+        let tracer = Tracer::new();
+        let input = tracer.input_dtype(shape.as_ref(), dtype)?;
+        let output = build(&input)?;
+        Ok(Self {
+            program: tracer.program(vec![output])?,
+        })
+    }
+
+    /// Execute with a host-backed or resident Tensor and return a resident
+    /// materialized Tensor. Input shape and dtype must match the traced spec.
+    pub fn call(&self, runtime: &mut Runtime, input: &Tensor) -> Result<Tensor> {
+        self.program
+            .run_tensors(runtime, &[input])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| err("TensorFunction execution returned no output"))
+    }
+
+    /// Compile without executing. Ordinary callers can rely on first-call
+    /// compilation; serving systems may use this during explicit warmup.
+    pub fn compile(&self, runtime: &mut Runtime) -> Result<Rc<Executable>> {
+        self.program.compile(runtime)
+    }
+
+    /// Inspect the reusable program for profiling and deployment tooling.
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
+}
+
 impl Program {
+    /// Snapshot one or more lazy Tensor expressions as a verified reusable
+    /// program without loading PJRT or compiling for a device. This is the fast
+    /// path for frontend tests, IR inspection, cache-key preparation, and tools
+    /// that do not need runtime execution.
+    pub fn from_tensors(outputs: &[Tensor]) -> Result<Self> {
+        let first = outputs
+            .first()
+            .ok_or_else(|| err("program requires at least one Tensor output"))?;
+        let graph = first.graph();
+        if outputs
+            .iter()
+            .any(|output| !std::sync::Arc::ptr_eq(&graph.0, &output.graph().0))
+        {
+            return Err(err("program outputs belong to different lazy traces"));
+        }
+        let (lowered, planning, _, source) = graph.direct_program(outputs, false)?;
+        Ok(Self {
+            planning,
+            lowered,
+            source,
+        })
+    }
+
     fn lower_for_compile(&self, target: rxla_ir::LoweringTarget) -> Result<LoweredProgram> {
         let program = self.source.lower(target)?;
         Ok(LoweredProgram::from_stablehlo(
@@ -954,6 +1024,13 @@ fn auto_spmd_config(
 }
 
 impl Tensor {
+    /// Snapshot this lazy expression into verified StableHLO without a runtime.
+    /// The returned program can be inspected, cached, compiled, and repeatedly
+    /// called with compatible Tensor inputs.
+    pub fn program(&self) -> Result<Program> {
+        Program::from_tensors(std::slice::from_ref(self))
+    }
+
     /// Evaluate this lazy expression and return its materialized value.
     pub fn eval(&self, runtime: &mut Runtime) -> Result<Self> {
         runtime.eval(self)

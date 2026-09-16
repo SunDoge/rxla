@@ -31,6 +31,7 @@ mod convolution;
 #[cfg(feature = "disk-cache")]
 mod disk_cache;
 mod frontend;
+mod image;
 mod shape_ops;
 #[cfg(feature = "disk-cache")]
 pub use disk_cache::{DiskCache, DiskCacheInspection, DiskCacheTrim};
@@ -80,7 +81,8 @@ mod dtype_rules;
 mod metadata;
 mod tensor_handle;
 pub use frontend::{
-    Device, DeviceRuntime, Evaluable, Executor, Program, Runtime, RuntimeBuilder, Tracer,
+    Device, DeviceRuntime, Evaluable, Executor, Program, Runtime, RuntimeBuilder, TensorFunction,
+    Tracer,
 };
 pub use tensor_handle::{
     Storage, StorageKind, TensorBuildError, TensorBuilder, TensorDescriptor, TensorDownloadError,

@@ -1,4 +1,4 @@
-use rxla_core::{Client, Conv2dOptions, Graph, Pool2dOptions, Tensor};
+use rxla_core::{Client, Conv2dOptions, DType, Graph, Pool2dOptions, Runtime, Tensor};
 
 #[test]
 fn upsample_shape_validation() {
@@ -14,6 +14,50 @@ fn upsample_shape_validation() {
             .upsample_nearest2d([2, 2])
             .is_err()
     );
+}
+
+#[test]
+fn image_resize_and_normalization_validate_shapes_and_dtypes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let x = Tensor::from_slice([2, 3, 5, 3], DType::F32, vec![0.0; 2 * 3 * 5 * 3])?;
+    assert_eq!(x.resize_nearest2d([7, 2])?.shape(), [2, 7, 2, 3]);
+    assert_eq!(x.resize_bilinear2d([7, 2])?.shape(), [2, 7, 2, 3]);
+    assert_eq!(x.normalize_nhwc(&[0.5; 3], &[0.25; 3])?.shape(), x.shape());
+    assert!(x.resize_nearest2d([0, 2]).is_err());
+    assert!(x.resize_bilinear2d([2, -1]).is_err());
+    let hwc = Tensor::from_slice([3, 5, 3], DType::F32, [0.0; 45])?;
+    assert!(hwc.resize_bilinear2d([2, 2]).is_err());
+    assert!(x.normalize_nhwc(&[0.; 2], &[1.; 2]).is_err());
+    assert!(x.normalize_nhwc(&[0.; 3], &[1., 0., 1.]).is_err());
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+fn real_arbitrary_resize_and_normalization_match_reference()
+-> Result<(), Box<dyn std::error::Error>> {
+    let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?) }?;
+    let shape = [1, 2, 3, 2];
+    let values = [0., 10., 2., 12., 4., 14., 6., 16., 8., 18., 10., 20.];
+    let input = Tensor::from_slice(shape, DType::F32, values)?;
+    let nearest = input.resize_nearest2d([3, 2])?;
+    let mut runtime = Runtime::new(client);
+    assert_eq!(
+        nearest.eval(&mut runtime)?.to_vec::<f32>()?,
+        vec![0., 10., 2., 12., 0., 10., 2., 12., 6., 16., 8., 18.]
+    );
+
+    let bilinear = input
+        .resize_bilinear2d([3, 2])?
+        .normalize_nhwc(&[1., 10.], &[2., 5.])?;
+    let actual = bilinear.eval(&mut runtime)?.to_vec::<f32>()?;
+    let expected = [
+        -0.25, 0.1, 1.25, 0.7, 1.25, 0.7, 2.75, 1.3, 2.75, 1.3, 4.25, 1.9,
+    ];
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    }
+    Ok(())
 }
 
 #[test]

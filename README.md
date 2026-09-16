@@ -130,6 +130,7 @@ crates.io publishing.
 - [Parameter-effect design](docs/PARAMETER-EFFECT-DESIGN.md)
 - [State design](docs/STATE-DESIGN.md)
 - [Tensor storage design](docs/TENSOR-STORAGE-DESIGN.md)
+- [Tensor image augmentation experiment](docs/IMAGE-AUGMENTATION-BENCHMARK.md)
 - [MLX layout review](docs/MLX-LAYOUT-REVIEW.md)
 - [Deployment notes](docs/DEPLOYMENT.md)
 - [Profiling guide](docs/PROFILING.md)

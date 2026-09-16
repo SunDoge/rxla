@@ -2114,6 +2114,7 @@ name = "rxla-core"
 version = "0.1.0-alpha.1"
 dependencies = [
  "blake3",
+ "clap",
  "dlpark",
  "half",
  "image",

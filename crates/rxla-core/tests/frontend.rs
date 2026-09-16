@@ -1,5 +1,6 @@
 use rxla_core::{
-    Client, DType, Executor, Mesh, PartitionSpec, Runtime, Sharding, Storage, TensorLayout, Tracer,
+    Client, DType, Executor, Mesh, PartitionSpec, Runtime, Sharding, Storage, Tensor,
+    TensorFunction, TensorLayout, Tracer,
 };
 use rxla_pjrt::{Shape, StridedLayout};
 
@@ -158,6 +159,24 @@ fn mlx_style_eval_materializes_lazy_tensor_operations_and_reuses_cache() {
     let pair = executor.eval((&sum, &product)).unwrap();
     assert!(pair.0.is_materialized());
     assert!(pair.1.is_materialized());
+}
+
+#[test]
+#[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+fn tensor_function_reuses_a_tensor_only_computation() -> Result<(), Box<dyn std::error::Error>> {
+    let function = TensorFunction::new([2], DType::F32, |x| x.square()?.add_scalar(1.0))?;
+    let first = Tensor::from_slice([2], DType::F32, [2.0, 3.0])?;
+    let second = Tensor::from_slice([2], DType::F32, [4.0, 5.0])?;
+    let mut runtime = Runtime::new(client());
+
+    let first = function.call(&mut runtime, &first)?;
+    assert_eq!(first.to_vec::<f32>()?, [5.0, 10.0]);
+    assert_eq!(runtime.stats().misses, 1);
+
+    let second = function.call(&mut runtime, &second)?;
+    assert_eq!(second.to_vec::<f32>()?, [17.0, 26.0]);
+    assert_eq!(runtime.stats().hits, 1);
+    Ok(())
 }
 
 #[test]
