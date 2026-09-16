@@ -316,7 +316,12 @@ fn resnet18(cx: &mut Cx, batch_size: i64, training: bool) -> NnResult<Vec<Tensor
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;
-    Ok(vec![loss, logits])
+    let predicted = logits.argmax(1, false)?;
+    let correct = predicted
+        .le_mask(&labels)?
+        .mul(&labels.le_mask(&predicted)?)?
+        .sum(&[0], false)?;
+    Ok(vec![loss, logits, correct])
 }
 
 fn initialized_parameters(
@@ -409,7 +414,7 @@ fn prefetch_batches(
     steps: usize,
     batch_size: usize,
     rng: DataRng,
-    cpu_plugin: String,
+    cpu_client: Client,
 ) -> (
     mpsc::Receiver<Result<AugmentedHostBatch, String>>,
     [thread::JoinHandle<()>; 2],
@@ -427,13 +432,7 @@ fn prefetch_batches(
     });
     let (augmented_sender, augmented_receiver) = mpsc::sync_channel(2);
     let augmenter = thread::spawn(move || {
-        let mut cpu = match unsafe { Client::load(&cpu_plugin) } {
-            Ok(client) => Runtime::new(client),
-            Err(error) => {
-                let _ = augmented_sender.send(Err(error.to_string()));
-                return;
-            }
-        };
+        let mut cpu = Runtime::new(cpu_client);
         for decoded in decoded_receiver {
             let augmented = decoded.and_then(|batch| {
                 augment_host_batch(batch, batch_size as i64, &mut cpu)
@@ -445,21 +444,6 @@ fn prefetch_batches(
         }
     });
     (augmented_receiver, [decoder, augmenter])
-}
-
-fn correct(logits: &[f32], labels: &[i32]) -> usize {
-    logits
-        .as_chunks::<10>()
-        .0
-        .iter()
-        .zip(labels)
-        .filter(|(row, target)| {
-            row.iter()
-                .enumerate()
-                .max_by(|(_, lhs), (_, rhs)| lhs.total_cmp(rhs))
-                .is_some_and(|(prediction, _)| prediction == **target as usize)
-        })
-        .count()
 }
 
 fn initialize_session<'a>(
@@ -499,7 +483,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cpu = unsafe { Client::load(&args.cpu_plugin) }?;
     let gpu = unsafe { Client::load(&args.gpu_plugin) }?;
-    let mut cpu_runtime = Runtime::new(cpu);
+    let mut cpu_runtime = Runtime::new(cpu.clone());
     let batch_size = args.batch_size;
     let definition = Model::new(move |cx: &mut Cx| resnet18(cx, batch_size, true));
     let (schema, model) = definition.trace()?;
@@ -509,7 +493,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &model.outputs()[0],
         args.learning_rate,
     )?;
-    let mut outputs = model.outputs().to_vec();
+    let metrics = Tensor::stack(&[model.outputs()[0].clone(), model.outputs()[2].clone()], 0)?;
+    let mut outputs = vec![metrics];
     outputs.extend(training.outputs());
     let mut compiler = Compiler::new(gpu.clone(), CacheLimits::default());
     let program = model.compile_stateful_tensors(&mut compiler, &outputs)?;
@@ -527,7 +512,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.steps,
         batch_size as usize,
         rng,
-        args.cpu_plugin.clone(),
+        cpu,
     );
 
     for step in 0..args.steps {
@@ -551,13 +536,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let output = session.run(arguments.as_slice())?;
         let executed = phase.elapsed();
         let phase = Instant::now();
-        last_loss = output[0].to_vec::<f32>()?[0];
+        let metrics = output[0].to_vec::<f32>()?;
+        last_loss = metrics[0];
         first_loss.get_or_insert(last_loss);
-        let logits = output[1].to_vec::<f32>()?;
-        let targets = labels.buffer().to_vec::<i32>()?;
-        let batch_correct = correct(&logits, &targets);
+        let batch_correct = metrics[1] as usize;
         total_correct += batch_correct;
-        for (update, value) in training.updates().iter().zip(output.into_iter().skip(2)) {
+        for (update, value) in training.updates().iter().zip(output.into_iter().skip(1)) {
             parameters.insert(update.path().to_owned(), value);
         }
         let measured = phase.elapsed();
@@ -595,7 +579,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let inference =
         Model::new(move |cx: &mut Cx| resnet18(cx, batch_size, false)).apply(&schema)?;
-    let inference_program = inference.compile_stateful(&mut compiler)?;
+    let inference_metrics = Tensor::stack(
+        &[
+            inference.outputs()[0].clone(),
+            inference.outputs()[2].clone(),
+        ],
+        0,
+    )?;
+    let inference_program =
+        inference.compile_stateful_tensors(&mut compiler, &[inference_metrics])?;
     let resident = session.into_state();
     let mut inference_builder = inference.session(&inference_program);
     for ((name, _), (_, buffer)) in model.states().zip(resident) {
@@ -622,11 +614,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|(name, value)| (name.as_str(), value)),
         )?;
         let output = inference_session.run(arguments.as_slice())?;
-        validation_loss += output[0].to_vec::<f32>()?[0];
-        validation_correct += correct(
-            &output[1].to_vec::<f32>()?,
-            &labels.buffer().to_vec::<i32>()?,
-        );
+        let metrics = output[0].to_vec::<f32>()?;
+        validation_loss += metrics[0];
+        validation_correct += metrics[1] as usize;
     }
     let evaluated = validation_steps * batch_size as usize;
     println!(

@@ -56,12 +56,14 @@ batch-16 and batch-64 runs use 100 steps, and batch 128 uses 50 steps:
 
 | Batch | Serialized | Pipelined | Speedup | Pipelined steady state |
 | ---: | ---: | ---: | ---: | ---: |
-| 16 | 433.9 images/s | 1,043.4 images/s | 2.40x | 1,110.7 images/s |
+| 16 | 433.9 images/s | 1,091.6 images/s | 2.52x | 1,193.6 images/s |
 | 64 | 707.3 images/s | 1,630.0 images/s | 2.30x | 1,710.9 images/s |
 | 128 | 759.3 images/s | 1,989.6 images/s | 2.62x | 2,176.0 images/s |
 
-At batch 16, steady-state input wait is 0.62 ms and upload is 0.49 ms,
-compared with 10.91 ms in CUDA execution. At batch 128 the GPU accounts for
+At batch 16, steady-state input wait is 1.13 ms and upload is 0.46 ms,
+compared with 10.80 ms in CUDA execution. Accuracy is reduced on-device and one
+`[loss, correct_count]` buffer is downloaded instead of full logits and labels;
+host metric work falls from 2.35 ms to 0.98 ms. At batch 128 the GPU accounts for
 91.8% of the measured step, so the input pipeline is no longer the primary
 bottleneck.
 
