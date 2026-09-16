@@ -61,7 +61,7 @@ impl AutoencoderKlDecoderConfig {
                 .any(|&channels| channels <= 0 || channels % self.norm_groups != 0)
         {
             return Err(Error::InvalidModel {
-                reason: "invalid AutoencoderKL decoder configuration",
+                kind: ModelDefinitionError::InvalidVaeConfiguration,
             });
         }
         Ok(())
@@ -112,7 +112,7 @@ fn resnet(
 fn attention(cx: &mut Cx, input: &Tensor, groups: i64, epsilon: f32) -> Result<Tensor> {
     let [batch, height, width, channels] = input.shape() else {
         return Err(Error::InvalidModel {
-            reason: "VAE attention expects NHWC input",
+            kind: ModelDefinitionError::InvalidVaeAttentionInput,
         });
     };
     let hidden = cx
@@ -152,11 +152,11 @@ pub fn autoencoder_kl_decoder(
     config.validate()?;
     if latent.shape().len() != 4 || latent.shape()[3] != config.latent_channels {
         return Err(Error::InvalidModel {
-            reason: "VAE decoder latent shape does not match its configuration",
+            kind: ModelDefinitionError::InvalidVaeLatentShape,
         });
     }
     let deepest = *config.block_channels.last().ok_or(Error::InvalidModel {
-        reason: "validated VAE block channels are nonempty",
+        kind: ModelDefinitionError::MissingVaeBlockChannels,
     })?;
     let mut hidden = latent.mul_scalar(1.0 / config.scaling_factor)?;
     hidden = cx

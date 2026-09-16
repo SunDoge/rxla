@@ -112,7 +112,7 @@ impl Qwen3_5Config {
             && self.epsilon > 0.0;
         if !valid {
             return Err(Error::InvalidModel {
-                reason: "invalid Qwen3.5 configuration",
+                kind: ModelDefinitionError::InvalidQwenConfiguration,
             });
         }
         Ok(())
@@ -175,12 +175,12 @@ pub fn qwen3_5(cx: &mut Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Resul
     config.validate()?;
     let [_, sequence] = token_ids.shape() else {
         return Err(Error::InvalidModel {
-            reason: "Qwen3.5 token IDs must have shape [batch, sequence]",
+            kind: ModelDefinitionError::InvalidQwenTokenShape,
         });
     };
     if token_ids.dtype() != DType::I32 || *sequence <= 0 || *sequence > config.max_positions {
         return Err(Error::InvalidModel {
-            reason: "Qwen3.5 requires nonempty in-range I32 token IDs",
+            kind: ModelDefinitionError::InvalidQwenTokens,
         });
     }
     let positions = cx.iota_i32(&[*sequence], 0)?;

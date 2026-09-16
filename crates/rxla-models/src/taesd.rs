@@ -3,7 +3,7 @@
 use rxla_core::{Conv2dOptions, Tensor};
 use rxla_nn::Cx;
 
-use crate::{Error, Result};
+use crate::{Error, ModelDefinitionError, Result};
 
 fn convolution() -> Conv2dOptions {
     Conv2dOptions {
@@ -57,7 +57,7 @@ fn transition(
 pub fn taesd_decoder(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
     if input.shape().len() != 4 || input.shape()[3] != 4 {
         return Err(Error::InvalidModel {
-            reason: "TAESD decoder expects NHWC input with four latent channels",
+            kind: ModelDefinitionError::InvalidTaesdLatentShape,
         });
     }
 
@@ -130,6 +130,11 @@ mod tests {
             taesd_decoder(cx, &image)
         })
         .trace();
-        assert!(error.is_err());
+        assert!(matches!(
+            error,
+            Err(Error::InvalidModel {
+                kind: ModelDefinitionError::InvalidTaesdLatentShape
+            })
+        ));
     }
 }

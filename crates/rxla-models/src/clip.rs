@@ -51,7 +51,7 @@ impl ClipTextConfig {
             || self.epsilon <= 0.0
         {
             return Err(Error::InvalidModel {
-                reason: "invalid CLIP text configuration",
+                kind: ModelDefinitionError::InvalidClipConfiguration,
             });
         }
         Ok(())
@@ -75,12 +75,12 @@ fn attention_projection(
 fn attention(cx: &mut Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> Result<Tensor> {
     let &[batch, length, width] = input.shape() else {
         return Err(Error::InvalidModel {
-            reason: "CLIP attention expects [batch, sequence, width]",
+            kind: ModelDefinitionError::InvalidClipAttentionInput,
         });
     };
     if heads <= 0 || width % heads != 0 {
         return Err(Error::InvalidModel {
-            reason: "CLIP attention heads must divide width",
+            kind: ModelDefinitionError::InvalidClipAttentionHeads,
         });
     }
     let head_dim = width / heads;
@@ -146,12 +146,12 @@ pub fn clip_text_encoder(
     config.validate()?;
     let [_, length] = token_ids.shape() else {
         return Err(Error::InvalidModel {
-            reason: "CLIP token IDs must have shape [batch, sequence]",
+            kind: ModelDefinitionError::InvalidClipTokenShape,
         });
     };
     if token_ids.dtype() != DType::I32 || *length <= 0 || *length > config.max_positions {
         return Err(Error::InvalidModel {
-            reason: "CLIP token IDs or sequence length are invalid",
+            kind: ModelDefinitionError::InvalidClipTokens,
         });
     }
     let positions = cx.iota_i32(token_ids.shape(), 1)?;

@@ -68,7 +68,7 @@ impl UnetConfig {
             })
         {
             return Err(Error::InvalidModel {
-                reason: "invalid Stable Diffusion UNet configuration",
+                kind: ModelDefinitionError::InvalidUnetConfiguration,
             });
         }
         Ok(())
@@ -106,11 +106,11 @@ pub fn unet(
         || context.shape()[2] != config.context_width
     {
         return Err(Error::InvalidModel {
-            reason: "UNet input shapes do not match its configuration",
+            kind: ModelDefinitionError::InvalidUnetInput,
         });
     }
     let time_width = base.checked_mul(4).ok_or(Error::InvalidModel {
-        reason: "UNet timestep width overflow",
+        kind: ModelDefinitionError::UnetTimestepWidthOverflow,
     })?;
     let temb = {
         let mut scope = cx.scope("time_embedding")?;
@@ -203,7 +203,7 @@ pub fn unet(
         let mut value = hidden;
         for layer in 0..=config.layers_per_block {
             let residual = residuals.pop().ok_or(Error::InvalidModel {
-                reason: "UNet has too few down-block residuals",
+                kind: ModelDefinitionError::MissingUnetResidual,
             })?;
             value = Tensor::concatenate(&[value, residual], 3)?;
             {
@@ -241,7 +241,7 @@ pub fn unet(
     }
     if !residuals.is_empty() {
         return Err(Error::InvalidModel {
-            reason: "UNet forward left unused residuals",
+            kind: ModelDefinitionError::UnusedUnetResidual,
         });
     }
     let hidden = cx

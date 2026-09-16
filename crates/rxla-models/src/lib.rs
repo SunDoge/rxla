@@ -4,6 +4,82 @@ use rxla_core::{Conv2dOptions, DType, Tensor};
 use rxla_nn::{Cx, Scope};
 use snafu::Snafu;
 
+/// Machine-readable model definition and input validation failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Snafu)]
+#[non_exhaustive]
+pub enum ModelDefinitionError {
+    #[snafu(display("invalid Stable Diffusion ResNet input"))]
+    InvalidStableDiffusionResnetInput,
+    #[snafu(display("Stable Diffusion ResNet input and timestep batches differ"))]
+    StableDiffusionResnetBatchMismatch,
+    #[snafu(display("invalid cross-attention input"))]
+    InvalidCrossAttentionInput,
+    #[snafu(display("attention width is not divisible by a positive head dimension"))]
+    InvalidAttentionHeadDimension,
+    #[snafu(display("feed-forward input has no feature dimension"))]
+    MissingFeedForwardDimension,
+    #[snafu(display("GEGLU hidden width overflow"))]
+    GegluHiddenWidthOverflow,
+    #[snafu(display("GEGLU projected width overflow"))]
+    GegluProjectedWidthOverflow,
+    #[snafu(display("invalid spatial-transformer input"))]
+    InvalidSpatialTransformerInput,
+    #[snafu(display("invalid Stable Diffusion UNet configuration"))]
+    InvalidUnetConfiguration,
+    #[snafu(display("UNet input shapes do not match its configuration"))]
+    InvalidUnetInput,
+    #[snafu(display("UNet timestep width overflow"))]
+    UnetTimestepWidthOverflow,
+    #[snafu(display("UNet has too few down-block residuals"))]
+    MissingUnetResidual,
+    #[snafu(display("UNet forward left unused residuals"))]
+    UnusedUnetResidual,
+    #[snafu(display("invalid CLIP text configuration"))]
+    InvalidClipConfiguration,
+    #[snafu(display("CLIP attention expects rank-three input"))]
+    InvalidClipAttentionInput,
+    #[snafu(display("CLIP attention heads do not divide its width"))]
+    InvalidClipAttentionHeads,
+    #[snafu(display("CLIP token IDs must have shape [batch, sequence]"))]
+    InvalidClipTokenShape,
+    #[snafu(display("CLIP token IDs or sequence length are invalid"))]
+    InvalidClipTokens,
+    #[snafu(display("invalid AutoencoderKL decoder configuration"))]
+    InvalidVaeConfiguration,
+    #[snafu(display("VAE attention expects NHWC input"))]
+    InvalidVaeAttentionInput,
+    #[snafu(display("VAE decoder latent shape does not match its configuration"))]
+    InvalidVaeLatentShape,
+    #[snafu(display("VAE configuration has no block channels"))]
+    MissingVaeBlockChannels,
+    #[snafu(display("TAESD decoder expects NHWC input with four latent channels"))]
+    InvalidTaesdLatentShape,
+    #[snafu(display("guidance scale must be finite"))]
+    NonFiniteGuidanceScale,
+    #[snafu(display("PNDM inference steps must be in 2..=1000"))]
+    InvalidPndmInferenceSteps,
+    #[snafu(display("PNDM timestep ratio must be positive"))]
+    InvalidPndmTimestepRatio,
+    #[snafu(display("PNDM timestep exceeds i64"))]
+    PndmTimestepTooLarge,
+    #[snafu(display("PNDM timestep ratio exceeds i64"))]
+    PndmTimestepRatioTooLarge,
+    #[snafu(display("PNDM step index is out of range"))]
+    PndmStepOutOfRange,
+    #[snafu(display("PNDM timestep overflow"))]
+    PndmTimestepOverflow,
+    #[snafu(display("PNDM produced nonfinite update coefficients"))]
+    NonFinitePndmCoefficients,
+    #[snafu(display("PNDM timestep is outside the training schedule"))]
+    PndmTimestepOutsideSchedule,
+    #[snafu(display("invalid Qwen3.5 configuration"))]
+    InvalidQwenConfiguration,
+    #[snafu(display("Qwen3.5 token IDs must have shape [batch, sequence]"))]
+    InvalidQwenTokenShape,
+    #[snafu(display("Qwen3.5 requires nonempty in-range I32 token IDs"))]
+    InvalidQwenTokens,
+}
+
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum Error {
@@ -11,8 +87,8 @@ pub enum Error {
     Nn { source: rxla_nn::Error },
     #[snafu(transparent)]
     Tensor { source: rxla_core::Error },
-    #[snafu(display("invalid model definition: {reason}"))]
-    InvalidModel { reason: &'static str },
+    #[snafu(display("invalid model definition: {kind}"))]
+    InvalidModel { kind: ModelDefinitionError },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -82,12 +158,12 @@ pub fn resnet2d(
 ) -> Result<Tensor> {
     if input.shape().len() != 4 || timestep_embedding.shape().len() != 2 {
         return Err(Error::InvalidModel {
-            reason: "stable diffusion ResNet expects NHWC input and rank-two timestep embedding",
+            kind: ModelDefinitionError::InvalidStableDiffusionResnetInput,
         });
     }
     if input.shape()[0] != timestep_embedding.shape()[0] {
         return Err(Error::InvalidModel {
-            reason: "stable diffusion ResNet input and timestep batches must match",
+            kind: ModelDefinitionError::StableDiffusionResnetBatchMismatch,
         });
     }
     let convolution = Conv2dOptions {
@@ -165,7 +241,7 @@ fn cross_attention(cx: &mut Cx, query: &Tensor, context: &Tensor, head_dim: i64)
         || query.shape()[0] != context.shape()[0]
     {
         return Err(Error::InvalidModel {
-            reason: "cross attention expects rank-three query/context with equal batches",
+            kind: ModelDefinitionError::InvalidCrossAttentionInput,
         });
     }
     let [batch, query_length, width] = query.shape() else {
@@ -173,7 +249,7 @@ fn cross_attention(cx: &mut Cx, query: &Tensor, context: &Tensor, head_dim: i64)
     };
     if head_dim <= 0 || *width <= 0 || width % head_dim != 0 {
         return Err(Error::InvalidModel {
-            reason: "attention width must be divisible by positive head_dim",
+            kind: ModelDefinitionError::InvalidAttentionHeadDimension,
         });
     }
     let heads = width / head_dim;
@@ -212,13 +288,13 @@ fn cross_attention(cx: &mut Cx, query: &Tensor, context: &Tensor, head_dim: i64)
 
 fn feed_forward(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
     let width = *input.shape().last().ok_or(Error::InvalidModel {
-        reason: "feed-forward input must have a feature dimension",
+        kind: ModelDefinitionError::MissingFeedForwardDimension,
     })?;
     let hidden = width.checked_mul(4).ok_or(Error::InvalidModel {
-        reason: "GEGLU hidden width overflow",
+        kind: ModelDefinitionError::GegluHiddenWidthOverflow,
     })?;
     let projected = hidden.checked_mul(2).ok_or(Error::InvalidModel {
-        reason: "GEGLU projected width overflow",
+        kind: ModelDefinitionError::GegluProjectedWidthOverflow,
     })?;
     let projected = cx
         .scope("net")?
@@ -267,7 +343,7 @@ pub fn spatial_transformer(
         || options.layers == 0
     {
         return Err(Error::InvalidModel {
-            reason: "spatial transformer expects NHWC input, rank-three context, equal batches and layers",
+            kind: ModelDefinitionError::InvalidSpatialTransformerInput,
         });
     }
     let [batch, height, width, channels] = input.shape() else {
