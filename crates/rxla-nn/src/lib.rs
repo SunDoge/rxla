@@ -98,6 +98,11 @@ pub enum Error {
         kind: &'static str,
         identity: String,
     },
+    #[snafu(display("{kind} {identity}: buffer belongs to another PJRT client"))]
+    BufferClient {
+        kind: &'static str,
+        identity: String,
+    },
     #[snafu(display("{layer} requires {requirement}"))]
     InvalidLayerInput {
         layer: &'static str,
@@ -1138,12 +1143,19 @@ mod tests {
             applied.session(&program).build(),
             Err(Error::MissingResidentParameterInitializer { .. })
         ));
+        let wrong_shape = client.buffer(&[3, 2], &[0.0; 6]).unwrap();
+        assert!(matches!(
+            applied
+                .session(&program)
+                .parameter("head.weight", wrong_shape),
+            Err(Error::BufferShape { .. })
+        ));
         let weight = client
             .buffer(&[2, 3], &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
             .unwrap();
         let mut session = applied
             .session(&program)
-            .parameter("head.weight", weight)
+            .parameters([("head.weight", weight)])
             .unwrap()
             .build()
             .unwrap();

@@ -450,12 +450,16 @@ impl AppliedModel {
 impl ModelSessionBuilder<'_> {
     pub fn state(mut self, name: impl Into<String>, value: Buffer) -> Result<Self> {
         let name = name.into();
-        ensure!(
-            self.model.states.iter().any(|(path, _)| path == &name),
-            InvalidDefinitionSnafu {
-                message: format!("unknown state {name:?}")
-            }
-        );
+        let slot = self
+            .model
+            .states
+            .iter()
+            .find(|(path, _)| path == &name)
+            .map(|(_, slot)| slot)
+            .with_context(|| InvalidDefinitionSnafu {
+                message: format!("unknown state {name:?}"),
+            })?;
+        validate_session_buffer(self.program, &value, slot, "state", &name)?;
         ensure!(
             self.overrides.insert(name.clone(), value).is_none(),
             InvalidDefinitionSnafu {
@@ -465,17 +469,28 @@ impl ModelSessionBuilder<'_> {
         Ok(self)
     }
 
+    /// Initialize several named model/transform states.
+    pub fn states<K>(mut self, values: impl IntoIterator<Item = (K, Buffer)>) -> Result<Self>
+    where
+        K: Into<String>,
+    {
+        for (name, value) in values {
+            self = self.state(name, value)?;
+        }
+        Ok(self)
+    }
+
     /// Initialize one resident parameter by its canonical schema path.
     pub fn parameter(mut self, path: impl Into<String>, value: Buffer) -> Result<Self> {
         let path = path.into();
-        ensure!(
-            self.model
-                .resident_parameters()
-                .any(|(_, spec, _)| spec.path() == path),
-            InvalidDefinitionSnafu {
-                message: format!("unknown resident parameter {path:?}")
-            }
-        );
+        let (_, _, slot) = self
+            .model
+            .resident_parameters()
+            .find(|(_, spec, _)| spec.path() == path)
+            .with_context(|| InvalidDefinitionSnafu {
+                message: format!("unknown resident parameter {path:?}"),
+            })?;
+        validate_session_buffer(self.program, &value, slot, "resident parameter", &path)?;
         ensure!(
             self.parameter_overrides
                 .insert(path.clone(), value)
@@ -484,6 +499,17 @@ impl ModelSessionBuilder<'_> {
                 message: format!("duplicate resident parameter initializer {path:?}")
             }
         );
+        Ok(self)
+    }
+
+    /// Initialize resident parameters from a checkpoint-style name/buffer map.
+    pub fn parameters<K>(mut self, values: impl IntoIterator<Item = (K, Buffer)>) -> Result<Self>
+    where
+        K: Into<String>,
+    {
+        for (path, value) in values {
+            self = self.parameter(path, value)?;
+        }
         Ok(self)
     }
 
@@ -574,4 +600,23 @@ fn validate_buffer(
         }
     );
     Ok(())
+}
+
+fn validate_session_buffer(
+    program: &StateProgram,
+    buffer: &Buffer,
+    slot: &StateSlot,
+    kind: &'static str,
+    identity: impl std::fmt::Display,
+) -> Result<()> {
+    let identity = identity.to_string();
+    ensure!(
+        buffer.belongs_to(program.client()),
+        BufferClientSnafu {
+            kind,
+            identity: identity.clone(),
+        }
+    );
+    let (dtype, shape) = program.state_type(slot)?;
+    validate_buffer(buffer, &shape, dtype, kind, identity)
 }

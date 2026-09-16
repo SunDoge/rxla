@@ -184,6 +184,9 @@ rxla_train::apply_model_sgd(&mut model, &trainable, &loss, 0.01)?;
 The selected `ParameterSelection` is interpreted as session-owned state.
 Those parameters disappear from the visible execution ABI and must be
 initialized once, by canonical schema path, through `ModelSessionBuilder`.
+`parameters(iter)` accepts a complete checkpoint-style stream of owned
+name/buffer pairs; each entry is checked immediately for residency, PJRT client,
+shape, dtype and duplication rather than failing later during session creation.
 F32, BF16 and U8 storage preserve the same symbolic semantics as input-backed
 parameters, so frozen and quantized inference weights can use this policy too.
 
