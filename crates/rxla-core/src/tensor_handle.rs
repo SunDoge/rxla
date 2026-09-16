@@ -708,6 +708,14 @@ impl Tensor {
         if outputs.len() != values.len() {
             return Err(err("materialized output count mismatch"));
         }
+        let Some(first) = outputs.first() else {
+            return Ok(());
+        };
+        let first_trace = first.trace_value()?;
+        let first_session = first_trace
+            .lazy
+            .as_ref()
+            .ok_or_else(|| err("eval output does not belong to an implicit lazy session"))?;
         let bindings = outputs
             .iter()
             .zip(values)
@@ -731,7 +739,7 @@ impl Tensor {
                     "eval output does not belong to an implicit lazy session",
                 ));
             };
-            if !std::rc::Rc::ptr_eq(session, outputs[0].trace_value()?.lazy.as_ref().unwrap()) {
+            if !std::rc::Rc::ptr_eq(session, first_session) {
                 return Err(err("eval outputs belong to different lazy sessions"));
             }
             if replacements
@@ -758,13 +766,12 @@ impl Tensor {
             ));
         }
 
-        let session = outputs[0].trace_value()?.lazy.as_ref().unwrap();
-        let mut graph = session
+        let mut graph = first_session
             .graph
             .0
             .lock()
             .map_err(|_| err("graph lock poisoned"))?;
-        let mut inputs = session.inputs.borrow_mut();
+        let mut inputs = first_session.inputs.borrow_mut();
         for (id, ty, backing) in replacements {
             if graph.parameter_number(id)?.is_some() {
                 continue;
@@ -1084,6 +1091,15 @@ mod tests {
             Err(TensorDownloadError::NotMaterialized)
         ));
         assert!(!lazy.is_materialized());
+    }
+
+    #[test]
+    fn materialization_rejects_explicit_traces_without_panicking() {
+        assert!(Tensor::materialize_all(&[], &[]).is_ok());
+
+        let explicit = Graph::default().input(&[1]).unwrap();
+        let value = Tensor::from_slice([1], DType::F32, [1.0]).unwrap();
+        assert!(Tensor::materialize_all(&[explicit], &[value]).is_err());
     }
 
     #[test]
