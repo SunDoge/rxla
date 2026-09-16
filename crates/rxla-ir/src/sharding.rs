@@ -2,18 +2,52 @@ use snafu::Snafu;
 use std::collections::HashSet;
 
 #[derive(Debug, Snafu)]
-#[snafu(display("invalid sharding: {message}"))]
-pub struct ShardingError {
-    message: String,
+#[non_exhaustive]
+pub enum ShardingError {
+    #[snafu(display("mesh axis name cannot be empty"))]
+    EmptyMeshAxisName,
+    #[snafu(display("mesh axis {name:?} must have nonzero size"))]
+    ZeroMeshAxisSize { name: String },
+    #[snafu(display("mesh axis {name:?} is declared more than once"))]
+    DuplicateMeshAxis { name: String },
+    #[snafu(display("mesh device count overflows usize"))]
+    DeviceCountOverflow,
+    #[snafu(display("partition axis name cannot be empty"))]
+    EmptyPartitionAxisName,
+    #[snafu(display("{field} cannot be represented by the sharding IR encoding"))]
+    EncodingOverflow { field: &'static str },
+    #[snafu(display("unsupported sharding attribute version {version}"))]
+    UnsupportedEncodingVersion { version: u8 },
+    #[snafu(display("invalid {field} tag {value} in sharding attribute"))]
+    InvalidEncodingTag { field: &'static str, value: u8 },
+    #[snafu(display("{field} in sharding attribute overflows usize"))]
+    DecodedValueOverflow { field: &'static str },
+    #[snafu(display("trailing bytes in sharding attribute"))]
+    TrailingBytes,
+    #[snafu(display("partition spec rank {spec_rank} does not match tensor rank {tensor_rank}"))]
+    RankMismatch {
+        spec_rank: usize,
+        tensor_rank: usize,
+    },
+    #[snafu(display("mesh axis {name:?} cannot partition multiple tensor dimensions"))]
+    ReusedMeshAxis { name: String },
+    #[snafu(display("partition spec references unknown mesh axis {name:?}"))]
+    UnknownMeshAxis { name: String },
+    #[snafu(display(
+        "tensor dimension {dimension} is not divisible by mesh axis {axis:?} of size {axis_size}"
+    ))]
+    IndivisibleDimension {
+        dimension: i64,
+        axis: String,
+        axis_size: usize,
+    },
+    #[snafu(display("truncated sharding attribute"))]
+    TruncatedEncoding,
+    #[snafu(display("sharding attribute contains invalid UTF-8"))]
+    InvalidUtf8,
 }
 
 type Result<T> = std::result::Result<T, ShardingError>;
-
-fn err(message: impl Into<String>) -> ShardingError {
-    ShardingError {
-        message: message.into(),
-    }
-}
 
 /// A named logical device mesh. Physical devices are assigned later by a planner.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -32,10 +66,14 @@ impl Mesh {
         let mut names = HashSet::with_capacity(N);
         let mut owned = Vec::with_capacity(N);
         for (name, size) in axes {
-            if name.is_empty() || size == 0 || !names.insert(name) {
-                return Err(err(
-                    "mesh axes require unique nonempty names and nonzero sizes",
-                ));
+            if name.is_empty() {
+                return Err(ShardingError::EmptyMeshAxisName);
+            }
+            if size == 0 {
+                return Err(ShardingError::ZeroMeshAxisSize { name: name.into() });
+            }
+            if !names.insert(name) {
+                return Err(ShardingError::DuplicateMeshAxis { name: name.into() });
             }
             owned.push(MeshAxis {
                 name: name.into(),
@@ -53,7 +91,7 @@ impl Mesh {
         self.axes.iter().try_fold(1usize, |count, axis| {
             count
                 .checked_mul(axis.size)
-                .ok_or_else(|| err("mesh device count overflows usize"))
+                .ok_or(ShardingError::DeviceCountOverflow)
         })
     }
 
@@ -83,7 +121,7 @@ pub struct PartitionSpec(Vec<Option<String>>);
 impl PartitionSpec {
     pub fn new<const N: usize>(axes: [Option<&str>; N]) -> Result<Self> {
         if axes.iter().flatten().any(|name| name.is_empty()) {
-            return Err(err("partition axis names cannot be empty"));
+            return Err(ShardingError::EmptyPartitionAxisName);
         }
         Ok(Self(
             axes.into_iter()
@@ -127,7 +165,9 @@ impl Sharding {
             encode_string(&mut bytes, &axis.name)?;
             bytes.extend_from_slice(
                 &u64::try_from(axis.size)
-                    .map_err(|_| err("mesh axis size cannot be encoded"))?
+                    .map_err(|_| ShardingError::EncodingOverflow {
+                        field: "mesh axis size",
+                    })?
                     .to_le_bytes(),
             );
         }
@@ -146,32 +186,69 @@ impl Sharding {
     #[doc(hidden)]
     pub fn decode_ir(bytes: &[u8]) -> Result<Self> {
         let mut decoder = Decoder::new(bytes);
-        if decoder.byte()? != 1 {
-            return Err(err("unsupported sharding attribute version"));
+        let version = decoder.byte()?;
+        if version != 1 {
+            return Err(ShardingError::UnsupportedEncodingVersion { version });
         }
         let partitioned = match decoder.byte()? {
             0 => false,
             1 => true,
-            _ => return Err(err("invalid sharding attribute kind")),
+            value => {
+                return Err(ShardingError::InvalidEncodingTag {
+                    field: "sharding kind",
+                    value,
+                });
+            }
         };
         let axis_count = decoder.len()?;
         let mut axes = Vec::with_capacity(axis_count);
+        let mut axis_names = HashSet::with_capacity(axis_count);
         for _ in 0..axis_count {
             let name = decoder.string()?;
-            let size = usize::try_from(decoder.u64()?)
-                .map_err(|_| err("mesh axis size overflows usize"))?;
+            let size = usize::try_from(decoder.u64()?).map_err(|_| {
+                ShardingError::DecodedValueOverflow {
+                    field: "mesh axis size",
+                }
+            })?;
+            if name.is_empty() {
+                return Err(ShardingError::EmptyMeshAxisName);
+            }
+            if size == 0 {
+                return Err(ShardingError::ZeroMeshAxisSize { name });
+            }
+            if !axis_names.insert(name.clone()) {
+                return Err(ShardingError::DuplicateMeshAxis { name });
+            }
             axes.push(MeshAxis { name, size });
         }
         let mesh = Mesh { axes };
         let sharding = if partitioned {
             let spec_count = decoder.len()?;
             let mut spec = Vec::with_capacity(spec_count);
+            let mut used = HashSet::new();
             for _ in 0..spec_count {
-                spec.push(match decoder.byte()? {
+                let axis = match decoder.byte()? {
                     0 => None,
                     1 => Some(decoder.string()?),
-                    _ => return Err(err("invalid partition axis tag")),
-                });
+                    value => {
+                        return Err(ShardingError::InvalidEncodingTag {
+                            field: "partition axis",
+                            value,
+                        });
+                    }
+                };
+                if let Some(name) = axis.as_ref() {
+                    if name.is_empty() {
+                        return Err(ShardingError::EmptyPartitionAxisName);
+                    }
+                    if !axis_names.contains(name) {
+                        return Err(ShardingError::UnknownMeshAxis { name: name.clone() });
+                    }
+                    if !used.insert(name.clone()) {
+                        return Err(ShardingError::ReusedMeshAxis { name: name.clone() });
+                    }
+                }
+                spec.push(axis);
             }
             Self::Partitioned {
                 mesh,
@@ -181,7 +258,7 @@ impl Sharding {
             Self::Replicated { mesh }
         };
         if !decoder.remaining().is_empty() {
-            return Err(err("trailing bytes in sharding attribute"));
+            return Err(ShardingError::TrailingBytes);
         }
         Ok(sharding)
     }
@@ -192,21 +269,26 @@ impl Sharding {
             return Ok(());
         };
         if spec.0.len() != shape.len() {
-            return Err(err("partition spec rank does not match tensor rank"));
+            return Err(ShardingError::RankMismatch {
+                spec_rank: spec.0.len(),
+                tensor_rank: shape.len(),
+            });
         }
         let mut used = HashSet::new();
         for (&dimension, axis) in shape.iter().zip(&spec.0) {
             let Some(axis) = axis else { continue };
             if !used.insert(axis) {
-                return Err(err(
-                    "a mesh axis cannot partition multiple tensor dimensions",
-                ));
+                return Err(ShardingError::ReusedMeshAxis { name: axis.clone() });
             }
             let size = mesh
                 .axis_size(axis)
-                .ok_or_else(|| err("partition spec references an unknown mesh axis"))?;
+                .ok_or_else(|| ShardingError::UnknownMeshAxis { name: axis.clone() })?;
             if dimension < 0 || !(dimension as usize).is_multiple_of(size) {
-                return Err(err("tensor dimension is not divisible by its mesh axis"));
+                return Err(ShardingError::IndivisibleDimension {
+                    dimension,
+                    axis: axis.clone(),
+                    axis_size: size,
+                });
             }
         }
         Ok(())
@@ -216,7 +298,9 @@ impl Sharding {
 fn encode_len(bytes: &mut Vec<u8>, len: usize) -> Result<()> {
     bytes.extend_from_slice(
         &u64::try_from(len)
-            .map_err(|_| err("sharding attribute length cannot be encoded"))?
+            .map_err(|_| ShardingError::EncodingOverflow {
+                field: "attribute length",
+            })?
             .to_le_bytes(),
     );
     Ok(())
@@ -243,7 +327,7 @@ impl<'a> Decoder<'a> {
         let (value, rest) = self
             .0
             .split_at_checked(len)
-            .ok_or_else(|| err("truncated sharding attribute"))?;
+            .ok_or(ShardingError::TruncatedEncoding)?;
         self.0 = rest;
         Ok(value)
     }
@@ -253,17 +337,20 @@ impl<'a> Decoder<'a> {
     }
 
     fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(self.take(8)?);
+        Ok(u64::from_le_bytes(bytes))
     }
 
     fn len(&mut self) -> Result<usize> {
-        usize::try_from(self.u64()?).map_err(|_| err("sharding attribute length overflows usize"))
+        usize::try_from(self.u64()?).map_err(|_| ShardingError::DecodedValueOverflow {
+            field: "attribute length",
+        })
     }
 
     fn string(&mut self) -> Result<String> {
         let len = self.len()?;
-        String::from_utf8(self.take(len)?.to_vec())
-            .map_err(|_| err("sharding attribute contains invalid UTF-8"))
+        String::from_utf8(self.take(len)?.to_vec()).map_err(|_| ShardingError::InvalidUtf8)
     }
 }
 
@@ -289,7 +376,14 @@ mod tests {
             .validate_shape(&[8, 16])
             .is_err()
         );
-        assert!(Mesh::new([("data", 2), ("data", 4)]).is_err());
+        assert!(matches!(
+            Mesh::new([("data", 2), ("data", 4)]),
+            Err(ShardingError::DuplicateMeshAxis { name }) if name == "data"
+        ));
+        assert!(matches!(
+            Mesh::new([("data", 0)]),
+            Err(ShardingError::ZeroMeshAxisSize { name }) if name == "data"
+        ));
     }
 
     #[test]
@@ -302,6 +396,19 @@ mod tests {
             Sharding::decode_ir(&sharding.encode_ir().unwrap()).unwrap(),
             sharding
         );
-        assert!(Sharding::decode_ir(&[1, 1]).is_err());
+        assert!(matches!(
+            Sharding::decode_ir(&[1, 1]),
+            Err(ShardingError::TruncatedEncoding)
+        ));
+
+        let mut zero_axis = vec![1, 0];
+        zero_axis.extend_from_slice(&1_u64.to_le_bytes());
+        zero_axis.extend_from_slice(&4_u64.to_le_bytes());
+        zero_axis.extend_from_slice(b"data");
+        zero_axis.extend_from_slice(&0_u64.to_le_bytes());
+        assert!(matches!(
+            Sharding::decode_ir(&zero_axis),
+            Err(ShardingError::ZeroMeshAxisSize { name }) if name == "data"
+        ));
     }
 }
