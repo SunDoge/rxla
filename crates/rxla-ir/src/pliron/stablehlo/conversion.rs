@@ -431,6 +431,18 @@ impl DialectConversion for RxlaToStableHlo {
                 ConvolutionConfigAttr::new(value.get_attr_oihw_options(ctx).unwrap().options())
             );
         }
+        if let Some(value) = source.as_ref().downcast_ref::<Conv2dKernelGradientOp>() {
+            replace_attr!(
+                StableConvolutionKernelGradientOp,
+                set_attr_stable_kernel_gradient_config,
+                ConvolutionConfigAttr::new(
+                    value
+                        .get_attr_kernel_gradient_options(ctx)
+                        .unwrap()
+                        .options()
+                )
+            );
+        }
         if let Some(value) = source.as_ref().downcast_ref::<ConvTranspose2dOp>() {
             replace_attr!(
                 StableTransposeConvolutionOp,
@@ -645,6 +657,7 @@ pub(super) fn supports_source_operation(op: &dyn PlironOp) -> bool {
         || op.is::<MatmulOp>()
         || op.is::<Conv2dOp>()
         || op.is::<Conv2dOihwOp>()
+        || op.is::<Conv2dKernelGradientOp>()
         || op.is::<ConvTranspose2dOp>()
         || op.is::<MaxPool2dOp>()
         || op.is::<SumPool2dOp>()

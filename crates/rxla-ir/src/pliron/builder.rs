@@ -234,7 +234,13 @@ impl IrGraph {
                 let [input] = operands else { return None };
                 self.sorted_indices_typed(*input, result, *axis, *descending)
             }
-            Op::Conv2dInputGradient(_) | Op::Conv2dKernelGradient(_) => {
+            Op::Conv2dKernelGradient(options) => {
+                let [input, output_gradient] = operands else {
+                    return None;
+                };
+                self.conv2d_kernel_gradient_typed(*input, *output_gradient, result, *options)
+            }
+            Op::Conv2dInputGradient(_) => {
                 return None;
             }
         })

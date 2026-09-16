@@ -588,7 +588,11 @@ impl Tensor {
                             );
                             add(
                                 1,
-                                conv2d_kernel_gradient(&input, &dy, kernel.shape(), *options)?,
+                                self.graph().node(
+                                    Op::Conv2dKernelGradient(*options),
+                                    vec![input.node_id(), dy.node_id()],
+                                    kernel.shape(),
+                                )?,
                             );
                         } else {
                             add(
@@ -637,7 +641,11 @@ impl Tensor {
                         let (input_gradient, gradient) = if options.groups == 1 {
                             (
                                 conv2d_input_gradient(&dy, &hwio, input.shape(), *options)?,
-                                conv2d_kernel_gradient(&input, &dy, &hwio_shape, *options)?,
+                                self.graph().node(
+                                    Op::Conv2dKernelGradient(*options),
+                                    vec![input.node_id(), dy.node_id()],
+                                    &hwio_shape,
+                                )?,
                             )
                         } else {
                             (
@@ -749,45 +757,6 @@ fn conv2d_input_gradient(
             output_padding,
         },
     )
-}
-
-fn conv2d_kernel_gradient(
-    input: &Tensor,
-    output_gradient: &Tensor,
-    kernel_shape: &[i64],
-    options: Conv2dOptions,
-) -> Result<Tensor> {
-    let padded = input.pad(
-        &[[0, 0], options.padding[0], options.padding[1], [0, 0]],
-        0.0,
-    )?;
-    let positions =
-        output_gradient.shape()[0] * output_gradient.shape()[1] * output_gradient.shape()[2];
-    let gradient = output_gradient.reshape(&[positions, output_gradient.shape()[3]])?;
-    let mut locations = Vec::with_capacity((kernel_shape[0] * kernel_shape[1]) as usize);
-    for row in 0..kernel_shape[0] {
-        for column in 0..kernel_shape[1] {
-            let start_row = row * options.dilation[0];
-            let start_column = column * options.dilation[1];
-            let patch = padded.slice(
-                &[0, start_row, start_column, 0],
-                &[
-                    input.shape()[0],
-                    start_row + (output_gradient.shape()[1] - 1) * options.strides[0] + 1,
-                    start_column + (output_gradient.shape()[2] - 1) * options.strides[1] + 1,
-                    input.shape()[3],
-                ],
-                &[1, options.strides[0], options.strides[1], 1],
-            )?;
-            locations.push(
-                patch
-                    .reshape(&[positions, input.shape()[3]])?
-                    .transpose(&[1, 0])?
-                    .matmul(&gradient)?,
-            );
-        }
-    }
-    Tensor::stack(&locations, 0)?.reshape(kernel_shape)
 }
 
 #[cfg(test)]

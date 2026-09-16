@@ -299,6 +299,15 @@ pub(super) struct Conv2dOp;
 pub(super) struct Conv2dOihwOp;
 
 #[pliron_op(
+    name = "rxla.conv2d_kernel_gradient",
+    format = "$0 `, ` $1 ` ` attr($kernel_gradient_options, $Conv2dOptionsAttr) ` : ` type($0) `, ` type($1) ` -> ` type($2)",
+    interfaces = [NOpdsInterface<2>, OneResultInterface],
+    attributes = (kernel_gradient_options: Conv2dOptionsAttr),
+    verifier = "succ"
+)]
+pub(super) struct Conv2dKernelGradientOp;
+
+#[pliron_op(
     name = "rxla.conv_transpose2d",
     format = "$0 `, ` $1 ` ` attr($transpose_options, $ConvTranspose2dOptionsAttr) ` : ` type($0) `, ` type($1) ` -> ` type($2)",
     interfaces = [NOpdsInterface<2>, OneResultInterface],

@@ -109,7 +109,7 @@ fn real_transposed_convolution_gradients_match_scalar_scatter() {
 }
 
 #[test]
-fn transposed_kernel_gradient_is_outside_the_supported_training_surface() {
+fn transposed_kernel_gradient_lowers_to_supported_ir() {
     let g = Tracer::default();
     let x = g.input(&[1, 2, 2, 1]).unwrap();
     let w = g.input(&[2, 2, 1, 1]).unwrap();
@@ -118,9 +118,8 @@ fn transposed_kernel_gradient_is_outside_the_supported_training_surface() {
         .unwrap()
         .sum(&[0, 1, 2, 3], false)
         .unwrap();
-    let error = loss
-        .grad(std::slice::from_ref(&w))
-        .err()
-        .expect("transposed convolution training is intentionally unsupported");
-    assert!(error.to_string().contains("Conv2dKernelGradient"));
+    let gradient = loss.grad(std::slice::from_ref(&w)).unwrap();
+    let lowered = g.prepare_many(&gradient).unwrap();
+    let stablehlo = std::str::from_utf8(lowered.code()).unwrap();
+    assert!(stablehlo.contains("[f, 0, 1, b]x[i, 0, 1, o]->[0, 1, b, f]"));
 }

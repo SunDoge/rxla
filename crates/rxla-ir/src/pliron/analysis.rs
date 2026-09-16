@@ -234,6 +234,16 @@ impl IrGraph {
                 required_attr!(value, get_attr_oihw_options, "conv2d OIHW options").options(),
             ));
         }
+        if let Some(value) = op.downcast_ref::<Conv2dKernelGradientOp>() {
+            return Ok(Op::Conv2dKernelGradient(
+                required_attr!(
+                    value,
+                    get_attr_kernel_gradient_options,
+                    "conv2d kernel-gradient options"
+                )
+                .options(),
+            ));
+        }
         if let Some(value) = op.downcast_ref::<ConvTranspose2dOp>() {
             return Ok(Op::ConvTranspose2d(
                 required_attr!(value, get_attr_transpose_options, "conv transpose options")

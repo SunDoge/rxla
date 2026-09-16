@@ -304,6 +304,15 @@ pub(super) struct StableConvolutionOp;
 pub(super) struct StableConvolutionOihwOp;
 
 #[pliron_op(
+    name = "stablehlo.convolution_kernel_gradient",
+    format,
+    interfaces = [NOpdsInterface<2>, OneResultInterface],
+    attributes = (stable_kernel_gradient_config: ConvolutionConfigAttr),
+    verifier = "succ"
+)]
+pub(super) struct StableConvolutionKernelGradientOp;
+
+#[pliron_op(
     name = "stablehlo.transpose_convolution",
     format,
     interfaces = [NOpdsInterface<2>, OneResultInterface],

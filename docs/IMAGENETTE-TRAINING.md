@@ -30,15 +30,34 @@ largest 3,920-image validation prefix:
 
 ```text
 step    0: loss 2.460432, accuracy 18.8%
-step  100: loss 1.988489, accuracy 31.2%
-step  200: loss 1.574203, accuracy 50.0%
-step  300: loss 1.248637, accuracy 56.2%
-step  400: loss 1.477461, accuracy 31.2%
-step  500: loss 2.694305, accuracy 25.0%
-step  599: loss 0.578183, accuracy 81.2%
-train: loss 2.460432 -> 0.578183, mean accuracy 45.3%, 449.3 images/s
-validation: loss 1.610165, top-1 49.39% (1936/3920)
+step  100: loss 1.727793, accuracy 37.5%
+step  200: loss 1.733194, accuracy 50.0%
+step  300: loss 1.201419, accuracy 62.5%
+step  400: loss 1.559697, accuracy 37.5%
+step  500: loss 2.390429, accuracy 25.0%
+step  599: loss 0.642041, accuracy 81.2%
+train: loss 2.460432 -> 0.642041, mean accuracy 45.2%, 433.9 images/s
+validation: loss 1.520570, top-1 51.66% (2025/3920)
 ```
+
+The current native StableHLO convolution-filter gradient reaches 433.9 images/s
+at batch 16. This is 3.4% below the earlier slice-and-GEMM lowering's 449.3
+images/s on the same run shape, so the cleaner lowering is not yet a CUDA speed
+win. It does remove the nine-GEMM expansion of every 3x3 filter gradient and is
+covered by scalar-reference tests for stride, dilation, and asymmetric padding.
+
+Larger batches expose considerably more of the RTX 5080's throughput:
+
+| Batch | Training throughput |
+| ---: | ---: |
+| 16 | 433.9 images/s |
+| 64 | 707.3 images/s |
+| 128 | 759.3 images/s |
+
+These are end-to-end figures rather than isolated model kernel benchmarks. The
+flattening above batch 64, together with remaining XLA `gemm_fusion` register
+spills, leaves substantial optimization work in both the input pipeline and
+generated GPU program.
 
 The training throughput excludes compilation and initial directory scanning,
 but includes JPEG input work, CPU augmentation, transfers, CUDA execution, and

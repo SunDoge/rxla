@@ -207,6 +207,24 @@ impl IrGraph {
         self.push(op)
     }
 
+    fn conv2d_kernel_gradient_typed(
+        &mut self,
+        input: Value,
+        output_gradient: Value,
+        result: &TensorType,
+        options: Conv2dOptions,
+    ) -> Value {
+        let ty = self.tensor_type(&result.dims, result.dtype);
+        let op = construct_op!(
+            Conv2dKernelGradientOp,
+            &mut self.ctx,
+            vec![ty],
+            vec![input, output_gradient]
+        );
+        op.set_attr_kernel_gradient_options(&self.ctx, Conv2dOptionsAttr::new(options));
+        self.push(op)
+    }
+
     fn conv_transpose2d_typed(
         &mut self,
         input: Value,

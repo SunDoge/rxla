@@ -153,8 +153,10 @@ fn ungrouped_convolution_training_lowers_to_supported_ir() {
         .unwrap()
         .sum(&[0, 1, 2, 3], false)
         .unwrap();
-    let gradient = loss.grad(std::slice::from_ref(&x)).unwrap();
-    let lowered = g.prepare_many(&gradient).unwrap();
+    let gradients = loss.grad(&[x, w]).unwrap();
+    let lowered = g.prepare_many(&gradients).unwrap();
     let stablehlo = std::str::from_utf8(lowered.code()).unwrap();
-    assert!(stablehlo.contains("stablehlo.convolution"));
+    assert_eq!(stablehlo.matches("stablehlo.convolution").count(), 2);
+    assert!(stablehlo.contains("[f, 0, 1, b]x[i, 0, 1, o]->[0, 1, b, f]"));
+    assert!(!stablehlo.contains("stablehlo.dot_general"));
 }
