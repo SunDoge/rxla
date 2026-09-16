@@ -4,7 +4,10 @@ RXLA's training example uses the CIFAR ResNet-20 layout: one stem convolution,
 three stages with three two-convolution residual blocks each, and a linear
 classifier. Stage transitions use stride-two option-A shortcuts. All 19
 BatchNorm layers update resident mean and variance state in the same compiled
-program as forward, backward, and SGD.
+program as forward, backward, and SGD. Model parameters are resident too: they
+are initialized once, SGD writes are hidden state transitions, and each training
+step's public ABI contains only images and labels as inputs plus loss and logits
+as outputs.
 
 Prepare the dataset through the uv-managed torchvision dependency:
 
@@ -48,6 +51,14 @@ complete stateful training path; it is not a full-epoch benchmark or a claim
 about final test accuracy. Random crop, momentum/weight decay, learning-rate
 scheduling, checkpointing, and inference-mode test evaluation remain future
 training-example work.
+
+`upload_pinned` opportunistically uses PJRT DMA mapping. Backends such as the
+zml CPU plugin that advertise the API slot but return `Unimplemented` fall back
+to an owned asynchronous host transfer, which keeps this same example usable as
+a CPU correctness path. A one-step synthetic resident-parameter run on that CPU
+plugin completed at 11.1 images/s; it is a functional check, not a CPU benchmark.
+The RTX 5080 figures above predate the resident-parameter migration and should
+be remeasured before attributing a throughput change to that refactor.
 
 An extended 2,000-step run (about 5.1 passes over 50,000 images) with the same
 configuration remained stable and reached:

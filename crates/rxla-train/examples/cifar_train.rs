@@ -11,8 +11,7 @@ use rxla_core::{
     Buffer, CacheLimits, Client, Compiler, Conv2dOptions, DType, PendingHostUpload, Runtime, Tensor,
 };
 use rxla_nn::{Cx, Model, ModelInput, ParamSchema, Result as NnResult};
-use rxla_train::{DataRng, prepare_model_sgd};
-use std::collections::BTreeMap;
+use rxla_train::{DataRng, apply_model_sgd};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -219,8 +218,8 @@ fn classifier_inputs(batch_size: i64) -> (ModelInput, ModelInput) {
 fn initialized_parameters(
     client: &Client,
     schema: &ParamSchema,
-) -> Result<BTreeMap<String, Buffer>, Box<dyn std::error::Error>> {
-    let mut result = BTreeMap::new();
+) -> Result<Vec<(String, Buffer)>, Box<dyn std::error::Error>> {
+    let mut result = Vec::with_capacity(schema.parameters().len());
     let mut state = 0x4d59_5df4_d0f3_3173_u64;
     for spec in schema.parameters() {
         let count = spec.shape().iter().product::<i64>() as usize;
@@ -247,10 +246,10 @@ fn initialized_parameters(
                 (unit * 2.0 - 1.0) * scale
             })
             .collect::<Vec<_>>();
-        result.insert(
+        result.push((
             spec.path().to_owned(),
             client.buffer(spec.shape(), &values)?,
-        );
+        ));
     }
     Ok(result)
 }
@@ -320,26 +319,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gpu = unsafe { Client::load(&args.gpu_plugin) }?;
     let mut augmentation_runtime = Runtime::new(cpu);
     let batch_size = args.batch_size;
-    let (schema, model) = Model::new(classifier)
+    let (schema, trainable, mut model) = Model::new(classifier)
         .inputs(classifier_inputs(batch_size))
-        .trace()?;
-    let training = prepare_model_sgd(
-        &model,
-        &schema.select_all(),
-        &model.outputs()[0],
-        args.learning_rate,
-    )?;
-    let outputs = training.outputs_with(model.outputs());
+        .trace_resident(ParamSchema::select_all)?;
+    let loss = model.outputs()[0].clone();
+    apply_model_sgd(&mut model, &trainable, &loss, args.learning_rate)?;
     let mut compiler = Compiler::new(gpu.clone(), CacheLimits::default());
-    let program = outputs.compile_stateful(&model, &mut compiler)?;
+    let program = model.compile_stateful(&mut compiler)?;
 
     let dataset = match args.dataset {
         Some(path) => Dataset::load_cifar10(&path)?,
         None => Dataset::synthetic(batch_size),
     };
     let data_rng = DataRng::new(args.seed);
-    let mut parameters = initialized_parameters(&gpu, &schema)?;
-    let mut session_builder = model.session(&program);
+    let mut session_builder = model
+        .session(&program)
+        .parameters(initialized_parameters(&gpu, &schema)?)?;
     for state in schema
         .states()
         .iter()
@@ -383,14 +378,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             })
             .transpose()?;
-        let arguments = model.bind(
-            (images.buffer(), labels.buffer()),
-            parameters
-                .iter()
-                .map(|(name, value)| (name.as_str(), value)),
-        )?;
-        let output = session.run(arguments.as_slice())?;
-        let visible = outputs.commit(output, &mut parameters)?;
+        let visible = session.run(&[images.buffer(), labels.buffer()])?;
         let logits = visible[1].to_vec::<f32>()?;
         let targets = labels.buffer().to_vec::<i32>()?;
         let correct = logits
