@@ -325,15 +325,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let loss = model.outputs()[0].clone();
     apply_model_sgd(&mut model, &trainable, &loss, args.learning_rate)?;
     let mut compiler = Compiler::new(gpu.clone(), CacheLimits::default());
-    let program = model.compile_stateful(&mut compiler)?;
+    let compiled = model.compile_stateful(&mut compiler)?;
 
     let dataset = match args.dataset {
         Some(path) => Dataset::load_cifar10(&path)?,
         None => Dataset::synthetic(batch_size),
     };
     let data_rng = DataRng::new(args.seed);
-    let mut session_builder = model
-        .session(&program)
+    let mut session_builder = compiled
+        .session()
         .parameters(initialized_parameters(&gpu, &schema)?)?;
     for state in schema
         .states()
@@ -378,8 +378,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             })
             .transpose()?;
-        let visible = session.run(&[images.buffer(), labels.buffer()])?;
-        let logits = visible[1].to_vec::<f32>()?;
+        let (loss, logits): (Buffer, Buffer) = session.run((images.buffer(), labels.buffer()))?;
+        let logits = logits.to_vec::<f32>()?;
         let targets = labels.buffer().to_vec::<i32>()?;
         let correct = logits
             .as_chunks::<10>()
@@ -394,7 +394,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .count();
         drop((images, labels));
-        let loss = visible[0].to_vec::<f32>()?[0];
+        let loss = loss.to_vec::<f32>()?[0];
         initial_loss.get_or_insert(loss);
         final_loss = Some(loss);
         total_correct += correct;

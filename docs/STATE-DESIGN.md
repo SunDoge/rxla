@@ -230,7 +230,7 @@ resident state, and RNG effects:
 ```rust
 let model = Model::new(|cx: &mut Cx| {
     let x = cx.input(&[batch, width])?;
-    let y = cx.named("head")?.linear(classes).apply(&x)?;
+    let y = cx.linear("head", &x, classes)?;
     let steps = cx.state("steps", &[], DType::I32)?;
     steps.write(cx, &steps.read(cx)?.wrapping_add_scalar(1)?)?;
     let noise = cx.rng("sampling")?.normal_f32(y.shape())?;
@@ -240,8 +240,12 @@ let model = Model::new(|cx: &mut Cx| {
 
 `Model::trace` discovers all three effect classes in one schema. Stateless
 models retain `prepare`/`compile`; a model declaring state uses
-`prepare_stateful`/`compile_stateful`, then `applied.session(&program)` for named
-initialization, including `rng_seed`. The older `rxla_core::StatefulModel` and
+`prepare_stateful`/`compile_stateful`, then `compiled.session()` for named
+initialization, including `rng_seed`. The resulting `ModelSession::run`
+validates structured inputs and reconstructs structured outputs while retaining
+state between calls. Custom transformations with a different visible-output ABI
+can explicitly use `compile_stateful_program` and the raw session API. The older
+`rxla_core::StatefulModel` and
 `StateCx` remain a compatibility layer for lazy-Tensor call sites; new model
 code should not combine that context with `rxla_nn::Cx`.
 

@@ -36,18 +36,18 @@ fn safetensors_initializes_and_exports_a_resident_model_session() {
         .unwrap();
     let weights = checkpoint.load_parameter_schema(&client, &schema).unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let program = model.compile_stateful(&mut compiler).unwrap();
+    let compiled = model.compile_stateful(&mut compiler).unwrap();
     let mut session = weights
-        .initialize(model.session(&program))
+        .initialize(compiled.session())
         .unwrap()
         .build()
         .unwrap();
 
     let input = client.buffer(&[1, 3], &[2.0, 3.0, 4.0]).unwrap();
-    let outputs = session.run(&[&input]).unwrap();
-    assert_eq!(outputs[0].to_vec::<f32>().unwrap(), [2.0, 3.0]);
+    let output = session.run::<_, rxla_core::Buffer>(&input).unwrap();
+    assert_eq!(output.to_vec::<f32>().unwrap(), [2.0, 3.0]);
 
-    let current = model.resident_parameter_buffers(&session).unwrap();
+    let current = model.resident_parameter_buffers(session.raw()).unwrap();
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].0, "head.weight");
     assert_eq!(current[0].1.to_vec::<f32>().unwrap(), values);

@@ -41,6 +41,24 @@ pub struct BoundModel {
     parameters: Vec<Option<Buffer>>,
 }
 
+/// A compiled stateful model retaining its input, parameter, state and output ABI.
+pub struct CompiledStatefulModel {
+    model: AppliedModel,
+    program: StateProgram,
+}
+
+/// Builder for a typed stateful model session.
+pub struct CompiledModelSessionBuilder<'a> {
+    model: AppliedModel,
+    inner: ModelSessionBuilder<'a>,
+}
+
+/// A stateful execution session with typed model inputs and outputs.
+pub struct ModelSession {
+    model: AppliedModel,
+    session: Session,
+}
+
 /// Named initialization for a compiled unified stateful model.
 pub struct ModelSessionBuilder<'a> {
     model: &'a AppliedModel,
@@ -148,6 +166,123 @@ impl BoundModel {
 
     pub fn executable(&self) -> &Executable {
         &self.executable
+    }
+}
+
+impl CompiledStatefulModel {
+    pub fn program(&self) -> &StateProgram {
+        &self.program
+    }
+
+    pub fn session(&self) -> CompiledModelSessionBuilder<'_> {
+        CompiledModelSessionBuilder {
+            model: self.model.clone(),
+            inner: self.model.session(&self.program),
+        }
+    }
+
+    pub fn state_type(&self, slot: &StateSlot) -> Result<(DType, Vec<i64>)> {
+        Ok(self.program.state_type(slot)?)
+    }
+}
+
+impl<'a> CompiledModelSessionBuilder<'a> {
+    /// Drop typed-output ownership for advanced session migration APIs.
+    pub fn into_raw_builder(self) -> ModelSessionBuilder<'a> {
+        self.inner
+    }
+
+    pub fn state(self, name: impl Into<String>, value: Buffer) -> Result<Self> {
+        Ok(Self {
+            model: self.model,
+            inner: self.inner.state(name, value)?,
+        })
+    }
+
+    pub fn states<K>(self, values: impl IntoIterator<Item = (K, Buffer)>) -> Result<Self>
+    where
+        K: Into<String>,
+    {
+        Ok(Self {
+            model: self.model,
+            inner: self.inner.states(values)?,
+        })
+    }
+
+    pub fn parameter(self, path: impl Into<String>, value: Buffer) -> Result<Self> {
+        Ok(Self {
+            model: self.model,
+            inner: self.inner.parameter(path, value)?,
+        })
+    }
+
+    pub fn parameters<K>(self, values: impl IntoIterator<Item = (K, Buffer)>) -> Result<Self>
+    where
+        K: Into<String>,
+    {
+        Ok(Self {
+            model: self.model,
+            inner: self.inner.parameters(values)?,
+        })
+    }
+
+    pub fn rng_seed(self, name: &str, seed: u64) -> Result<Self> {
+        Ok(Self {
+            model: self.model,
+            inner: self.inner.rng_seed(name, seed)?,
+        })
+    }
+
+    pub fn rng_state(self, name: &str, key: [u32; 2], counter: u64) -> Result<Self> {
+        Ok(Self {
+            model: self.model,
+            inner: self.inner.rng_state(name, key, counter)?,
+        })
+    }
+
+    pub fn build(self) -> Result<ModelSession> {
+        Ok(ModelSession {
+            model: self.model,
+            session: self.inner.build()?,
+        })
+    }
+}
+
+impl ModelSession {
+    /// Execute when every parameter is resident in session state.
+    pub fn run<'a, I, O>(&mut self, inputs: I) -> Result<O>
+    where
+        I: ModelInputValues<'a>,
+        O: ModelOutputValues,
+    {
+        self.run_with_parameters(inputs, std::iter::empty::<(&str, &Buffer)>())
+    }
+
+    /// Execute with named non-resident parameters in addition to session state.
+    pub fn run_with_parameters<'a, I, O>(
+        &mut self,
+        inputs: I,
+        parameters: impl IntoIterator<Item = (&'a str, &'a Buffer)>,
+    ) -> Result<O>
+    where
+        I: ModelInputValues<'a>,
+        O: ModelOutputValues,
+    {
+        let arguments = self.model.bind(inputs, parameters)?;
+        let outputs = self.session.run(arguments.as_slice())?;
+        self.model.decode_outputs(outputs)
+    }
+
+    pub fn raw(&self) -> &Session {
+        &self.session
+    }
+
+    pub fn raw_mut(&mut self) -> &mut Session {
+        &mut self.session
+    }
+
+    pub fn into_raw(self) -> Session {
+        self.session
     }
 }
 
@@ -415,7 +550,15 @@ impl AppliedModel {
         Ok(compiler.compile_many(&self.graph, &self.outputs)?)
     }
 
-    pub fn compile_stateful(&self, compiler: &mut Compiler) -> Result<StateProgram> {
+    pub fn compile_stateful(&self, compiler: &mut Compiler) -> Result<CompiledStatefulModel> {
+        Ok(CompiledStatefulModel {
+            model: self.clone(),
+            program: self.compile_stateful_program(compiler)?,
+        })
+    }
+
+    /// Compile a raw state program for custom transform output ABIs.
+    pub fn compile_stateful_program(&self, compiler: &mut Compiler) -> Result<StateProgram> {
         Ok(self.state_graph.compile(compiler, &self.outputs)?)
     }
 

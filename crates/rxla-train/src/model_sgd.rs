@@ -534,22 +534,30 @@ mod tests {
             program.state_type(weight_slot).unwrap(),
             (weight.dtype().unwrap(), weight.dimensions().unwrap())
         );
-        let mut session = model
-            .session(&program)
+        let mut session = program
+            .session()
             .parameter("linear.weight", weight)
             .unwrap()
             .build()
             .unwrap();
         let input = client.buffer(&[1, 1], &[2.0]).unwrap();
 
-        let first = session.run(&[&input]).unwrap()[0].to_vec::<f32>().unwrap()[0];
+        let first = session
+            .run::<_, Buffer>(&input)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap()[0];
         let mut last = first;
         for _ in 0..20 {
-            last = session.run(&[&input]).unwrap()[0].to_vec::<f32>().unwrap()[0];
+            last = session
+                .run::<_, Buffer>(&input)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap()[0];
         }
         assert!(last < first * 1e-6, "{first} -> {last}");
         let (_, _, slot) = model.resident_parameters().next().unwrap();
-        let trained = session.state(slot).unwrap().to_vec::<f32>().unwrap();
+        let trained = session.raw().state(slot).unwrap().to_vec::<f32>().unwrap();
         assert!(
             trained.iter().all(|value| value.abs() < 1e-4),
             "{trained:?}"
@@ -560,9 +568,9 @@ mod tests {
         // re-upload, or optimizer-shaped public ABI is involved.
         let inference = definition.apply_resident(&schema, &selection).unwrap();
         let inference_program = inference.compile_stateful(&mut compiler).unwrap();
-        let snapshot = model.take_session(session).unwrap();
+        let snapshot = model.take_session(session.into_raw()).unwrap();
         let mut inference_session = snapshot
-            .restore_model(inference.session(&inference_program))
+            .restore_model(inference_program.session().into_raw_builder())
             .unwrap()
             .build()
             .unwrap();

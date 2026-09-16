@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, HashSet};
 
 mod applied;
 pub use applied::{
-    AppliedModel, BoundModel, CompiledModel, ModelArguments, ModelSessionBuffers,
-    ModelSessionBuilder, TransformState,
+    AppliedModel, BoundModel, CompiledModel, CompiledModelSessionBuilder, CompiledStatefulModel,
+    ModelArguments, ModelSession, ModelSessionBuffers, ModelSessionBuilder, TransformState,
 };
 mod inputs;
 pub use inputs::{ModelHandler, ModelInput, ModelInputValues, ModelInputs};
@@ -1145,30 +1145,27 @@ mod tests {
         let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
         let program = applied.compile_stateful(&mut compiler).unwrap();
         assert!(matches!(
-            applied.session(&program).build(),
+            program.session().build(),
             Err(Error::MissingResidentParameterInitializer { .. })
         ));
         let wrong_shape = client.buffer(&[3, 2], &[0.0; 6]).unwrap();
         assert!(matches!(
-            applied
-                .session(&program)
-                .parameter("head.weight", wrong_shape),
+            program.session().parameter("head.weight", wrong_shape),
             Err(Error::BufferShape { .. })
         ));
         let weight = client
             .buffer(&[2, 3], &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
             .unwrap();
-        let mut session = applied
-            .session(&program)
+        let mut session = program
+            .session()
             .parameters([("head.weight", weight)])
             .unwrap()
             .build()
             .unwrap();
         let input = client.buffer(&[1, 3], &[2.0, 3.0, 4.0]).unwrap();
-        let outputs = session.run(&[&input]).unwrap();
-        let output: Buffer = applied.decode_outputs(outputs).unwrap();
+        let output: Buffer = session.run(&input).unwrap();
         assert_eq!(output.to_vec::<f32>().unwrap(), [2.0, 3.0]);
-        let parameters = applied.resident_parameter_buffers(&session).unwrap();
+        let parameters = applied.resident_parameter_buffers(session.raw()).unwrap();
         assert_eq!(parameters.len(), 1);
         assert_eq!(parameters[0].0, "head.weight");
         assert_eq!(
@@ -1176,13 +1173,13 @@ mod tests {
             [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         );
 
-        let snapshot = applied.take_session(session).unwrap();
+        let snapshot = applied.take_session(session.into_raw()).unwrap();
         let nonresident = definition
             .apply_resident(&schema, &schema.select_all().matching(|_, _| false))
             .unwrap();
         let nonresident_program = nonresident.compile_stateful(&mut compiler).unwrap();
         assert!(matches!(
-            snapshot.restore_model(nonresident.session(&nonresident_program)),
+            snapshot.restore_model(nonresident_program.session().into_raw_builder()),
             Err(Error::UnexpectedResidentParameter { .. })
         ));
     }
@@ -1203,15 +1200,15 @@ mod tests {
                 .unwrap();
         let mut compiler = Compiler::new(client, CacheLimits::default());
         let program = applied.compile_stateful(&mut compiler).unwrap();
-        let mut session = applied
-            .session(&program)
+        let mut session = program
+            .session()
             .rng_seed("sampling", 42)
             .unwrap()
             .build()
             .unwrap();
 
-        let first = session.run(&[]).unwrap();
-        let second = session.run(&[]).unwrap();
+        let first: [Buffer; 2] = session.run(&[] as &[&Buffer]).unwrap();
+        let second: [Buffer; 2] = session.run(&[] as &[&Buffer]).unwrap();
         assert_ne!(
             first[0].to_vec::<f32>().unwrap(),
             second[0].to_vec::<f32>().unwrap()
