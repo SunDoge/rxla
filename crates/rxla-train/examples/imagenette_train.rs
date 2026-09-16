@@ -85,16 +85,11 @@ struct ImageFolder {
     samples: Vec<Sample>,
 }
 
-type HostBatch = (Vec<u8>, Vec<i32>, Vec<f32>);
-type UploadedBatch = (
-    PendingHostUpload<u8>,
-    PendingHostUpload<i32>,
-    PendingHostUpload<f32>,
-);
+type HostBatch = (Vec<u8>, Vec<i32>);
+type UploadedBatch = (PendingHostUpload<u8>, PendingHostUpload<i32>);
 type PreparedBatch = (
     PendingHostUpload<u8>,
     PendingHostUpload<i32>,
-    PendingHostUpload<f32>,
     Duration,
     Duration,
 );
@@ -172,19 +167,16 @@ impl ImageFolder {
                 let crop = decoded
                     .view(left, top, IMAGE as u32, IMAGE as u32)
                     .to_image();
-                let flip = training && sample_rng.bernoulli(11, 0, 0.5);
-                Ok::<_, String>((crop.into_raw(), sample.label, f32::from(u8::from(flip))))
+                Ok::<_, String>((crop.into_raw(), sample.label))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut images = Vec::with_capacity(batch_size * IMAGE as usize * IMAGE as usize * 3);
         let mut labels = Vec::with_capacity(batch_size);
-        let mut flips = Vec::with_capacity(batch_size);
-        for (image, label, flip) in samples {
+        for (image, label) in samples {
             images.extend(image);
             labels.push(label);
-            flips.push(flip);
         }
-        Ok((images, labels, flips))
+        Ok((images, labels))
     }
 }
 
@@ -283,7 +275,9 @@ fn basic_block(
 fn resnet18(cx: &mut Cx, batch_size: i64, training: bool) -> NnResult<Vec<Tensor>> {
     let images = cx.input_dtype(&[batch_size, IMAGE, IMAGE, 3], DType::U8)?;
     let labels = cx.input_dtype(&[batch_size], DType::I32)?;
-    let flips = cx.input(&[batch_size, 1, 1, 1])?;
+    let mut augmentation_rng = cx.rng("augmentation")?;
+    let flips =
+        augmentation_rng.bernoulli(&[batch_size, 1, 1, 1], if training { 0.5 } else { 0.0 })?;
     let images = images.cast(DType::F32)?.mul_scalar(1.0 / 255.0)?;
     let images = flips
         .broadcast_to(images.shape())?
@@ -383,8 +377,8 @@ fn prepare_batch(
     let host = dataset.batch(step, batch_size as usize, rng, training)?;
     let decoded = started.elapsed();
     let started = Instant::now();
-    let (images, labels, flips) = upload_batch(host, batch_size, gpu)?;
-    Ok((images, labels, flips, decoded, started.elapsed()))
+    let (images, labels) = upload_batch(host, batch_size, gpu)?;
+    Ok((images, labels, decoded, started.elapsed()))
 }
 
 fn upload_batch(
@@ -392,11 +386,10 @@ fn upload_batch(
     batch_size: i64,
     gpu: &Client,
 ) -> Result<UploadedBatch, Box<dyn std::error::Error>> {
-    let (images, labels, flips) = host;
+    let (images, labels) = host;
     let images = gpu.upload_pinned(&[batch_size, IMAGE, IMAGE, 3], images)?;
     let labels = gpu.upload_pinned(&[batch_size], labels)?;
-    let flips = gpu.upload_pinned(&[batch_size, 1, 1, 1], flips)?;
-    Ok((images, labels, flips))
+    Ok((images, labels))
 }
 
 fn prefetch_batches(
@@ -420,6 +413,7 @@ fn initialize_session<'a>(
     program: &'a rxla_core::StateProgram,
     schema: &ParamSchema,
     gpu: &Client,
+    seed: u64,
 ) -> Result<rxla_core::Session, Box<dyn std::error::Error>> {
     let mut builder = model.session(program);
     for state in schema
@@ -433,6 +427,7 @@ fn initialize_session<'a>(
             gpu.buffer(state.shape(), &vec![1.0_f32; count])?,
         )?;
     }
+    builder = builder.rng_seed("augmentation", seed)?;
     Ok(builder.build()?)
 }
 
@@ -465,7 +460,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     outputs.extend(training.outputs());
     let mut compiler = Compiler::new(gpu.clone(), CacheLimits::default());
     let program = model.compile_stateful_tensors(&mut compiler, &outputs)?;
-    let mut session = initialize_session(&model, &program, &schema, &gpu)?;
+    let mut session = initialize_session(&model, &program, &schema, &gpu, args.seed)?;
     let mut parameters = initialized_parameters(&gpu, &schema)?;
     let rng = DataRng::new(args.seed);
     let started = Instant::now();
@@ -481,11 +476,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let host = batches.recv().ok_or("input pipeline stopped early")??;
         let input_wait = phase.elapsed();
         let phase = Instant::now();
-        let (images, labels, flips) = upload_batch(host, batch_size, &gpu)?;
+        let (images, labels) = upload_batch(host, batch_size, &gpu)?;
         let uploaded = phase.elapsed();
         let phase = Instant::now();
         let arguments = model.bind(
-            &[images.buffer(), labels.buffer(), flips.buffer()],
+            &[images.buffer(), labels.buffer()],
             parameters
                 .iter()
                 .map(|(name, value)| (name.as_str(), value)),
@@ -553,10 +548,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut validation_correct = 0;
     let mut validation_loss = 0.0;
     for step in 0..validation_steps {
-        let (images, labels, flips, _, _) =
+        let (images, labels, _, _) =
             prepare_batch(&validation, step, batch_size, rng, false, &gpu)?;
         let arguments = inference.bind(
-            &[images.buffer(), labels.buffer(), flips.buffer()],
+            &[images.buffer(), labels.buffer()],
             parameters
                 .iter()
                 .map(|(name, value)| (name.as_str(), value)),
@@ -596,6 +591,12 @@ mod tests {
             .count();
         assert_eq!(convolution_count, 20); // 17 main-path + 3 projection convolutions.
         assert_eq!(model.outputs()[1].shape(), [2, CLASSES]);
-        assert_eq!(schema.states().len(), 40); // 20 BatchNorm layers, mean + variance.
+        assert_eq!(schema.states().len(), 44); // 20 BatchNorm pairs + four RNG words.
+        assert!(
+            schema
+                .states()
+                .iter()
+                .any(|state| state.path() == "augmentation.counter_low")
+        );
     }
 }

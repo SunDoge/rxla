@@ -8,12 +8,12 @@ stride-two average pooling. This last detail differs from canonical ResNet-18's
 max pool because RXLA does not yet implement a max-pool VJP.
 
 The input path uses the reusable `rxla_train::BoundedPipeline`. Rayon performs
-JPEG decode, resize, random crop, and collation into U8 images plus explicit
-flip decisions. The main thread starts pinned uploads, while horizontal flip,
-U8-to-F32 conversion, ImageNet normalization, forward, backward, BatchNorm
-state transitions, and SGD all execute in one compiled CUDA program. A bounded
-capacity-four channel preserves order and backpressure without materializing
-normalized F32 images on the host.
+JPEG decode, resize, random crop, and collation into U8 images. The main thread
+starts pinned uploads, while a named device RNG effect supplies reproducible
+flip decisions. Horizontal flip, U8-to-F32 conversion, ImageNet normalization,
+forward, backward, BatchNorm and RNG state transitions, and SGD all execute in
+one compiled CUDA program. A bounded capacity-four channel preserves order and
+backpressure without materializing normalized F32 images on the host.
 
 ```bash
 cargo run -p rxla-train --release --example imagenette_train -- \
@@ -75,6 +75,16 @@ execution, and 0.93 ms metrics. This is a 7.1% end-to-end improvement while also
 removing one executable and a host synchronization boundary. Short training
 runs are numerically nondeterministic on the CUDA convolution path, so loss and
 accuracy are correctness smoke signals rather than comparable benchmark metrics.
+
+The next revision moved flip sampling from host-generated input values to the
+transactional `augmentation` RNG effect. Two batch-16 runs measured 1,179.6 and
+1,182.9 images/s end to end; the latter steady-state result was 1,232.6 images/s
+with 0.77 ms input wait, 0.31 ms upload, and 10.94 ms CUDA execution. This is
+within normal JPEG/input-wait variance of the host-flip run rather than a speed
+claim. Its semantic benefit is that the seed and counter are resident named
+state, advance atomically with an accepted training step, and need no extra
+per-batch scripting-language or host input. Inference retains the same state
+schema but samples probability zero without advancing the stream.
 
 These are end-to-end figures rather than isolated model kernel benchmarks. The
 remaining XLA `gemm_fusion` register spills leave substantial optimization work
