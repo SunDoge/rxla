@@ -19,9 +19,6 @@ use snafu::Snafu;
 pub use state::{
     Parameter, ParameterId, PreparedStateGraph, Session, StateGraph, StateProgram, StateSlot,
 };
-pub use stateful::{
-    StateCx, StateRng, StateScope, StateStep, StateValue, StatefulModel, StatefulSession,
-};
 use std::sync::{Arc, Mutex};
 pub use typed_state::{F32, I32, State, StateDType, StateTransaction, StateUpdates};
 mod artifact;
@@ -58,7 +55,6 @@ pub use rotary::RotaryLayout;
 pub use rxla_ir::{Mesh, MeshAxis, PartitionSpec, Sharding, ShardingError};
 mod state;
 pub mod state_tree;
-mod stateful;
 mod transposed_convolution;
 mod typed_state;
 pub use rxla_ir::IrError;

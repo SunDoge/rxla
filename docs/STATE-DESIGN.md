@@ -1,12 +1,12 @@
 # Stateful API design constraints
 
 Status: state is now represented in the source IR by `rxla.state_input`,
-`rxla.state_read`, and `rxla.state_write`. The user-facing `StatefulModel` /
-`StateCx` API assigns stable scoped names while tracing; lowering discharges the
-effects into ordinary ABI inputs and hidden final-state outputs. `StateGraph`,
-`StateProgram`, and `Session` remain the lower-level execution machinery.
-Module derivation, RNG state, and several transformation policies below are still
-design work.
+`rxla.state_read`, and `rxla.state_write`. The user-facing `rxla_nn::Cx` assigns
+stable scoped names to parameters, state, and RNG while tracing; lowering
+discharges effects into ordinary ABI inputs and hidden final-state outputs.
+`StateGraph`, `StateProgram`, and `Session` remain private-facing execution
+machinery used by `AppliedModel` and custom transformations. Module derivation
+and several transformation policies below are still design work.
 
 ## IR effect model
 
@@ -26,33 +26,27 @@ state_input(id, path) -> state_read(id) -> computation -> state_write(id)
 ```
 
 Read/write markers lower to typed identity dataflow and the final SSA version is
-returned as a hidden result. The runtime installs new resident buffers only after
-all visible and hidden results have executed and passed validation. Dropping a
-`StateStep` does not execute or commit it, and its exclusive borrow prevents two
-overlapping transactions on one `StatefulSession`.
+returned as a hidden result. `ModelSession` installs new resident buffers only
+after all visible and hidden results have executed and passed validation. Its
+mutable execution API prevents overlapping state transitions on one session.
 
-The first public API is deliberately small: declare state where its shape is
-known with `cx.state(name, shape, dtype)`, use `StateValue::read/write`, group
-paths with `cx.scope`, and evaluate through `session.call(inputs)?.eval(runtime)`.
-One session currently owns one normalized input-program specialization. Reachable
-lazy input dataflow is imported into the stateful IR, so preprocessing and the
-state transition compile as one executable; only the materialized leaf bindings
-remain runtime arguments. Later calls may supply new leaf values through the same
-normalized expression structure. A changed expression or root layout is a new
-specialization and is currently rejected rather than silently running stale code.
+The public API is deliberately small: declare state where its shape is known
+with `cx.state(name, shape, dtype)`, use `State::read/write`, group paths with an
+RAII `cx.scope`, compile with `AppliedModel::compile_stateful`, and evaluate
+through `ModelSession::run`. Inputs, parameter effects, state transitions, and
+preprocessing remain in one IR program.
 
-`StateValue::copy_`, `add_`, `sub_`, and `mul_` provide familiar in-place
-spelling. They mean “read the current SSA version and emit `state_write`”; they do
-not eagerly mutate a `Tensor`, alias-visible host storage, or a PJRT buffer. This
-keeps ordinary tensors immutable while allowing update-heavy model code to remain
-compact and fully transformable.
+`State::write` and `add_` mean “read the current SSA version and emit
+`state_write`”; they do not eagerly mutate a `Tensor`, alias-visible host
+storage, or a PJRT buffer. This keeps ordinary tensors immutable while allowing
+update-heavy model code to remain compact and fully transformable.
 
 Tensor-content updates use Tensor-first APIs. `Tensor::slice_copy_` rebinds the
 mutable Rust handle to a `stablehlo.dynamic_update_slice` result, while
 `Tensor::index_add_` builds scatter-add and rebinds the handle. Cloned handles
-retain their previous SSA value. `StateValue::slice_copy_` and `index_add_`
-compose the same tensor operations with a state write, rather than routing users
-through `Graph`. Physical buffer reuse is still chosen by XLA aliasing/donation;
+retain their previous SSA value. State updates compose ordinary tensor operations
+with an explicit state write rather than routing users through `Graph`. Physical
+buffer reuse is still chosen by XLA aliasing/donation;
 the underscore spelling guarantees the handle/state transition, not allocation
 identity.
 
@@ -205,27 +199,8 @@ silently dropping their gradient. The broader policies below remain necessary.
 - External effects: not ordinary dead-code-eliminable tensor operations. Ordering
   and retry behavior need separate contracts before adding callbacks or I/O.
 
-Named device randomness is available directly through the state interpreter:
-
-```rust
-let model = StatefulModel::new(|cx: &mut StateCx, xs: &[Tensor]| {
-    let mut rng = cx.rng("dropout")?;
-    Ok(vec![rng.dropout(&xs[0], 0.5)?.output])
-});
-let mut session = model.session().rng_seed("dropout", 42)?;
-```
-
-`StateRng` currently provides raw blocks, uniform, normal, Bernoulli, and
-dropout draws. Each name owns four scalar I32 states (`key0`, `key1`,
-`counter_low`, and `counter_high`). Reborrowing the same name continues its
-symbolic stream. `StateCx::finish` records the final counter update as part of
-the state transaction; a counter wrap rejects the whole stream advancement.
-The session injects the seed without exposing `StateGraph` or requiring a host
-random-number upload. Use `rng_state` when exact raw key words or a nonzero
-counter are required.
-
-The public model-building path now uses the same `rxla_nn::Cx` for parameters,
-resident state, and RNG effects:
+The public model-building path uses the same `rxla_nn::Cx` for parameters,
+resident state, and named device RNG effects:
 
 ```rust
 let model = Model::new(|cx: &mut Cx| {
@@ -244,10 +219,10 @@ models retain `prepare`/`compile`; a model declaring state uses
 initialization, including `rng_seed`. The resulting `ModelSession::run`
 validates structured inputs and reconstructs structured outputs while retaining
 state between calls. Custom transformations with a different visible-output ABI
-can explicitly use `compile_stateful_program` and the raw session API. The older
-`rxla_core::StatefulModel` and
-`StateCx` remain a compatibility layer for lazy-Tensor call sites; new model
-code should not combine that context with `rxla_nn::Cx`.
+can explicitly use `compile_stateful_program` and the raw session API. Each RNG
+name owns four scalar I32 states (`key0`, `key1`, `counter_low`, and
+`counter_high`); `ModelSessionBuilder::rng_seed` initializes those states without
+exposing `StateGraph` or requiring caller-managed random buffers.
 
 State declarations carry their own `Initializer`. `cx.state` defaults to zero,
 while `state_initialized` records another policy; BatchNorm therefore declares

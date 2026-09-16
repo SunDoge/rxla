@@ -12,8 +12,7 @@ use crate::disk_cache::DiskCache;
 use crate::tensor_handle::EvaluationLease;
 use crate::{
     Buffer, CacheLimits, CacheStats, Compiler, Error, Executable, ExecutionPlan, Graph, InputSpec,
-    LoweredProgram, OutputSpec, PendingExecution, PlanningPolicy, Result, StateGraph, StateProgram,
-    Tensor, err,
+    LoweredProgram, OutputSpec, PendingExecution, PlanningPolicy, Result, Tensor, err,
 };
 use prost::Message;
 use rxla_pjrt::{Client, ClientOptions, DType};
@@ -853,16 +852,6 @@ impl Runtime {
     pub fn compile(&mut self, program: &Program) -> Result<Arc<Executable>> {
         let device = self.default_device.clone();
         self.compile_on(&device, program)
-    }
-
-    pub(crate) fn compile_state_graph(
-        &mut self,
-        graph: &StateGraph,
-        outputs: &[Tensor],
-    ) -> Result<StateProgram> {
-        let device = self.default_device.clone();
-        let backend = self.backend_for_device_mut(&device)?;
-        graph.compile(&mut backend.compiler, outputs)
     }
 
     fn compile_on(&mut self, device: &Device, program: &Program) -> Result<Arc<Executable>> {
