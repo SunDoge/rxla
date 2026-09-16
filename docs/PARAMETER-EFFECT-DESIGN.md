@@ -162,7 +162,7 @@ turn `Cx` into an ever-growing god object. `Named` also dereferences to `Cx`,
 which permits closure-free structural scopes:
 
 ```rust
-# use rxla::{Tensor, model::{Cx, Result}};
+# use rxla::{Tensor, nn::{Cx, Result}};
 fn block(cx: &mut Cx, x: &Tensor) -> Result<Tensor> {
     let mut block = cx.named("block")?;
     let x = block.named("input")?.linear(32).apply(x)?.relu()?;

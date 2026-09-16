@@ -1,4 +1,28 @@
-//! Typed model-input declarations.
+//! Typed model-input declarations and function-handler adaptation.
+//!
+//! Input specifications stay outside the mathematical model body, while the
+//! handler receives ordinary lazy tensors as separate Rust arguments:
+//!
+//! ```
+//! use rxla_core::{DType, Tensor};
+//! use rxla_nn::{Cx, Model, ModelInput, Result};
+//!
+//! fn apply(cx: &mut Cx, image: Tensor, label: Tensor) -> Result<(Tensor, Tensor)> {
+//!     let logits = cx.named("head")?.linear(10).apply(&image)?;
+//!     let loss = logits.cross_entropy_with_indices(&label, 1)?.mean(&[0], false)?;
+//!     Ok((loss, logits))
+//! }
+//!
+//! let (schema, applied) = Model::new(apply)
+//!     .inputs((
+//!         ModelInput::new([4, 32]),
+//!         ModelInput::new([4]).with_dtype(DType::I32),
+//!     ))
+//!     .trace()?;
+//! assert_eq!(schema.inputs().len(), 2);
+//! assert_eq!(applied.outputs().len(), 2);
+//! # Ok::<(), rxla_nn::Error>(())
+//! ```
 
 use crate::{Cx, ModelOutputs, Result};
 use rxla_core::{Buffer, DType, Tensor};
@@ -18,7 +42,7 @@ impl ModelInput {
         }
     }
 
-    pub fn dtype(mut self, dtype: DType) -> Self {
+    pub fn with_dtype(mut self, dtype: DType) -> Self {
         self.dtype = dtype;
         self
     }
@@ -27,7 +51,7 @@ impl ModelInput {
         &self.shape
     }
 
-    pub fn element_type(&self) -> DType {
+    pub fn dtype(&self) -> DType {
         self.dtype
     }
 }
@@ -299,7 +323,10 @@ mod tests {
 
     #[test]
     fn single_tuple_array_vector_and_custom_inputs_preserve_structure() {
-        let single = Model::new(|_: &mut Cx, x: Tensor| Ok(x)).inputs(ModelInput::new(vec![2, 3]));
+        let input = ModelInput::new([2, 3]);
+        assert_eq!(input.shape(), [2, 3]);
+        assert_eq!(input.dtype(), DType::F32);
+        let single = Model::new(|_: &mut Cx, x: Tensor| Ok(x)).inputs(input);
         assert_eq!(single.trace().unwrap().1.outputs()[0].shape(), [2, 3]);
 
         let tuple = Model::new(|_: &mut Cx, x: Tensor, y: Tensor| Ok(x.add(&y)?))

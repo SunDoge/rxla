@@ -414,7 +414,7 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
     let clip_config = args.preset.clip();
     let clip_model =
         Model::new(|cx: &mut Cx, tokens: Tensor| clip_text_encoder(cx, &tokens, &clip_config))
-            .inputs(ModelInput::new([2, 77]).dtype(rxla_core::DType::I32));
+            .inputs(ModelInput::new([2, 77]).with_dtype(rxla_core::DType::I32));
     let (clip_schema, clip_model) = clip_model.trace()?;
     let mut clip_checkpoint = SafeTensors::open(args.model.join("text_encoder/model.safetensors"))?;
     let clip_executable = clip_model.compile(&mut compiler)?;

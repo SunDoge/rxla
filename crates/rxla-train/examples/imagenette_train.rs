@@ -348,8 +348,8 @@ fn resnet18_infer(
 
 fn resnet18_inputs(batch_size: i64) -> (ModelInput, ModelInput) {
     (
-        ModelInput::new([batch_size, IMAGE, IMAGE, 3]).dtype(DType::U8),
-        ModelInput::new([batch_size]).dtype(DType::I32),
+        ModelInput::new([batch_size, IMAGE, IMAGE, 3]).with_dtype(DType::U8),
+        ModelInput::new([batch_size]).with_dtype(DType::I32),
     )
 }
 

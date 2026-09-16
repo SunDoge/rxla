@@ -212,7 +212,7 @@ fn classifier(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, 
 fn classifier_inputs(batch_size: i64) -> (ModelInput, ModelInput) {
     (
         ModelInput::new([batch_size, 32, 32, 3]),
-        ModelInput::new([batch_size]).dtype(DType::I32),
+        ModelInput::new([batch_size]).with_dtype(DType::I32),
     )
 }
 
