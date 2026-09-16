@@ -80,10 +80,31 @@ pub(crate) fn check() -> Result<()> {
     let release: ReleaseConfig =
         toml::from_str(&fs::read_to_string(root.join("release-plz.toml"))?)?;
     validate(&metadata, &release, &root)?;
+    validate_package_files(&root)?;
     println!(
-        "Public release graph and publish order match: {}.",
+        "Public release packages, graph and publish order match: {}.",
         PUBLIC_PACKAGES.join(" -> ")
     );
+    Ok(())
+}
+
+fn validate_package_files(root: &Path) -> Result<()> {
+    for package in PUBLIC_PACKAGES {
+        let output = Command::new(env!("CARGO"))
+            .args(["package", "--locked", "--list", "-p", package])
+            .current_dir(root)
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "could not assemble package {package:?}:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        if output.stdout.is_empty() {
+            return Err(format!("package {package:?} contains no files").into());
+        }
+    }
     Ok(())
 }
 

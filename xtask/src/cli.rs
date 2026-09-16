@@ -15,7 +15,7 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Regenerate checked-in PJRT and protobuf Rust sources.
     Generate,
-    /// Verify generated sources and the public release graph.
+    /// Verify generated sources and assemble every public release package.
     Check,
 }
 
