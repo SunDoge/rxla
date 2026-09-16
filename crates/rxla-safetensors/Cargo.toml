@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 description = "Weight loading, schema binding, and export for RXLA"
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
 
 [[example]]
 name = "taesd_decode_bench"

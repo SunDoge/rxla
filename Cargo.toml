@@ -20,6 +20,8 @@ default-members = ["crates/rxla"]
 version = "0.1.0-alpha.1"
 edition = "2024"
 license = "Apache-2.0"
+repository = "https://github.com/SunDoge/rxla"
+readme = "README.md"
 
 [workspace.dependencies]
 blake3 = "1.8"

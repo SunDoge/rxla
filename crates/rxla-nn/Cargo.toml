@@ -3,6 +3,8 @@ name = "rxla-nn"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
 description = "Scoped parameter effects and neural-network layers for RXLA"
 
 [dependencies]

@@ -3,6 +3,8 @@ name = "rxla-models"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
 description = "Reference vision and language model definitions for RXLA"
 
 [dependencies]

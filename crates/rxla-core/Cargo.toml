@@ -3,6 +3,8 @@ name = "rxla-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
 description = "Tensor tracing, autodiff, compilation, and execution core for RXLA"
 
 [dependencies]

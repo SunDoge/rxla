@@ -3,6 +3,8 @@ name = "rxla-pjrt"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
 description = "Safe Rust bindings and dynamic plugin loading for the PJRT C API"
 
 [dependencies]

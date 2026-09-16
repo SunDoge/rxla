@@ -3,6 +3,8 @@ name = "rxla-onnx"
 version.workspace = true
 edition.workspace = true
 license = "MIT OR Apache-2.0"
+repository.workspace = true
+readme.workspace = true
 description = "ONNX import into the RXLA intermediate representation"
 
 [dependencies]
