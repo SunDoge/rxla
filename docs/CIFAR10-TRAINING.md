@@ -48,3 +48,16 @@ complete stateful training path; it is not a full-epoch benchmark or a claim
 about final test accuracy. Random crop, momentum/weight decay, learning-rate
 scheduling, checkpointing, and inference-mode test evaluation remain future
 training-example work.
+
+An extended 2,000-step run (about 5.1 passes over 50,000 images) with the same
+configuration remained stable and reached:
+
+```text
+step    0: loss 2.409989, accuracy 17.2%
+step  400: loss 1.501513, accuracy 45.3%
+step  800: loss 1.129642, accuracy 58.6%
+step 1200: loss 0.849458, accuracy 70.3%
+step 1600: loss 0.806189, accuracy 68.8%
+step 1999: loss 0.729034, accuracy 77.3%
+summary: loss 2.409989 -> 0.729034, mean accuracy 61.6%, 9330.1 images/s
+```
