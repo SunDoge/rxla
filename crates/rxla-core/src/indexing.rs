@@ -617,6 +617,64 @@ impl Tensor {
             .node(Op::DynamicUpdateSlice, operands, &self.shape)
     }
 
+    /// Rebind this handle to a tensor with one contiguous region replaced.
+    ///
+    /// This emits `stablehlo.dynamic_update_slice`; clones of the old handle
+    /// retain the old SSA value. Backend buffer reuse remains an XLA
+    /// alias/donation decision rather than observable Rust mutation.
+    pub fn slice_copy_(&mut self, update: &Self, starts: &[Tensor]) -> Result<&mut Self> {
+        *self = self.dynamic_update_slice(update, starts)?;
+        Ok(self)
+    }
+
+    /// Add indexed updates along one axis using StableHLO scatter-add.
+    /// Indices clamp exactly like [`Self::take`], and repeated indices sum.
+    pub fn index_add(&self, axis: usize, indices: &Tensor, updates: &Self) -> Result<Self> {
+        if !Arc::ptr_eq(&self.graph().0, &indices.graph().0)
+            || !Arc::ptr_eq(&self.graph().0, &updates.graph().0)
+        {
+            return Err(err("cross-graph indexed update"));
+        }
+        if self.dtype() != DType::F32
+            || updates.dtype() != DType::F32
+            || indices.dtype() != DType::I32
+            || axis >= self.shape().len()
+            || self.shape()[axis] == 0
+        {
+            return Err(err(
+                "index_add requires F32 tensors, I32 indices and a nonempty valid axis",
+            ));
+        }
+        let mut expected = self.shape()[..axis].to_vec();
+        expected.extend_from_slice(indices.shape());
+        expected.extend_from_slice(&self.shape()[axis + 1..]);
+        if updates.shape() != expected {
+            return Err(err(
+                "index_add update shape does not match indexed result shape",
+            ));
+        }
+        let scattered = self.graph().node(
+            Op::GatherGradient {
+                axis,
+                batched: false,
+            },
+            vec![updates.node_id(), indices.node_id()],
+            self.shape(),
+        )?;
+        self.add(&scattered)
+    }
+
+    /// Rebind this handle to the result of [`Self::index_add`].
+    pub fn index_add_(
+        &mut self,
+        axis: usize,
+        indices: &Tensor,
+        updates: &Self,
+    ) -> Result<&mut Self> {
+        *self = self.index_add(axis, indices, updates)?;
+        Ok(self)
+    }
+
     /// Static, half-open slicing on every axis. Strides must be positive;
     /// negative indexing and Python-style bound clipping are not performed.
     pub fn slice(&self, starts: &[i64], limits: &[i64], strides: &[i64]) -> Result<Self> {
@@ -748,5 +806,57 @@ impl Tensor {
             tensors.iter().map(|t| t.node_id()).collect(),
             &dims,
         )
+    }
+}
+
+#[cfg(test)]
+mod inplace_tests {
+    use super::*;
+
+    #[test]
+    fn inplace_tensor_handles_preserve_alias_ssa_values() {
+        let mut base = Tensor::from_slice([4, 2], DType::F32, [0.0; 8]).unwrap();
+        let alias = base.clone();
+        let update = Tensor::from_slice([1, 2], DType::F32, [7.0, 8.0]).unwrap();
+        let row = Tensor::from_slice([], DType::I32, [2]).unwrap();
+        let column = Tensor::from_slice([], DType::I32, [0]).unwrap();
+        base.slice_copy_(&update, &[row, column]).unwrap();
+
+        assert_ne!(base.node_id(), alias.node_id());
+
+        let mut scatter_base = Tensor::from_slice([4, 2], DType::F32, [0.0; 8]).unwrap();
+        let scatter_alias = scatter_base.clone();
+        let indices = Tensor::from_slice([3], DType::I32, [1, 1, 3]).unwrap();
+        let updates = Tensor::from_slice([3, 2], DType::F32, [1.0; 6]).unwrap();
+        scatter_base.index_add_(0, &indices, &updates).unwrap();
+        assert_ne!(scatter_base.node_id(), scatter_alias.node_id());
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+    fn inplace_tensor_updates_execute_through_the_tensor_api() {
+        let mut runtime =
+            unsafe { Runtime::load(std::env::var("PJRT_PLUGIN_PATH").expect("PJRT_PLUGIN_PATH")) }
+                .unwrap();
+        let mut sliced = Tensor::from_slice([4, 2], DType::F32, [0.0; 8]).unwrap();
+        let update = Tensor::from_slice([1, 2], DType::F32, [7.0, 8.0]).unwrap();
+        let row = Tensor::from_slice([], DType::I32, [2]).unwrap();
+        let column = Tensor::from_slice([], DType::I32, [0]).unwrap();
+        sliced.slice_copy_(&update, &[row, column]).unwrap();
+
+        let mut scattered = Tensor::from_slice([4, 2], DType::F32, [0.0; 8]).unwrap();
+        let indices = Tensor::from_slice([3], DType::I32, [1, 1, 3]).unwrap();
+        let updates = Tensor::from_slice([3, 2], DType::F32, [1.0; 6]).unwrap();
+        scattered.index_add_(0, &indices, &updates).unwrap();
+
+        let outputs = runtime.eval_many(&[sliced, scattered]).unwrap();
+        assert_eq!(
+            outputs[0].to_vec::<f32>().unwrap(),
+            [0.0, 0.0, 0.0, 0.0, 7.0, 8.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            outputs[1].to_vec::<f32>().unwrap(),
+            [0.0, 0.0, 2.0, 2.0, 0.0, 0.0, 1.0, 1.0]
+        );
     }
 }

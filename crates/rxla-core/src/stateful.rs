@@ -348,6 +348,23 @@ impl StateValue {
     pub fn mul_(&self, cx: &mut StateCx, value: &Tensor) -> Result<()> {
         cx.update(self, |current| current.mul(value))
     }
+
+    /// Replace a contiguous region of resident state through
+    /// `stablehlo.dynamic_update_slice`, then record the new state version.
+    pub fn slice_copy_(&self, cx: &mut StateCx, update: &Tensor, starts: &[Tensor]) -> Result<()> {
+        cx.update(self, |current| current.dynamic_update_slice(update, starts))
+    }
+
+    /// Scatter-add into resident F32 state and record the resulting version.
+    pub fn index_add_(
+        &self,
+        cx: &mut StateCx,
+        axis: usize,
+        indices: &Tensor,
+        updates: &Tensor,
+    ) -> Result<()> {
+        cx.update(self, |current| current.index_add(axis, indices, updates))
+    }
 }
 
 fn validate_state_name(name: &str) -> Result<()> {

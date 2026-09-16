@@ -47,6 +47,15 @@ not eagerly mutate a `Tensor`, alias-visible host storage, or a PJRT buffer. Thi
 keeps ordinary tensors immutable while allowing update-heavy model code to remain
 compact and fully transformable.
 
+Tensor-content updates use Tensor-first APIs. `Tensor::slice_copy_` rebinds the
+mutable Rust handle to a `stablehlo.dynamic_update_slice` result, while
+`Tensor::index_add_` builds scatter-add and rebinds the handle. Cloned handles
+retain their previous SSA value. `StateValue::slice_copy_` and `index_add_`
+compose the same tensor operations with a state write, rather than routing users
+through `Graph`. Physical buffer reuse is still chosen by XLA aliasing/donation;
+the underscore spelling guarantees the handle/state transition, not allocation
+identity.
+
 With the optional `disk-cache` feature, `StateGraph::compile` can reuse native
 code across processes through `Compiler`. It still reconstructs the current
 schema and slot identities locally. The cache stores code and tensor signatures,
