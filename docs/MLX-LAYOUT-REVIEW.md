@@ -165,3 +165,62 @@ All 19 PJRT library tests pass. DLPack and device views remain out of scope.
 SmallVec is the only new direct dependency. No backend switch, normal-build code
 generation, unsafe Send/Sync, native Tensor view API or zero-copy interop was
 introduced by this work.
+
+## Lazy execution follow-up (2026-09-17)
+
+This follow-up inspected the local MLX checkout at commit `1f8e74e3f`, in
+particular `mlx/array.{h,cpp}`, `mlx/transforms.cpp`, `mlx/compile.cpp`,
+`mlx/stream.cpp`, and `python/mlx/nn/layers/base.py`. The commit is recorded so
+later reviews can distinguish source changes from design disagreements.
+
+MLX does not maintain a separate eager value type. An `array` descriptor is both
+a lazy graph value and, after evaluation, an owner of storage. It has three
+explicit states: unscheduled, evaluated but possibly incomplete, and available.
+`eval(outputs)` returns immediately for an empty list, waits when every output
+has already been scheduled, and otherwise schedules the union of the requested
+roots. Successful non-tracer values are detached from their primitive and
+inputs after scheduling. Multi-result primitives track sibling outputs so the
+primitive is scheduled once and all results transition together.
+
+Those observations support the following RXLA decisions:
+
+1. Keep one public `Tensor` type rather than adding an eager tensor. A materialized
+   Tensor remains usable as a leaf of later lazy expressions.
+2. Keep `eval_many` as the primitive operation. It must ignore already
+   materialized roots, accept an empty collection, compile shared ancestry once,
+   and atomically publish every requested result. Single-value `eval` is only a
+   convenience wrapper.
+3. Cutting an evaluated node to a bound input is the RXLA analogue of MLX graph
+   detachment. RXLA rewrites the shared SSA node because later expressions may
+   already refer to it; it must not merely set a buffer flag while retaining the
+   whole executed ancestry.
+4. Do not attach an MLX-style stream to every RXLA semantic operation. MLX uses
+   streams and fences because it schedules backend primitives itself. RXLA hands
+   a whole StableHLO program to XLA, whose scheduler owns graph-internal ordering.
+   Placement belongs in execution planning; PJRT events belong at submission and
+   materialization boundaries.
+5. Add asynchronous Tensor materialization only when readiness and failure are
+   represented explicitly. `PendingExecution` is the low-level foundation, but
+   a Tensor must not look materialized merely because a PJRT buffer was allocated
+   or submitted. MLX's evaluated-versus-available distinction is the relevant
+   model.
+6. Keep reusable `Program` optional. MLX is lazy without requiring users to call
+   `compile`; its compile transform traces on the first concrete signature,
+   simplifies/fuses, caches by inputs, and substitutes later inputs. RXLA may
+   compile internally during `eval`, while explicit `Program` remains useful for
+   stable ABI inspection and repeated serving calls. A user-visible `jit`
+   decorator is not required for the core experience.
+
+Two MLX choices are intentionally not copied. Its `Device` is a closed CPU/GPU
+pair because those are the in-tree backends; RXLA retains backend names plus
+ordinals because PJRT implementations form an open set. MLX constructors infer
+dtypes from C++/Python values, whereas RXLA keeps the explicit dtype argument at
+the raw host-storage boundary and verifies it against `TensorElement`.
+
+MLX's Python `Module` recursively discovers arrays stored in object containers,
+marks paths frozen through a side set, and replaces parameter leaves during
+optimizer updates. That is useful evidence for tree filtering and partial
+updates, not a reason to adopt constructor-owned Rust modules. RXLA's parameter
+effects keep shape dependencies at the use site and should expose equivalent
+named selection over the resulting schema without moving parameter creation
+back into constructors.
