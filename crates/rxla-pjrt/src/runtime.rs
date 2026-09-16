@@ -277,6 +277,24 @@ impl Plugin {
         false
     }
 
+    /// Whether owned host allocations can be explicitly DMA-mapped and
+    /// unmapped for asynchronous transfers.
+    pub fn supports_dma_mapping(&self) -> bool {
+        let api = self.api();
+        for offset in [
+            std::mem::offset_of!(PJRT_Api, PJRT_Client_DmaMap),
+            std::mem::offset_of!(PJRT_Api, PJRT_Client_DmaUnmap),
+        ] {
+            if unsafe { (*api).struct_size } < offset + std::mem::size_of::<usize>() {
+                return false;
+            }
+        }
+        unsafe {
+            ptr::addr_of!((*api).PJRT_Client_DmaMap).read().is_some()
+                && ptr::addr_of!((*api).PJRT_Client_DmaUnmap).read().is_some()
+        }
+    }
+
     /// Load and initialize a trusted PJRT dynamic library.
     ///
     /// A path containing no directory separators may be resolved by the
@@ -544,6 +562,10 @@ impl Client {
 
     pub fn supports_collectives_extension(&self) -> bool {
         self.0.plugin.supports_collectives_extension()
+    }
+
+    pub fn supports_dma_mapping(&self) -> bool {
+        self.0.plugin.supports_dma_mapping()
     }
 
     /// Load a trusted native plugin. It executes native code in this process.
@@ -2281,6 +2303,34 @@ mod lifetime_tests {
         assert!(!plugin(&api).supports_collectives_extension());
         api.extension_start = ptr::from_mut(&mut collectives);
         assert!(plugin(&api).supports_collectives_extension());
+    }
+
+    #[test]
+    fn dma_mapping_capability_requires_both_api_slots() {
+        let mut api = lifetime_table();
+        let plugin = |api: &PJRT_Api| {
+            Plugin(Arc::new(PluginInner {
+                api,
+                _library: Some(ManuallyDrop::new(
+                    libloading::os::unix::Library::this().into(),
+                )),
+            }))
+        };
+        assert!(!plugin(&api).supports_dma_mapping());
+        macro_rules! install {
+            ($name:ident, $args:ident) => {{
+                unsafe extern "C" fn stub(_: *mut $args) -> *mut PJRT_Error {
+                    ptr::null_mut()
+                }
+                api.$name = Some(stub);
+            }};
+        }
+        install!(PJRT_Client_DmaMap, PJRT_Client_DmaMap_Args);
+        assert!(!plugin(&api).supports_dma_mapping());
+        install!(PJRT_Client_DmaUnmap, PJRT_Client_DmaUnmap_Args);
+        assert!(plugin(&api).supports_dma_mapping());
+        api.struct_size = std::mem::offset_of!(PJRT_Api, PJRT_Client_DmaUnmap);
+        assert!(!plugin(&api).supports_dma_mapping());
     }
 
     #[test]
