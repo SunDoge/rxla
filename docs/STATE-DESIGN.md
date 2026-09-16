@@ -34,10 +34,18 @@ overlapping transactions on one `StatefulSession`.
 The first public API is deliberately small: declare state where its shape is
 known with `cx.state(name, shape, dtype)`, use `StateValue::read/write`, group
 paths with `cx.scope`, and evaluate through `session.call(inputs)?.eval(runtime)`.
-One session currently owns one input-shape/dtype specialization. Lazy expressions
-passed as call inputs are materialized before the stateful executable; graph
-inlining across that call boundary is a future IR transformation, not hidden host
-mutation.
+One session currently owns one normalized input-program specialization. Reachable
+lazy input dataflow is imported into the stateful IR, so preprocessing and the
+state transition compile as one executable; only the materialized leaf bindings
+remain runtime arguments. Later calls may supply new leaf values through the same
+normalized expression structure. A changed expression or root layout is a new
+specialization and is currently rejected rather than silently running stale code.
+
+`StateValue::copy_`, `add_`, `sub_`, and `mul_` provide familiar in-place
+spelling. They mean “read the current SSA version and emit `state_write`”; they do
+not eagerly mutate a `Tensor`, alias-visible host storage, or a PJRT buffer. This
+keeps ordinary tensors immutable while allowing update-heavy model code to remain
+compact and fully transformable.
 
 With the optional `disk-cache` feature, `StateGraph::compile` can reuse native
 code across processes through `Compiler`. It still reconstructs the current

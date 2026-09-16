@@ -167,6 +167,32 @@ impl StateGraph {
         self.input_count += 1;
         Ok(index)
     }
+    pub(crate) fn input_dtype(&mut self, ty: &TensorType) -> Result<Tensor> {
+        let tensor = self.graph.input_dtype(&ty.dims, ty.dtype)?;
+        self.arguments.push(Argument::Input(self.input_count));
+        self.input_count += 1;
+        Ok(tensor)
+    }
+    pub(crate) fn append_dataflow(
+        &self,
+        op: Op,
+        operands: &[Tensor],
+        ty: &TensorType,
+    ) -> Result<Tensor> {
+        if operands
+            .iter()
+            .any(|operand| !Arc::ptr_eq(&self.graph.0, &operand.graph().0))
+        {
+            return Err(err("imported operation belongs to another graph"));
+        }
+        let value =
+            self.graph
+                .node(op, operands.iter().map(Tensor::node_id).collect(), &ty.dims)?;
+        if value.dtype() != ty.dtype {
+            return Err(err("imported operation changed result dtype"));
+        }
+        Ok(value)
+    }
     pub fn constant(&self, dims: &[i64], values: &[f32]) -> Result<Tensor> {
         self.graph.constant(dims, values)
     }

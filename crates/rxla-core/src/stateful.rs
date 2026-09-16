@@ -3,6 +3,124 @@
 use super::*;
 use std::collections::BTreeMap;
 
+struct InputTrace {
+    nodes: Vec<(Op, Vec<usize>, TensorType)>,
+    roots: Vec<usize>,
+    bindings: Vec<Tensor>,
+    fingerprint: String,
+}
+
+impl InputTrace {
+    fn capture(inputs: &[Tensor]) -> Result<Self> {
+        if inputs.is_empty() {
+            return Ok(Self {
+                nodes: Vec::new(),
+                roots: Vec::new(),
+                bindings: Vec::new(),
+                fingerprint: "empty".to_owned(),
+            });
+        }
+        let graph = inputs[0].graph();
+        if inputs
+            .iter()
+            .any(|input| !Arc::ptr_eq(&graph.0, &input.graph().0))
+        {
+            return Err(err("stateful inputs belong to different lazy sessions"));
+        }
+        if inputs.iter().any(|input| !input.is_implicit_lazy()) {
+            return Err(err(
+                "stateful input fusion requires implicit lazy tensors, not explicit Tracer values",
+            ));
+        }
+        let source = graph.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let semantic = source.semantic_nodes()?;
+        let source_roots = inputs.iter().map(Tensor::node_id).collect::<Vec<_>>();
+        let mut reachable = vec![false; semantic.len()];
+        let mut worklist = source_roots.clone();
+        while let Some(id) = worklist.pop() {
+            let visited = reachable
+                .get_mut(id.index())
+                .ok_or_else(|| err("stateful input has an invalid SSA value"))?;
+            if *visited {
+                continue;
+            }
+            *visited = true;
+            worklist.extend(semantic[id.index()].operands.iter().copied());
+        }
+
+        let mut dense = vec![None; semantic.len()];
+        let mut nodes = Vec::new();
+        let mut parameters = Vec::new();
+        let mut fingerprint = String::new();
+        for (source_index, node) in semantic.into_iter().enumerate() {
+            if !reachable[source_index] {
+                continue;
+            }
+            let operands = node
+                .operands
+                .iter()
+                .map(|operand| {
+                    dense[operand.index()]
+                        .ok_or_else(|| err("stateful input graph is not topologically ordered"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let op = match node.op {
+                Op::Parameter(number) => {
+                    let normalized = parameters.len();
+                    parameters.push(number);
+                    Op::Parameter(normalized)
+                }
+                Op::StateInput { .. } | Op::StateRead { .. } | Op::StateWrite { .. } => {
+                    return Err(err(
+                        "nested state effects cannot be used as stateful inputs",
+                    ));
+                }
+                op => op,
+            };
+            let target_index = nodes.len();
+            dense[source_index] = Some(target_index);
+            fingerprint.push_str(&format!("{op:?}:{operands:?}:{:?};", node.ty));
+            nodes.push((op, operands, node.ty));
+        }
+        let roots = source_roots
+            .iter()
+            .map(|root| dense[root.index()].ok_or_else(|| err("stateful input root was pruned")))
+            .collect::<Result<Vec<_>>>()?;
+        fingerprint.push_str(&format!("roots:{roots:?}"));
+        drop(source);
+        let bindings = inputs[0].lazy_inputs(&parameters)?;
+        Ok(Self {
+            nodes,
+            roots,
+            bindings,
+            fingerprint,
+        })
+    }
+
+    fn import(self, graph: &mut StateGraph) -> Result<(Vec<Tensor>, Vec<Tensor>, String)> {
+        let mut values: Vec<Tensor> = Vec::with_capacity(self.nodes.len());
+        for (op, operands, ty) in self.nodes {
+            let value = match op {
+                Op::Parameter(_) => graph.input_dtype(&ty)?,
+                op => {
+                    let operands = operands
+                        .iter()
+                        .map(|&index| values[index].clone())
+                        .collect::<Vec<_>>();
+                    graph.append_dataflow(op, &operands, &ty)?
+                }
+            };
+            values.push(value);
+        }
+        let roots = self
+            .roots
+            .iter()
+            .map(|&index| values[index].clone())
+            .collect();
+        Ok((roots, self.bindings, self.fingerprint))
+    }
+}
+
 /// A model function whose state declarations are interpreted at first call.
 pub struct StatefulModel<F> {
     build: F,
@@ -46,19 +164,9 @@ pub struct StateValue {
 }
 
 impl StateCx {
-    fn new(inputs: &[Tensor]) -> Result<(Self, Vec<Tensor>)> {
+    fn new(inputs: &[Tensor]) -> Result<(Self, Vec<Tensor>, Vec<Tensor>, String)> {
         let mut graph = StateGraph::default();
-        let symbolic = inputs
-            .iter()
-            .map(|input| match input.dtype() {
-                DType::F32 => graph.input(input.shape()),
-                DType::I32 => graph.input_i32(input.shape()),
-                DType::BF16 => graph.input_bf16_as_f32(input.shape()),
-                dtype => Err(err(format!(
-                    "stateful model input dtype {dtype:?} is unsupported"
-                ))),
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let (symbolic, bindings, fingerprint) = InputTrace::capture(inputs)?.import(&mut graph)?;
         Ok((
             Self {
                 graph,
@@ -67,6 +175,8 @@ impl StateCx {
                 order: Vec::new(),
             },
             symbolic,
+            bindings,
+            fingerprint,
         ))
     }
 
@@ -121,6 +231,18 @@ impl StateCx {
     pub fn write(&mut self, state: &StateValue, value: &Tensor) -> Result<()> {
         self.validate_state(state)?;
         self.graph.write(&state.slot, value)
+    }
+
+    /// Read the current SSA version, build its replacement, and record one
+    /// explicit state write. The closure runs while tracing, not at execution.
+    pub fn update(
+        &mut self,
+        state: &StateValue,
+        update: impl FnOnce(&Tensor) -> Result<Tensor>,
+    ) -> Result<()> {
+        let current = self.read(state)?;
+        let next = update(&current)?;
+        self.write(state, &next)
     }
 
     pub fn write_many(&mut self, updates: &[(&StateValue, &Tensor)]) -> Result<()> {
@@ -208,6 +330,24 @@ impl StateValue {
     pub fn write(&self, cx: &mut StateCx, value: &Tensor) -> Result<()> {
         cx.write(self, value)
     }
+
+    /// In-place spelling for a traced state write. This advances the logical
+    /// SSA version; it never mutates a shared Tensor or PJRT buffer immediately.
+    pub fn copy_(&self, cx: &mut StateCx, value: &Tensor) -> Result<()> {
+        cx.write(self, value)
+    }
+
+    pub fn add_(&self, cx: &mut StateCx, value: &Tensor) -> Result<()> {
+        cx.update(self, |current| current.add(value))
+    }
+
+    pub fn sub_(&self, cx: &mut StateCx, value: &Tensor) -> Result<()> {
+        cx.update(self, |current| current.sub(value))
+    }
+
+    pub fn mul_(&self, cx: &mut StateCx, value: &Tensor) -> Result<()> {
+        cx.update(self, |current| current.mul(value))
+    }
 }
 
 fn validate_state_name(name: &str) -> Result<()> {
@@ -227,6 +367,7 @@ struct PendingSpecialization {
 
 struct CompiledState {
     signature: Vec<TensorType>,
+    input_fingerprint: String,
     session: Session,
     output_count: usize,
     slots: Vec<(String, StateSlot)>,
@@ -288,23 +429,28 @@ where
         inputs: &[Tensor],
     ) -> Result<StateStep<'session, 'model, F>> {
         let signature = inputs.iter().map(Tensor::ty).collect::<Vec<_>>();
-        let pending = match &self.compiled {
+        let (pending, bindings, input_fingerprint) = match &self.compiled {
             Some(compiled) => {
-                if compiled.signature != signature {
-                    return Err(err("stateful session input specialization changed"));
+                let trace = InputTrace::capture(inputs)?;
+                let input_fingerprint = trace.fingerprint.clone();
+                if compiled.signature != signature
+                    || compiled.input_fingerprint != input_fingerprint
+                {
+                    return Err(err("stateful session input program specialization changed"));
                 }
-                None
+                (None, trace.bindings, input_fingerprint)
             }
             None => {
-                let (mut cx, symbolic_inputs) = StateCx::new(inputs)?;
+                let (mut cx, symbolic_inputs, bindings, fingerprint) = StateCx::new(inputs)?;
                 let outputs = (self.model.build)(&mut cx, &symbolic_inputs)?;
-                Some(cx.finish(&outputs)?)
+                (Some(cx.finish(&outputs)?), bindings, fingerprint)
             }
         };
         Ok(StateStep {
             owner: self,
-            inputs: inputs.to_vec(),
+            inputs: bindings,
             signature,
+            input_fingerprint,
             pending,
         })
     }
@@ -315,17 +461,14 @@ pub struct StateStep<'session, 'model, F> {
     owner: &'session mut StatefulSession<'model, F>,
     inputs: Vec<Tensor>,
     signature: Vec<TensorType>,
+    input_fingerprint: String,
     pending: Option<PendingSpecialization>,
 }
 
 impl<F> StateStep<'_, '_, F> {
     pub fn eval(mut self, runtime: &mut Runtime) -> Result<Vec<Tensor>> {
-        let inputs = if self.inputs.is_empty() {
-            Vec::new()
-        } else {
-            runtime.eval_many(&self.inputs)?
-        };
-        let input_buffers = inputs
+        let input_buffers = self
+            .inputs
             .iter()
             .map(|input| input.to_buffer(runtime.client()))
             .collect::<Result<Vec<_>>>()?;
@@ -359,6 +502,7 @@ impl<F> StateStep<'_, '_, F> {
             let session = program.session(initial)?;
             self.owner.compiled = Some(CompiledState {
                 signature: self.signature.clone(),
+                input_fingerprint: self.input_fingerprint.clone(),
                 output_count: pending.outputs.len(),
                 session,
                 slots: named_slots,
@@ -394,7 +538,7 @@ mod tests {
     #[test]
     fn state_effects_discharge_to_hidden_results() {
         let input = Tensor::from_slice([], DType::F32, [2.0]).unwrap();
-        let (mut cx, inputs) = StateCx::new(&[input]).unwrap();
+        let (mut cx, inputs, _, _) = StateCx::new(&[input]).unwrap();
         let state = cx.state("count", &[], DType::I32).unwrap();
         let same = cx.state("count", &[], DType::I32).unwrap();
         assert_eq!(state.slot.identity(), same.slot.identity());
@@ -416,8 +560,26 @@ mod tests {
     }
 
     #[test]
+    fn lazy_input_dataflow_is_inlined_and_inplace_state_advances_ssa() {
+        let left = Tensor::from_slice([], DType::F32, [2.0]).unwrap();
+        let right = Tensor::from_slice([], DType::F32, [3.0]).unwrap();
+        let fused_input = left.add(&right).unwrap();
+        let (mut cx, inputs, bindings, _) = StateCx::new(&[fused_input]).unwrap();
+        let accumulator = cx.state("accumulator", &[], DType::F32).unwrap();
+        let before = accumulator.read(&cx).unwrap();
+        accumulator.add_(&mut cx, &inputs[0]).unwrap();
+        let after = accumulator.read(&cx).unwrap();
+        assert_ne!(before.node_id(), after.node_id());
+
+        let pending = cx.finish(&[after]).unwrap();
+        let prepared = pending.graph.prepare(&pending.outputs).unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(prepared.input_indices(), [0, 1]);
+    }
+
+    #[test]
     fn scopes_make_state_paths_stable_and_distinct() {
-        let (mut cx, _) = StateCx::new(&[]).unwrap();
+        let (mut cx, _, _, _) = StateCx::new(&[]).unwrap();
         let left = cx
             .scope("left", |cx| cx.state("cache", &[2], DType::F32))
             .unwrap();
@@ -431,7 +593,7 @@ mod tests {
 
     #[test]
     fn state_only_models_discharge_without_visible_results() {
-        let (mut cx, _) = StateCx::new(&[]).unwrap();
+        let (mut cx, _, _, _) = StateCx::new(&[]).unwrap();
         let counter = cx.state("counter", &[], DType::I32).unwrap();
         let next = counter.read(&cx).unwrap().wrapping_add_scalar(1).unwrap();
         counter.write(&mut cx, &next).unwrap();
@@ -458,28 +620,36 @@ mod tests {
         let mut runtime =
             unsafe { Runtime::load(std::env::var("PJRT_PLUGIN_PATH").expect("PJRT_PLUGIN_PATH")) }
                 .unwrap();
-        let input = Tensor::from_slice([], DType::F32, [4.0]).unwrap();
+        let input = Tensor::from_slice([], DType::F32, [2.0])
+            .unwrap()
+            .add(&Tensor::from_slice([], DType::F32, [3.0]).unwrap())
+            .unwrap();
 
         let first = session
             .call(std::slice::from_ref(&input))
             .unwrap()
             .eval_one(&mut runtime)
             .unwrap();
-        assert_eq!(first.to_vec::<f32>().unwrap(), [4.0]);
+        assert_eq!(first.to_vec::<f32>().unwrap(), [5.0]);
         assert_eq!(
             session.state("count").unwrap().to_vec::<i32>().unwrap(),
             [1]
         );
 
+        let next_input = Tensor::from_slice([], DType::F32, [5.0])
+            .unwrap()
+            .add(&Tensor::from_slice([], DType::F32, [7.0]).unwrap())
+            .unwrap();
         let second = session
-            .call(std::slice::from_ref(&input))
+            .call(std::slice::from_ref(&next_input))
             .unwrap()
             .eval_one(&mut runtime)
             .unwrap();
-        assert_eq!(second.to_vec::<f32>().unwrap(), [5.0]);
+        assert_eq!(second.to_vec::<f32>().unwrap(), [13.0]);
         assert_eq!(
             session.state("count").unwrap().to_vec::<i32>().unwrap(),
             [2]
         );
+        assert_eq!(runtime.stats().misses, 1);
     }
 }
