@@ -22,3 +22,6 @@ cargo $offline test --locked -p rxla-pjrt --test bf16 --test memory_stats --test
 cargo $offline test --locked -p rxla-core --test submit --test unified_tensor \
   --test matmul --test convolution --test kv_cache_checked \
   -- --include-ignored --test-threads=1
+cargo $offline test --locked -p rxla-core --test frontend \
+  async_eval_publishes_only_after_wait_and_releases_dropped_claims \
+  -- --ignored --exact --test-threads=1

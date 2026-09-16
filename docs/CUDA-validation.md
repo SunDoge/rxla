@@ -80,6 +80,19 @@ No numerical tolerances were changed for these runs. The separate CPU
 `scripts/check.sh --offline --with-plugin` gate also passes, including the
 new owned metadata test, all-target Clippy and independent downstream execution.
 
+## Async Tensor evaluation follow-up (2026-09-17)
+
+The single-device `PendingEvaluation` path was also executed on the RTX 5080
+with the project environment's JAX CUDA 13 PJRT plugin and cuDNN 9.24. The test
+checks that submission does not mark the Tensor materialized, simultaneous
+synchronous or asynchronous evaluation of the same root is rejected, `wait`
+publishes the expected values, and dropping a pending handle releases its claim
+so the unchanged lazy graph can be submitted again. This is a correctness and
+lifetime gate; it does not prove kernel overlap or a latency improvement.
+
+`scripts/check-cuda.sh` runs only this exact frontend test rather than the full
+ignored frontend suite, keeping the additional CUDA gate bounded.
+
 ## Remaining limits
 
 The plugin's default BFC allocator reserves about 11.67 GiB at client creation.
