@@ -42,7 +42,7 @@ fn transition(
     bias: bool,
 ) -> Result<Tensor> {
     Ok(cx
-        .scope(&layer.to_string())?
+        .scope(layer.to_string())?
         .conv2d(output_channels, [3, 3])
         .options(convolution())
         .bias(bias)
@@ -69,7 +69,7 @@ pub fn taesd_decoder(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
     let mut next_layer = 2;
     for (stage_index, block_count) in [3, 3, 3, 1].into_iter().enumerate() {
         for _ in 0..block_count {
-            let mut block = layers.scope(&next_layer.to_string())?;
+            let mut block = layers.scope(next_layer.to_string())?;
             hidden = tiny_block(&mut block, &hidden)?;
             next_layer += 1;
         }

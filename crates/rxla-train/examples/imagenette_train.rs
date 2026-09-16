@@ -215,8 +215,8 @@ fn basic_block(
     stride: i64,
     training: bool,
 ) -> NnResult<Tensor> {
-    let mut stage = cx.scope(&format!("stage{stage_index}"))?;
-    let mut block = stage.scope(&format!("block{block_index}"))?;
+    let mut stage = cx.scope(format!("stage{stage_index}"))?;
+    let mut block = stage.scope(format!("block{block_index}"))?;
     let hidden = block
         .scope("conv1")?
         .conv2d(channels, [3, 3])

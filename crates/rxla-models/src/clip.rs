@@ -179,7 +179,7 @@ pub fn clip_text_encoder(
     {
         let mut layers = cx.scope_path(["text_model", "encoder", "layers"])?;
         for layer in 0..config.layers {
-            let mut scope = layers.scope(&layer.to_string())?;
+            let mut scope = layers.scope(layer.to_string())?;
             hidden = encoder_layer(&mut scope, &hidden, &causal_bias, config)?;
         }
     }

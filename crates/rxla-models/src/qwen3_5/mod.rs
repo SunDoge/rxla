@@ -210,7 +210,7 @@ pub fn qwen3_5(cx: &mut Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Resul
     drop(embedding);
     for (index, layer_type) in config.layers.iter().enumerate() {
         let mut layers = language_model.scope("layers")?;
-        let mut layer = layers.scope(&index.to_string())?;
+        let mut layer = layers.scope(index.to_string())?;
         let normalized = layer
             .scope("input_layernorm")?
             .rms_norm()

@@ -539,7 +539,7 @@ impl Cx {
     }
 
     /// Enter a lexical parameter/effect scope without a closure.
-    pub fn scope(&mut self, name: &str) -> Result<Scope<'_>> {
+    pub fn scope(&mut self, name: impl Into<String>) -> Result<Scope<'_>> {
         self.scope_path([name])
     }
 
@@ -547,12 +547,9 @@ impl Cx {
     pub fn scope_path<I, S>(&mut self, segments: I) -> Result<Scope<'_>>
     where
         I: IntoIterator<Item = S>,
-        S: AsRef<str>,
+        S: Into<String>,
     {
-        let segments = segments
-            .into_iter()
-            .map(|segment| segment.as_ref().to_owned())
-            .collect::<Vec<_>>();
+        let segments = segments.into_iter().map(Into::into).collect::<Vec<_>>();
         for segment in &segments {
             validate_name(segment)?;
         }

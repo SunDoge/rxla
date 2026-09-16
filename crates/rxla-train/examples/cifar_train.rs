@@ -145,8 +145,8 @@ fn basic_block(
     channels: i64,
     stride: i64,
 ) -> NnResult<Tensor> {
-    let mut stage = cx.scope(&format!("stage{stage_index}"))?;
-    let mut block = stage.scope(&format!("block{block_index}"))?;
+    let mut stage = cx.scope(format!("stage{stage_index}"))?;
+    let mut block = stage.scope(format!("block{block_index}"))?;
     let convolution = Conv2dOptions {
         strides: [stride, stride],
         padding: [[1, 1], [1, 1]],
