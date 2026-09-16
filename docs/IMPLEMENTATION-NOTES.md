@@ -1118,7 +1118,8 @@ development configuration or silently turn skipped tests into passed tests.
   PJRT APIs. Models, training, checkpoints and ONNX remain separate crates.
 - `rxla-xla-proto`: upstream protobuf definitions and generated prost messages.
 - `rxla-pjrt`: dynamic plugin loading, synchronous owned client/buffer/executable
-  handles. Currently deliberately thread-affine; no unjustified Send/Sync.
+  handles. Persistent handles use `Arc` and follow PJRT's thread-safe native
+  contract; in-flight event owners remain thread-affine.
 - `rxla-ir`: typed Pliron SSA, verification and StableHLO lowering.
 - `rxla-nn`: scoped parameter effects and shape-inferred layer builders.
 - `rxla-cache`: backend-agnostic atomic file artifact storage.

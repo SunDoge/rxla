@@ -8,7 +8,7 @@ use std::{
     mem::ManuallyDrop,
     path::Path,
     ptr::{self, NonNull},
-    rc::Rc,
+    sync::Arc,
 };
 
 /// Borrowed compiler input passed to PJRT together with its format label.
@@ -226,7 +226,13 @@ struct PluginInner {
 /// Dynamically loaded libraries remain mapped until process exit because PJRT
 /// does not define a process-wide shutdown contract.
 #[derive(Clone)]
-pub struct Plugin(Rc<PluginInner>);
+pub struct Plugin(Arc<PluginInner>);
+
+// PJRT API tables are immutable after initialization and implementations expose
+// thread-safe client, buffer, and executable interfaces. The dynamic library is
+// retained for process lifetime, so sharing this pointer cannot race unloading.
+unsafe impl Send for PluginInner {}
+unsafe impl Sync for PluginInner {}
 
 // Resolve the cleanup and synchronization capabilities before any operation can
 // return owned resources or start a transfer borrowing Rust host memory. Other
@@ -325,7 +331,7 @@ impl Plugin {
             }
         );
         validate_lifetime_api(api)?;
-        let plugin = Self(Rc::new(PluginInner {
+        let plugin = Self(Arc::new(PluginInner {
             api,
             _library: library,
         }));
@@ -523,9 +529,14 @@ impl Drop for ClientInner {
     }
 }
 
-/// Single-thread-affine client for now; handles cannot accidentally cross threads.
+/// Thread-safe shared PJRT client handle.
 #[derive(Clone)]
-pub struct Client(Rc<ClientInner>);
+pub struct Client(Arc<ClientInner>);
+
+// PJRT clients are designed for concurrent use. Native device pointers are
+// borrowed from the client and remain valid until the last Arc destroys it.
+unsafe impl Send for ClientInner {}
+unsafe impl Sync for ClientInner {}
 impl Client {
     pub fn addressable_device_count(&self) -> usize {
         self.0.addressable_devices.len()
@@ -691,7 +702,7 @@ impl Client {
             }
         );
         inner.device = inner.addressable_devices[addressable_device_index];
-        Ok(Self(Rc::new(inner)))
+        Ok(Self(Arc::new(inner)))
     }
 
     /// Upload native BF16 storage from raw 16-bit encodings, without conversion
@@ -827,7 +838,7 @@ impl Client {
             }
         };
         let buffer = Buffer {
-            inner: Rc::new(inner),
+            inner: Arc::new(inner),
         };
         Ok(PendingHostUpload {
             client: self.0.clone(),
@@ -882,7 +893,7 @@ impl Client {
             function!(self.0.plugin.api(), PJRT_Client_BufferFromHostBuffer)(&mut a)
         })?;
         let buffer = Buffer {
-            inner: Rc::new(BufferInner::new(self.0.clone(), a.buffer)?),
+            inner: Arc::new(BufferInner::new(self.0.clone(), a.buffer)?),
         };
         self.0.plugin.wait(a.done_with_host_buffer)?;
         Ok(buffer)
@@ -953,14 +964,14 @@ impl Client {
             }
         );
         let mut exe = Executable {
-            inner: Rc::new(ExecutableInner {
+            inner: Arc::new(ExecutableInner {
                 client: self.0.clone(),
                 raw,
                 devices: Vec::new(),
             }),
             outputs: 0,
         };
-        Rc::get_mut(&mut exe.inner)
+        Arc::get_mut(&mut exe.inner)
             .expect("new executable is uniquely owned")
             .devices = executable_devices(&self.0, raw)?;
         let view = exe.unloaded()?;
@@ -1097,22 +1108,28 @@ impl Element for half::bf16 {
 }
 
 pub struct Buffer {
-    inner: Rc<BufferInner>,
+    inner: Arc<BufferInner>,
 }
 struct BufferInner {
-    client: Rc<ClientInner>,
+    client: Arc<ClientInner>,
     raw: NonNull<PJRT_Buffer>,
 }
+
+// PjRtBuffer is explicitly thread-safe in the OpenXLA interface. Destruction
+// happens only after the last Arc, so it cannot race a safe Rust borrow.
+unsafe impl Send for BufferInner {}
+unsafe impl Sync for BufferInner {}
 impl Buffer {
     pub fn belongs_to(&self, client: &Client) -> bool {
-        Rc::ptr_eq(&self.inner.client, &client.0)
+        Arc::ptr_eq(&self.inner.client, &client.0)
     }
     /// Copy into the destination client's selected device through host memory.
     /// Preserves shape and F32/I32/BF16 dtype (BF16 is copied as raw bits).
     /// Downloads synchronously and uploads a new buffer, even on the same client.
     /// This is not a device-to-device, zero-copy or asynchronous transfer; host
     /// temporary storage is one full tensor. Neither source ownership nor state
-    /// changes on failure. Native handles remain thread-affine.
+    /// changes on failure. Persistent native handles are safe to share across
+    /// threads; the synchronous host temporary remains local to this call.
     pub fn copy_to_client_via_host(&self, destination: &Client) -> Result<Buffer> {
         self.copy_to_client_via_host_with_limit(destination, usize::MAX)
     }
@@ -1349,7 +1366,7 @@ impl Buffer {
     }
 }
 impl BufferInner {
-    fn new(client: Rc<ClientInner>, raw: *mut PJRT_Buffer) -> Result<Self> {
+    fn new(client: Arc<ClientInner>, raw: *mut PJRT_Buffer) -> Result<Self> {
         let raw = NonNull::new(raw).context(InvalidPluginDataSnafu {
             message: "PJRT returned a null buffer",
         })?;
@@ -1374,14 +1391,19 @@ impl Drop for BufferInner {
 }
 
 pub struct Executable {
-    inner: Rc<ExecutableInner>,
+    inner: Arc<ExecutableInner>,
     outputs: usize,
 }
 struct ExecutableInner {
-    client: Rc<ClientInner>,
+    client: Arc<ClientInner>,
     raw: *mut PJRT_LoadedExecutable,
     devices: Vec<*mut PJRT_Device>,
 }
+
+// PJRT permits concurrent execution of one loaded executable. Device pointers
+// are immutable client-owned metadata retained by `client`.
+unsafe impl Send for ExecutableInner {}
+unsafe impl Sync for ExecutableInner {}
 
 /// Owned optimized compiler IR, not a serialized native executable artifact.
 pub struct OptimizedProgram {
@@ -1570,7 +1592,7 @@ impl Executable {
         ensure!(
             !inputs
                 .iter()
-                .any(|b| !Rc::ptr_eq(&b.inner.client, &self.inner.client)),
+                .any(|b| !Arc::ptr_eq(&b.inner.client, &self.inner.client)),
             InvalidArgumentSnafu {
                 message: "buffers belong to a different client",
             }
@@ -1602,7 +1624,7 @@ impl Executable {
             .into_iter()
             .map(|raw| {
                 Ok(Buffer {
-                    inner: Rc::new(BufferInner::new(self.inner.client.clone(), raw)?),
+                    inner: Arc::new(BufferInner::new(self.inner.client.clone(), raw)?),
                 })
             })
             .collect::<Result<_>>()?;
@@ -1637,7 +1659,7 @@ impl Executable {
             !inputs
                 .iter()
                 .flat_map(|values| values.iter())
-                .any(|buffer| !Rc::ptr_eq(&buffer.inner.client, &self.inner.client)),
+                .any(|buffer| !Arc::ptr_eq(&buffer.inner.client, &self.inner.client)),
             InvalidArgumentSnafu {
                 message: "buffers belong to a different client",
             }
@@ -1689,7 +1711,7 @@ impl Executable {
                     .into_iter()
                     .map(|raw| {
                         Ok(Buffer {
-                            inner: Rc::new(BufferInner::new(self.inner.client.clone(), raw)?),
+                            inner: Arc::new(BufferInner::new(self.inner.client.clone(), raw)?),
                         })
                     })
                     .collect::<Result<Vec<_>>>()
@@ -1746,7 +1768,7 @@ fn dma_unmap(client: &ClientInner, data: *mut std::ffi::c_void) -> Result<()> {
 /// releases the host mapping. Dropping also waits, then releases it.
 #[must_use = "retain the pinned allocation until upload completion"]
 pub struct PendingHostUpload<T: Element> {
-    client: Rc<ClientInner>,
+    client: Arc<ClientInner>,
     data: Option<Vec<T>>,
     buffer: Option<Buffer>,
     event: Option<*mut PJRT_Event>,
@@ -1801,8 +1823,8 @@ impl<T: Element> Drop for PendingHostUpload<T> {
 /// ```
 #[must_use = "wait for execution errors/results; dropping also waits"]
 pub struct PendingExecution {
-    executable: Rc<ExecutableInner>,
-    _inputs: Vec<Rc<BufferInner>>,
+    executable: Arc<ExecutableInner>,
+    _inputs: Vec<Arc<BufferInner>>,
     outputs: Vec<Buffer>,
     event: Option<*mut PJRT_Event>,
 }
@@ -1955,8 +1977,8 @@ mod lifetime_tests {
             api.PJRT_Event_Destroy = Some(destroy);
             // No native plugin is loaded. The table and synthetic event outlive
             // all owners; the other lifetime-table destructors are no-op stubs.
-            let client = Rc::new(ClientInner {
-                plugin: Plugin(Rc::new(PluginInner {
+            let client = Arc::new(ClientInner {
+                plugin: Plugin(Arc::new(PluginInner {
                     api: &api,
                     _library: Some(ManuallyDrop::new(
                         libloading::os::unix::Library::this().into(),
@@ -1968,7 +1990,7 @@ mod lifetime_tests {
                 _key_value_callbacks: None,
             });
             let pending = PendingExecution {
-                executable: Rc::new(ExecutableInner {
+                executable: Arc::new(ExecutableInner {
                     client,
                     raw: ptr::null_mut(),
                     devices: vec![],
@@ -2059,8 +2081,8 @@ mod lifetime_tests {
             // not dereference synthetic handles. No native plugin is loaded.
             let raw_token: *mut PJRT_Client = ptr::from_ref(&probe).cast_mut().cast();
             let device_token: *mut PJRT_Device = ptr::from_ref(&probe).cast_mut().cast();
-            let client = Client(Rc::new(ClientInner {
-                plugin: Plugin(Rc::new(PluginInner {
+            let client = Client(Arc::new(ClientInner {
+                plugin: Plugin(Arc::new(PluginInner {
                     api: &api,
                     _library: Some(ManuallyDrop::new(
                         libloading::os::unix::Library::this().into(),
@@ -2076,7 +2098,7 @@ mod lifetime_tests {
                 Err(Error::InvalidPluginData { .. })
             ));
             let buffer = Buffer {
-                inner: Rc::new(BufferInner {
+                inner: Arc::new(BufferInner {
                     client: client.0.clone(),
                     raw: NonNull::new(ptr::from_ref(&probe).cast_mut().cast()).unwrap(),
                 }),
@@ -2139,7 +2161,7 @@ mod lifetime_tests {
         let foreign = ptr::from_ref(&foreign_token).cast_mut().cast();
         let mut api = lifetime_table();
         api.PJRT_LoadedExecutable_AddressableDevices = Some(devices);
-        let plugin = Plugin(Rc::new(PluginInner {
+        let plugin = Plugin(Arc::new(PluginInner {
             api: &api,
             _library: Some(ManuallyDrop::new(
                 libloading::os::unix::Library::this().into(),
@@ -2249,7 +2271,7 @@ mod lifetime_tests {
         };
         let mut api = lifetime_table();
         let plugin = |api: &PJRT_Api| {
-            Plugin(Rc::new(PluginInner {
+            Plugin(Arc::new(PluginInner {
                 api,
                 _library: Some(ManuallyDrop::new(
                     libloading::os::unix::Library::this().into(),

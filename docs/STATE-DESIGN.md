@@ -196,11 +196,11 @@ silently dropping their gradient. The broader policies below remain necessary.
   supported reduction, or rejection), never implicit last-writer-wins.
 - Randomness: explicit stream ownership/splitting; no hidden process-global RNG.
 - Concurrency: no overlapping exclusive state update. Independent sessions may
-  eventually schedule concurrently, but current PJRT handles remain !Send/!Sync.
-  The `workers` example verifies a narrower pattern now: each OS thread creates
-  its own client/compiler and exchanges only owned host data through bounded
-  queues. It does not move sessions between threads or share device weights
-  across clients. Native execution cancellation and in-flight memory budgeting
+  eventually schedule concurrently. Persistent PJRT plugin, client, buffer and
+  executable handles are `Send + Sync`, following PJRT's thread-safe native
+  handle contract; graph-owned sessions remain thread-affine because their
+  transactional state uses `Rc`. In-flight submission handles are also still
+  thread-affine. Native execution cancellation and in-flight memory budgeting
   remain separate scheduling concerns.
 - External effects: not ordinary dead-code-eliminable tensor operations. Ordering
   and retry behavior need separate contracts before adding callbacks or I/O.
