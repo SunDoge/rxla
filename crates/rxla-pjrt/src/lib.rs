@@ -8,7 +8,11 @@
 pub mod sys {
     include!("generated.rs");
 }
+mod distributed;
 mod runtime;
+pub use distributed::{
+    DistributedClientConfig, InMemoryKeyValueStore, KeyValueStore, KeyValueStoreError,
+};
 pub use half::{bf16, f16};
 pub use runtime::{
     Buffer, BufferMemoryLayout, Client, ClientInfo, ClientOptionValue, ClientOptions, DType,

@@ -1,4 +1,5 @@
 #![allow(unused_unsafe)] // Macro guards remain safe when invoked outside unsafe blocks.
+use crate::distributed::{DistributedClientConfig, KeyValueCallbackState};
 use crate::sys::*;
 use libloading::Library;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
@@ -247,6 +248,29 @@ impl Plugin {
         self.0.api
     }
 
+    /// Whether this implementation advertises the experimental direct
+    /// collectives extension. This is distinct from graph collectives: a CUDA
+    /// plugin can execute StableHLO collectives through NCCL without exposing
+    /// this extension.
+    pub fn supports_collectives_extension(&self) -> bool {
+        let mut extension = unsafe { (*self.api()).extension_start };
+        let mut visited = std::collections::HashSet::new();
+        while let Some(current) = NonNull::new(extension) {
+            if !visited.insert(current.as_ptr() as usize) {
+                return false;
+            }
+            let base = unsafe { current.as_ptr().read() };
+            if base.struct_size < PJRT_Extension_Base_STRUCT_SIZE as usize {
+                return false;
+            }
+            if base.type_ == PJRT_Extension_Type_PJRT_Extension_Type_Collectives {
+                return true;
+            }
+            extension = base.next;
+        }
+        false
+    }
+
     /// Load and initialize a trusted PJRT dynamic library.
     ///
     /// A path containing no directory separators may be resolved by the
@@ -316,6 +340,19 @@ impl Plugin {
     /// Create a client using this initialized implementation.
     pub fn create_client(&self, options: &ClientOptions) -> Result<Client> {
         self.create_client_on_device(options, 0)
+    }
+
+    /// Create one node of a distributed client using a process-shared
+    /// rendezvous store. The configuration owns the store for the client
+    /// lifetime and injects the standard GPU `node_id`/`num_nodes` options.
+    pub fn create_distributed_client(
+        &self,
+        options: &ClientOptions,
+        config: DistributedClientConfig,
+    ) -> Result<Client> {
+        let options = config.options(options);
+        options.validate()?;
+        Client::from_plugin_with_callbacks(self.clone(), &options, 0, Some(config.callbacks()))
     }
 
     /// Create a client selecting one addressable device as its default.
@@ -429,6 +466,16 @@ impl PluginRegistry {
         self.plugin(name)?.create_client(options)
     }
 
+    pub fn create_distributed_client(
+        &self,
+        name: &str,
+        options: &ClientOptions,
+        config: DistributedClientConfig,
+    ) -> Result<Client> {
+        self.plugin(name)?
+            .create_distributed_client(options, config)
+    }
+
     pub fn names(&self) -> impl ExactSizeIterator<Item = &str> {
         self.plugins.keys().map(String::as_str)
     }
@@ -455,6 +502,9 @@ struct ClientInner {
     raw: *mut PJRT_Client,
     device: *mut PJRT_Device,
     addressable_devices: Vec<*mut PJRT_Device>,
+    // PJRT may use rendezvous callbacks from background threads for the full
+    // client lifetime. Keep their stable allocation alive until after destroy.
+    _key_value_callbacks: Option<Box<KeyValueCallbackState>>,
 }
 impl ClientInner {
     fn destroy(&self) -> Result<()> {
@@ -479,6 +529,10 @@ pub struct Client(Rc<ClientInner>);
 impl Client {
     pub fn addressable_device_count(&self) -> usize {
         self.0.addressable_devices.len()
+    }
+
+    pub fn supports_collectives_extension(&self) -> bool {
+        self.0.plugin.supports_collectives_extension()
     }
 
     /// Load a trusted native plugin. It executes native code in this process.
@@ -507,6 +561,24 @@ impl Client {
         options: &ClientOptions,
     ) -> Result<Self> {
         unsafe { Self::load_on_device(path, options, 0) }
+    }
+
+    /// Load a trusted plugin and create one node of a distributed PJRT client.
+    ///
+    /// CUDA PJRT uses the supplied rendezvous callbacks to exchange bootstrap
+    /// information for cross-process collective communication (normally NCCL).
+    /// Client creation may block until every configured node joins.
+    ///
+    /// # Safety
+    /// The native library must be trusted and implement the PJRT ABI correctly.
+    pub unsafe fn load_distributed(
+        path: impl AsRef<Path>,
+        options: &ClientOptions,
+        config: DistributedClientConfig,
+    ) -> Result<Self> {
+        options.validate()?;
+        let plugin = unsafe { Plugin::load(path) }?;
+        plugin.create_distributed_client(options, config)
     }
 
     /// Create a client whose default uploads and single-device executables use
@@ -541,6 +613,15 @@ impl Client {
         options: &ClientOptions,
         addressable_device_index: usize,
     ) -> Result<Self> {
+        Self::from_plugin_with_callbacks(plugin, options, addressable_device_index, None)
+    }
+
+    fn from_plugin_with_callbacks(
+        plugin: Plugin,
+        options: &ClientOptions,
+        addressable_device_index: usize,
+        mut key_value_callbacks: Option<Box<KeyValueCallbackState>>,
+    ) -> Result<Self> {
         let raw_options = options.encode()?;
         let api = plugin.api();
         let mut create = args!(PJRT_Client_Create_Args, PJRT_Client_Create_Args_STRUCT_SIZE);
@@ -550,6 +631,9 @@ impl Client {
             raw_options.as_ptr()
         };
         create.num_options = raw_options.len();
+        if let Some(callbacks) = key_value_callbacks.as_mut() {
+            callbacks.install(&mut create);
+        }
         plugin.check(unsafe { function!(api, PJRT_Client_Create)(&mut create) })?;
         ensure!(
             !create.client.is_null(),
@@ -562,6 +646,7 @@ impl Client {
             raw: create.client,
             device: ptr::null_mut(),
             addressable_devices: Vec::new(),
+            _key_value_callbacks: key_value_callbacks,
         };
         let mut devices = args!(
             PJRT_Client_AddressableDevices_Args,
@@ -1710,6 +1795,7 @@ mod lifetime_tests {
                 raw: ptr::null_mut(),
                 device: ptr::null_mut(),
                 addressable_devices: vec![],
+                _key_value_callbacks: None,
             });
             let pending = PendingExecution {
                 executable: Rc::new(ExecutableInner {
@@ -1813,6 +1899,7 @@ mod lifetime_tests {
                 raw: raw_token,
                 device: device_token,
                 addressable_devices: vec![device_token],
+                _key_value_callbacks: None,
             }));
             assert!(matches!(
                 BufferInner::new(client.0.clone(), ptr::null_mut()),
@@ -1906,6 +1993,7 @@ mod lifetime_tests {
                 raw: ptr::null_mut(),
                 device: selected,
                 addressable_devices: vec![selected, foreign],
+                _key_value_callbacks: None,
             };
             let result = executable_devices(&client, ptr::from_ref(&placement).cast_mut().cast());
             assert_eq!(result.is_ok(), valid);
@@ -1975,6 +2063,32 @@ mod lifetime_tests {
             Error::IncompatiblePlugin { message }
                 if message == "missing API slot: PJRT_Error_Message"
         ));
+    }
+
+    #[test]
+    fn collectives_extension_capability_is_discovered_without_assuming_support() {
+        let mut tail = PJRT_Extension_Base {
+            struct_size: PJRT_Extension_Base_STRUCT_SIZE as usize,
+            type_: PJRT_Extension_Type_PJRT_Extension_Type_Layouts,
+            next: ptr::null_mut(),
+        };
+        let mut collectives = PJRT_Extension_Base {
+            struct_size: PJRT_Extension_Base_STRUCT_SIZE as usize,
+            type_: PJRT_Extension_Type_PJRT_Extension_Type_Collectives,
+            next: ptr::from_mut(&mut tail),
+        };
+        let mut api = lifetime_table();
+        let plugin = |api: &PJRT_Api| {
+            Plugin(Rc::new(PluginInner {
+                api,
+                _library: Some(ManuallyDrop::new(
+                    libloading::os::unix::Library::this().into(),
+                )),
+            }))
+        };
+        assert!(!plugin(&api).supports_collectives_extension());
+        api.extension_start = ptr::from_mut(&mut collectives);
+        assert!(plugin(&api).supports_collectives_extension());
     }
 
     #[test]

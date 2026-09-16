@@ -2180,6 +2180,7 @@ name = "rxla-pjrt"
 version = "0.1.0-alpha.1"
 dependencies = [
  "half",
+ "libc",
  "libloading",
  "smallvec 2.0.0-alpha.13",
  "snafu",
