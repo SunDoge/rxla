@@ -2,7 +2,7 @@
 use clap::Parser;
 use rxla_core::{CacheLimits, Client, Compiler};
 use rxla_models::taesd_decoder;
-use rxla_nn::{Cx, apply, init};
+use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
 use std::{io::Write, path::PathBuf, time::Instant};
 
@@ -47,12 +47,9 @@ fn percentile(samples: &[f64], fraction: f64) -> f64 {
 fn run(args: Args) -> Result<()> {
     let client = unsafe { Client::load(&args.plugin) }?;
     let info = client.info()?;
-    let decoder = |cx: &mut Cx| {
-        let latent = cx.input(&[1, args.latent, args.latent, 4])?;
-        taesd_decoder(cx, &latent)
-    };
-    let (schema, _) = init(decoder)?;
-    let decoder = apply(&schema, decoder)?;
+    let decoder = Model::new(|cx: &mut Cx, latent| taesd_decoder(cx, &latent))
+        .inputs(ModelInput::new([1, args.latent, args.latent, 4]));
+    let (schema, decoder) = decoder.trace()?;
 
     let checkpoint_open = Instant::now();
     let mut checkpoint = SafeTensors::open(&args.weights)?;

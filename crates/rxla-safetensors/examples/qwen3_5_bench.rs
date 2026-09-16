@@ -2,7 +2,7 @@
 use clap::Parser;
 use rxla_core::{CacheLimits, Client, Compiler, DType};
 use rxla_models::{Qwen3_5Config, qwen3_5};
-use rxla_nn::{Cx, Model};
+use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
 use std::{io::Write, path::PathBuf, time::Instant};
 
@@ -43,10 +43,8 @@ fn run(args: Args) -> Result<()> {
     let client = unsafe { Client::load(&args.plugin) }?;
     let info = client.info()?;
     let config = Qwen3_5Config::qwen3_5_0_8b_w8();
-    let model = Model::new(|cx: &mut Cx| {
-        let ids = cx.input_dtype(&[1, args.sequence], DType::I32)?;
-        qwen3_5(cx, &ids, &config)
-    });
+    let model = Model::new(|cx: &mut Cx, ids| qwen3_5(cx, &ids, &config))
+        .inputs(ModelInput::new([1, args.sequence]).dtype(DType::I32));
     let (schema, applied) = model.trace()?;
     let mut checkpoint = SafeTensors::open(&args.weights)?;
     checkpoint.require_metadata(&[("format", "rxla-qwen3.5-w8-v1"), ("group_size", "128")])?;

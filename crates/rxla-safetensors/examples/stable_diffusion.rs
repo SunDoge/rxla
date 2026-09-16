@@ -9,13 +9,14 @@ use rxla_models::{
     AutoencoderKlDecoderConfig, ClipTextConfig, PndmSampleSource, PndmScheduler, UnetConfig,
     autoencoder_kl_decoder, clip_text_encoder, unet,
 };
-use rxla_nn::{AppliedModel, Cx, ParamSchema, apply, init};
+use rxla_nn::{AppliedModel, Cx, Model, ModelInput, ParamSchema};
 use rxla_safetensors::{SafeTensors, SchemaBuffers};
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
     path::{Path, PathBuf},
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -306,7 +307,7 @@ fn diffusers_vae_mapping(schema: &ParamSchema) -> HashMap<String, String> {
 
 struct Stage {
     model: AppliedModel,
-    executable: Rc<Executable>,
+    executable: Arc<Executable>,
     weights: SchemaBuffers,
 }
 
@@ -411,12 +412,10 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
     let compile_start = Instant::now();
 
     let clip_config = args.preset.clip();
-    let clip_model = |cx: &mut Cx| {
-        let tokens = cx.input_dtype(&[2, 77], rxla_core::DType::I32)?;
-        clip_text_encoder(cx, &tokens, &clip_config)
-    };
-    let (clip_schema, _) = init(clip_model)?;
-    let clip_model = apply(&clip_schema, clip_model)?;
+    let clip_model =
+        Model::new(|cx: &mut Cx, tokens: Tensor| clip_text_encoder(cx, &tokens, &clip_config))
+            .inputs(ModelInput::new([2, 77]).dtype(rxla_core::DType::I32));
+    let (clip_schema, clip_model) = clip_model.trace()?;
     let mut clip_checkpoint = SafeTensors::open(args.model.join("text_encoder/model.safetensors"))?;
     let clip_executable = clip_model.compile(&mut compiler)?;
     let clip_weights = clip_checkpoint.load_parameter_schema(&client, &clip_schema)?;
@@ -429,35 +428,42 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
     let unet_config = args.preset.unet();
     let context_width = args.preset.context_width();
     let timestep_width = args.preset.timestep_width();
-    let denoise_model = |cx: &mut Cx| {
-        let model_sample = cx.input(&[1, 64, 64, 4])?;
-        let update_sample = cx.input(&[1, 64, 64, 4])?;
-        let timestep = cx.input(&[2, timestep_width as i64])?;
-        let context = cx.input(&[2, 77, context_width])?;
-        let history = (0..4)
-            .map(|_| cx.input(&[1, 64, 64, 4]))
-            .collect::<rxla_nn::Result<Vec<_>>>()?;
-        let coefficients = cx.input(&[8])?;
-        let doubled = Tensor::concatenate(&[model_sample.clone(), model_sample.clone()], 0)?;
-        let noise = unet(cx, &doubled, &timestep, &context, &unet_config)?;
-        let split = noise.split(0, &[1, 1])?;
-        let guidance = coefficient(&coefficients, 7, split[0].shape())?;
-        let guided = split[0].add(&split[1].sub(&split[0])?.mul(&guidance)?)?;
-        let mut combined = guided.mul(&coefficient(&coefficients, 2, guided.shape())?)?;
-        for (slot, previous) in history.iter().enumerate() {
-            combined = combined.add(&previous.mul(&coefficient(
-                &coefficients,
-                slot as i64 + 3,
-                previous.shape(),
-            )?)?)?;
-        }
-        let next = update_sample
-            .mul(&coefficient(&coefficients, 0, update_sample.shape())?)?
-            .add(&combined.mul(&coefficient(&coefficients, 1, combined.shape())?)?)?;
-        Ok([next, guided])
-    };
-    let (denoise_schema, _) = init(denoise_model)?;
-    let denoise_model = apply(&denoise_schema, denoise_model)?;
+    let denoise_model = Model::new(
+        |cx: &mut Cx,
+         model_sample: Tensor,
+         update_sample: Tensor,
+         timestep: Tensor,
+         context: Tensor,
+         history: Vec<Tensor>,
+         coefficients: Tensor| {
+            let doubled = Tensor::concatenate(&[model_sample.clone(), model_sample.clone()], 0)?;
+            let noise = unet(cx, &doubled, &timestep, &context, &unet_config)?;
+            let split = noise.split(0, &[1, 1])?;
+            let guidance = coefficient(&coefficients, 7, split[0].shape())?;
+            let guided = split[0].add(&split[1].sub(&split[0])?.mul(&guidance)?)?;
+            let mut combined = guided.mul(&coefficient(&coefficients, 2, guided.shape())?)?;
+            for (slot, previous) in history.iter().enumerate() {
+                combined = combined.add(&previous.mul(&coefficient(
+                    &coefficients,
+                    slot as i64 + 3,
+                    previous.shape(),
+                )?)?)?;
+            }
+            let next = update_sample
+                .mul(&coefficient(&coefficients, 0, update_sample.shape())?)?
+                .add(&combined.mul(&coefficient(&coefficients, 1, combined.shape())?)?)?;
+            Ok([next, guided])
+        },
+    )
+    .inputs((
+        ModelInput::new([1, 64, 64, 4]),
+        ModelInput::new([1, 64, 64, 4]),
+        ModelInput::new([2, timestep_width as i64]),
+        ModelInput::new([2, 77, context_width]),
+        vec![ModelInput::new([1, 64, 64, 4]); 4],
+        ModelInput::new([8]),
+    ));
+    let (denoise_schema, denoise_model) = denoise_model.trace()?;
     let mut unet_checkpoint =
         SafeTensors::open(args.model.join("unet/diffusion_pytorch_model.safetensors"))?;
     let denoise_executable = denoise_model.compile(&mut compiler)?;
@@ -469,15 +475,14 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
     };
 
     let vae_config = args.preset.vae();
-    let vae_model = |cx: &mut Cx| -> rxla_nn::Result<Tensor> {
-        let latent = cx.input(&[1, 64, 64, 4])?;
+    let vae_model = Model::new(|cx: &mut Cx, latent: Tensor| -> rxla_nn::Result<Tensor> {
         Ok(autoencoder_kl_decoder(cx, &latent, &vae_config)?
             .mul_scalar(0.5)?
             .add_scalar(0.5)?
             .clamp(0.0, 1.0)?)
-    };
-    let (vae_schema, _) = init(vae_model)?;
-    let vae_model = apply(&vae_schema, vae_model)?;
+    })
+    .inputs(ModelInput::new([1, 64, 64, 4]));
+    let (vae_schema, vae_model) = vae_model.trace()?;
     let mut vae_checkpoint =
         SafeTensors::open(args.model.join("vae/diffusion_pytorch_model.safetensors"))?;
     let vae_executable = vae_model.compile(&mut compiler)?;

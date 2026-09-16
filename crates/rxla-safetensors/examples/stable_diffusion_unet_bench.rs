@@ -2,7 +2,7 @@
 use clap::Parser;
 use rxla_core::{CacheLimits, Client, Compiler};
 use rxla_models::{UnetConfig, unet};
-use rxla_nn::{Cx, apply, init};
+use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
 use std::{io::Write, path::PathBuf, time::Instant};
 
@@ -69,14 +69,15 @@ fn percentile(samples: &[f64], fraction: f64) -> f64 {
 fn run(args: Args) -> Result<()> {
     let client = unsafe { Client::load(&args.plugin) }?;
     let info = client.info()?;
-    let model = |cx: &mut Cx| {
-        let sample = cx.input(&[1, args.spatial, args.spatial, 4])?;
-        let timestep = cx.input(&[1, 32])?;
-        let context = cx.input(&[1, 77, 32])?;
+    let model = Model::new(|cx: &mut Cx, sample, timestep, context| {
         unet(cx, &sample, &timestep, &context, &UnetConfig::tiny())
-    };
-    let (schema, _) = init(model)?;
-    let applied = apply(&schema, model)?;
+    })
+    .inputs((
+        ModelInput::new([1, args.spatial, args.spatial, 4]),
+        ModelInput::new([1, 32]),
+        ModelInput::new([1, 77, 32]),
+    ));
+    let (schema, applied) = model.trace()?;
 
     let mut checkpoint = SafeTensors::open(&args.weights)?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
