@@ -35,7 +35,8 @@ Instead, an explicit interpreter chooses the meaning of the same effect:
 | execution | bind/read the corresponding resident or supplied buffer; no declaration is possible |
 
 Conceptually, callers capture a model body in `Model` once. `Model::trace`
-interprets it to discover the schema and then produces the applied trace. The
+interprets it once to discover the schema while retaining that same applied IR;
+ordinary tracing does not rebuild a large model body in a second pass. The
 lower-level `init` and `apply` methods remain available when checkpoint tooling
 needs to inspect or restore a schema between those phases. This is an API
 boundary, not a second model implementation: users never write a separate init

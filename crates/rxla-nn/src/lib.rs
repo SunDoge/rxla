@@ -163,9 +163,7 @@ where
     /// remain available when callers need to inspect or restore a schema
     /// between the two interpretations.
     pub fn trace(&self) -> Result<(ParamSchema, AppliedModel)> {
-        let schema = self.init()?;
-        let applied = self.apply(&schema)?;
-        Ok((schema, applied))
+        trace_once(|cx| (self.apply)(cx))
     }
 
     /// Discover the schema and trace a caller-selected resident parameter set.
@@ -211,9 +209,7 @@ where
     where
         F: ModelHandler<I, Marker>,
     {
-        let schema = self.init()?;
-        let applied = self.apply(&schema)?;
-        Ok((schema, applied))
+        trace_once(|cx| self.apply.invoke(cx, &self.inputs))
     }
 
     /// Discover typed inputs and trace a caller-selected resident parameter set.
@@ -733,8 +729,10 @@ impl Cx {
     }
 
     fn parameter_tensors(&self) -> Vec<Tensor> {
-        let ParamMode::Apply { schema, values, .. } = &self.mode else {
-            unreachable!("only apply contexts expose parameter tensors")
+        let (schema, values) = match &self.mode {
+            ParamMode::Init { schema, values } | ParamMode::Apply { schema, values, .. } => {
+                (schema, values)
+            }
         };
         schema
             .parameters()
@@ -742,7 +740,7 @@ impl Cx {
             .map(|parameter| {
                 values
                     .get(parameter.path())
-                    .expect("finish_apply verified every schema parameter")
+                    .expect("each schema parameter has a traced tensor")
                     .clone()
             })
             .collect()
@@ -887,6 +885,30 @@ pub fn init<T>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ParamSchema, 
     Ok((cx.into_schema(), result))
 }
 
+fn trace_once<T: ModelOutputs>(
+    body: impl FnOnce(&mut Cx) -> Result<T>,
+) -> Result<(ParamSchema, AppliedModel)> {
+    let mut cx = Cx::init();
+    let outputs = body(&mut cx)?.into_tensors();
+    cx.finish_rngs()?;
+    let schema = match &cx.mode {
+        ParamMode::Init { schema, .. } => schema.clone(),
+        ParamMode::Apply { .. } => unreachable!("trace_once creates an init context"),
+    };
+    let parameters = cx.parameter_tensors();
+    let states = cx.state_slots(&schema);
+    let resident_parameters = vec![None; schema.parameters().len()];
+    let applied = AppliedModel::new(
+        cx.graph,
+        states,
+        outputs,
+        parameters,
+        resident_parameters,
+        schema.clone(),
+    );
+    Ok((schema, applied))
+}
+
 /// Interpret parameter effects as reads from `schema` and retain traced outputs.
 pub fn apply<T: ModelOutputs>(
     schema: &ParamSchema,
@@ -934,6 +956,7 @@ fn apply_with_resident<T: ModelOutputs>(
 mod tests {
     use super::*;
     use rxla_core::{Buffer, CacheLimits, Client, ClientOptions, Compiler, Conv2dOptions};
+    use std::cell::Cell;
 
     fn classifier(cx: &mut Cx) -> Result<Tensor> {
         let input = cx.input(&[2, 4])?;
@@ -960,6 +983,22 @@ mod tests {
         let applied = apply(&schema, classifier).unwrap();
         assert_eq!(applied.outputs()[0].shape(), [2, 3]);
         assert_eq!(applied.prepare().unwrap().input_count(), 2);
+    }
+
+    #[test]
+    fn ordinary_model_trace_invokes_the_apply_body_once() {
+        let calls = Cell::new(0);
+        let definition = Model::new(|cx: &mut Cx, input: Tensor| {
+            calls.set(calls.get() + 1);
+            cx.layer("head")?.linear(3).apply(&input)
+        })
+        .inputs(ModelInput::new([2, 4]));
+
+        let (schema, applied) = definition.trace().unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(schema.parameters().len(), 2);
+        assert_eq!(applied.outputs()[0].shape(), [2, 3]);
+        assert_eq!(applied.prepare().unwrap().input_count(), 3);
     }
 
     #[test]
