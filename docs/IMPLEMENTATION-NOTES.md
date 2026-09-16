@@ -1281,6 +1281,10 @@ sealed `Element` trait, so ordinary `client.buffer(shape, &[bf16])`,
 `buffer.to_vec::<bf16>()`, and `buffer.copy_to(&mut [bf16])` preserve native
 storage without rounding through F32. Raw encodings remain available explicitly
 through `bf16::from_bits` and `bf16::to_bits` at serialization/test boundaries.
+`rxla-core` directly re-exports `half::{f16, bf16}` and uses those types for
+`TensorElement`; they are not RXLA bit wrappers and do not belong to the PJRT
+backend layer. Consequently `Tensor::from_slice` and `TensorBuilder::from_vec`
+accept native half values while still checking the explicitly declared dtype.
 Native tests round-trip all 65536 bit patterns (including NaN payloads), scalars
 and empty tensors, reject wrong-type reads and invalid shapes, and verify buffers
 keep their client alive. CPU and selected CUDA gates include these tests.

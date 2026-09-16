@@ -1,6 +1,7 @@
 //! Tensor descriptor and managed storage. No implicit evaluation or native views.
 use super::*;
-use rxla_pjrt::{BufferMemoryLayout, HostView, Shape, StridedLayout, bf16, f16};
+use half::{bf16, f16};
+use rxla_pjrt::{BufferMemoryLayout, HostView, Shape, StridedLayout};
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{

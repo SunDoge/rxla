@@ -2,13 +2,14 @@
 pub use batch_norm_state::{BatchNormState, BatchNormUpdate};
 pub use compiler::{CacheLimits, CacheStats, Compiler, LoweredProgram};
 pub use dlpark;
+pub use half::{bf16, f16};
 pub use kv_cache::{KvCache, KvCacheUpdate};
 pub use nn::BatchNormTraining;
 use prost::Message;
 pub use rxla_pjrt::{
     Buffer, BufferMemoryLayout, Client, ClientInfo, ClientOptionValue, ClientOptions, DType,
     DeviceInfo, Element, Error as PjrtError, PendingExecution, PendingHostUpload, PjrtErrorCode,
-    Plugin, PluginRegistry, bf16, f16,
+    Plugin, PluginRegistry,
 };
 use rxla_xla_proto::xla::{
     CompileOptionsProto, DeviceAssignmentProto, ExecutableBuildOptionsProto, HloModuleProto,
