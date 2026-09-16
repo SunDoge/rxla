@@ -35,33 +35,34 @@ fn input_data(batch: usize) -> Vec<u8> {
         .collect()
 }
 
-fn host_pipeline(input: &[u8], batch: usize) -> f32 {
-    let mut resized = vec![0.0f32; batch * RESIZED * RESIZED * CHANNELS];
-    let scale = INPUT as f64 / RESIZED as f64;
-    for n in 0..batch {
-        for oy in 0..RESIZED {
-            let sy = ((oy as f64 + 0.5) * scale - 0.5).clamp(0.0, INPUT as f64 - 1.0);
-            let y0 = sy.floor() as usize;
-            let y1 = (y0 + 1).min(INPUT - 1);
-            let wy = (sy - y0 as f64) as f32;
-            for ox in 0..RESIZED {
-                let sx = ((ox as f64 + 0.5) * scale - 0.5).clamp(0.0, INPUT as f64 - 1.0);
-                let x0 = sx.floor() as usize;
-                let x1 = (x0 + 1).min(INPUT - 1);
-                let wx = (sx - x0 as f64) as f32;
-                for channel in 0..CHANNELS {
-                    let at = |y, x| {
-                        input[((n * INPUT + y) * INPUT + x) * CHANNELS + channel] as f32 / 255.0
-                    };
-                    let top = at(y0, x0) + (at(y0, x1) - at(y0, x0)) * wx;
-                    let bottom = at(y1, x0) + (at(y1, x1) - at(y1, x0)) * wx;
-                    resized[((n * RESIZED + oy) * RESIZED + ox) * CHANNELS + channel] =
-                        top + (bottom - top) * wy;
-                }
-            }
+struct ResizePlan {
+    lower: Vec<usize>,
+    upper: Vec<usize>,
+    weight: Vec<f32>,
+}
+
+impl ResizePlan {
+    fn new(input: usize, output: usize) -> Self {
+        let scale = input as f64 / output as f64;
+        let mut lower = Vec::with_capacity(output);
+        let mut upper = Vec::with_capacity(output);
+        let mut weight = Vec::with_capacity(output);
+        for coordinate in 0..output {
+            let source = ((coordinate as f64 + 0.5) * scale - 0.5).clamp(0.0, input as f64 - 1.0);
+            let low = source.floor() as usize;
+            lower.push(low);
+            upper.push((low + 1).min(input - 1));
+            weight.push((source - low as f64) as f32);
+        }
+        Self {
+            lower,
+            upper,
+            weight,
         }
     }
+}
 
+fn finish_host_pipeline(resized: &[f32], batch: usize) -> f32 {
     let crop = (RESIZED - OUTPUT) / 2;
     let pixels = (OUTPUT * OUTPUT) as f32;
     let mut channel_sums = vec![[0.0f32; CHANNELS]; batch];
@@ -95,6 +96,72 @@ fn host_pipeline(input: &[u8], batch: usize) -> f32 {
         }
     }
     sum / (batch * OUTPUT * OUTPUT * CHANNELS) as f32
+}
+
+/// Direct four-neighbor implementation kept as an independent numerical oracle.
+fn host_pipeline_direct(input: &[u8], batch: usize) -> f32 {
+    let mut resized = vec![0.0f32; batch * RESIZED * RESIZED * CHANNELS];
+    let scale = INPUT as f64 / RESIZED as f64;
+    for n in 0..batch {
+        for oy in 0..RESIZED {
+            let sy = ((oy as f64 + 0.5) * scale - 0.5).clamp(0.0, INPUT as f64 - 1.0);
+            let y0 = sy.floor() as usize;
+            let y1 = (y0 + 1).min(INPUT - 1);
+            let wy = (sy - y0 as f64) as f32;
+            for ox in 0..RESIZED {
+                let sx = ((ox as f64 + 0.5) * scale - 0.5).clamp(0.0, INPUT as f64 - 1.0);
+                let x0 = sx.floor() as usize;
+                let x1 = (x0 + 1).min(INPUT - 1);
+                let wx = (sx - x0 as f64) as f32;
+                for channel in 0..CHANNELS {
+                    let at = |y, x| {
+                        input[((n * INPUT + y) * INPUT + x) * CHANNELS + channel] as f32 / 255.0
+                    };
+                    let top = at(y0, x0) + (at(y0, x1) - at(y0, x0)) * wx;
+                    let bottom = at(y1, x0) + (at(y1, x1) - at(y1, x0)) * wx;
+                    resized[((n * RESIZED + oy) * RESIZED + ox) * CHANNELS + channel] =
+                        top + (bottom - top) * wy;
+                }
+            }
+        }
+    }
+
+    finish_host_pipeline(&resized, batch)
+}
+
+/// Production-shaped scalar baseline: coordinate planning is outside the timed
+/// path and resize is split into cache-friendly horizontal and vertical passes.
+fn host_pipeline_separable(input: &[u8], batch: usize, plan: &ResizePlan) -> f32 {
+    let mut horizontal = vec![0.0f32; batch * INPUT * RESIZED * CHANNELS];
+    for n in 0..batch {
+        for y in 0..INPUT {
+            for x in 0..RESIZED {
+                for channel in 0..CHANNELS {
+                    let row = (n * INPUT + y) * INPUT;
+                    let left = input[(row + plan.lower[x]) * CHANNELS + channel] as f32 / 255.0;
+                    let right = input[(row + plan.upper[x]) * CHANNELS + channel] as f32 / 255.0;
+                    horizontal[((n * INPUT + y) * RESIZED + x) * CHANNELS + channel] =
+                        left + (right - left) * plan.weight[x];
+                }
+            }
+        }
+    }
+    let mut resized = vec![0.0f32; batch * RESIZED * RESIZED * CHANNELS];
+    for n in 0..batch {
+        for y in 0..RESIZED {
+            for x in 0..RESIZED {
+                for channel in 0..CHANNELS {
+                    let top = horizontal
+                        [((n * INPUT + plan.lower[y]) * RESIZED + x) * CHANNELS + channel];
+                    let bottom = horizontal
+                        [((n * INPUT + plan.upper[y]) * RESIZED + x) * CHANNELS + channel];
+                    resized[((n * RESIZED + y) * RESIZED + x) * CHANNELS + channel] =
+                        top + (bottom - top) * plan.weight[y];
+                }
+            }
+        }
+    }
+    finish_host_pipeline(&resized, batch)
 }
 
 fn tensor_pipeline(batch: usize) -> Result<TensorFunction> {
@@ -139,11 +206,23 @@ fn main() -> Result<()> {
         .ok_or("pass --plugin or set PJRT_PLUGIN_PATH")?;
     let data = input_data(args.batch);
 
-    let host_expected = host_pipeline(&data, args.batch);
+    let resize_plan = ResizePlan::new(INPUT, RESIZED);
+    let host_expected = host_pipeline_direct(&data, args.batch);
+    let planned_expected = host_pipeline_separable(&data, args.batch, &resize_plan);
+    if (planned_expected - host_expected).abs() > 2e-6 {
+        return Err(format!(
+            "separable host checksum {planned_expected} differs from direct oracle {host_expected}"
+        )
+        .into());
+    }
     let mut host_samples = Vec::with_capacity(args.runs);
     for _ in 0..args.runs {
         let start = Instant::now();
-        let value = black_box(host_pipeline(black_box(&data), args.batch));
+        let value = black_box(host_pipeline_separable(
+            black_box(&data),
+            args.batch,
+            black_box(&resize_plan),
+        ));
         host_samples.push(start.elapsed().as_secs_f64() * 1e3);
         if (value - host_expected).abs() > 1e-6 {
             return Err("host pipeline is not deterministic".into());

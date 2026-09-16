@@ -103,9 +103,11 @@ U8 NHWC
 The checksum keeps the complete pipeline live while downloading one scalar.
 `resident` excludes upload and compilation. `end-to-end` includes construction
 of a copied host Tensor, synchronous upload, execution and scalar download. The
-host reference is an independent optimized Rust scalar implementation; it is
-not a comparison with a tuned SIMD/threaded image library. Warmup trials are
-excluded, and compilation is reported separately.
+host reference is an independent scalar implementation with resize coordinates
+precomputed outside the timed path and cache-friendly horizontal and vertical
+interpolation passes. A separate direct four-neighbor implementation checks its
+numerical result. It is still not a comparison with a tuned SIMD/threaded image
+library. Warmup trials are excluded, and compilation is reported separately.
 
 Measurements were taken on 2026-09-16 using an Intel Core Ultra 9 285K and
 NVIDIA GeForce RTX 5080. PJRT was the pinned ZML build documented in
@@ -114,17 +116,18 @@ from 30 trials for batch 1 and 20 trials for batch 8.
 
 | Backend | Batch | XLA compile | Host median / p95 | Resident median / p95 | End-to-end median / p95 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| CPU reference only | 1 | n/a | 1.400 / 2.329 | n/a | n/a |
-| XLA CPU | 1 | 53.934 | 1.400 / 2.329 | 1.730 / 2.198 | 3.471 / 4.597 |
-| RTX 5080 CUDA | 1 | 278.224 | 1.403 / 1.422 | 1.004 / 1.511 | 2.356 / 2.995 |
-| CPU reference only | 8 | n/a | 8.756 / 12.029 | n/a | n/a |
-| XLA CPU | 8 | 55.300 | 8.756 / 12.029 | 3.733 / 4.157 | 20.769 / 23.071 |
-| RTX 5080 CUDA | 8 | 179.282 | 8.524 / 12.028 | 1.526 / 1.952 | 18.852 / 19.632 |
+| CPU reference only | 1 | n/a | 1.305 / 1.319 | n/a | n/a |
+| XLA CPU | 1 | 48.065 | 1.305 / 1.319 | 1.370 / 1.901 | 3.415 / 3.904 |
+| RTX 5080 CUDA | 1 | 191.064 | 1.308 / 1.321 | 0.888 / 1.198 | 2.859 / 3.337 |
+| CPU reference only | 8 | n/a | 5.464 / 10.406 | n/a | n/a |
+| XLA CPU | 8 | 45.035 | 5.464 / 10.406 | 3.513 / 4.552 | 13.673 / 14.685 |
+| RTX 5080 CUDA | 8 | 184.629 | 5.490 / 9.111 | 1.673 / 2.473 | 18.927 / 21.359 |
 
-For batch 8, resident XLA CPU is about 2.35x faster than the scalar host
-reference and resident CUDA is about 5.6x faster. Batch-1 resident CUDA is only
-about 1.4x faster. Re-uploading every batch loses in all measured cases: batch-8
-end-to-end CUDA is about 2.2x slower than the host reference.
+For batch 8, resident XLA CPU is about 1.56x faster than the scalar host
+reference and resident CUDA is about 3.28x faster. Batch-1 resident CUDA is
+about 1.47x faster, while resident XLA CPU is slightly slower. Re-uploading
+every batch loses in all measured cases: batch-8 end-to-end CUDA is about 3.45x
+slower than the host reference.
 
 The optimized-HLO diagnostics contain fusion computations for the chain, but a
 string occurrence count is not a kernel count or proof that the entire program
