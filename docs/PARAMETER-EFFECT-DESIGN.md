@@ -127,7 +127,10 @@ for (id, parameter) in trainable.parameters() {
 `AppliedModel::parameter_tensors(&selection)` maps those stable identities to
 the corresponding SSA tensor handles in selection order. Passing that slice to
 `Tensor::grad` already performs partial autodiff; optimizer integration can use
-the same ordering. The same model can therefore train everything, freeze a
+the same ordering. A selection owns a cheap clone of the immutable schema
+handle rather than borrowing it, so it can coexist with mutable IR transforms;
+schema provenance is checked by identity rather than structural coincidence.
+The same model can therefore train everything, freeze a
 backbone, or update an adapter without changing its forward definition. Mutable
 non-parameter data belongs to a separate state effect; immutable assets belong
 to constants.
@@ -162,8 +165,23 @@ only selected replacement parameters cross the visible output ABI. This is not
 a global optimizer registry: the transform explicitly declares stable paths
 under `__optimizer.adam`, and a session owns the resulting buffers.
 
-Parameters are ordinary device-buffer inputs by default. `apply_resident`
-instead interprets a `ParameterSelection` as session-owned state while tracing.
+Parameters are ordinary device-buffer inputs by default. `trace_resident`
+discovers the schema, selects storage and traces the model in one operation:
+
+```rust
+# use rxla::{Tensor, nn::{Cx, Model, Result}};
+# fn loss(cx: &mut Cx) -> Result<Tensor> {
+#     let x = cx.input(&[2, 3])?;
+#     Ok(cx.named("linear")?.linear(1).bias(false).apply(&x)?.sum(&[0, 1], false)?)
+# }
+let (_schema, trainable, mut model) = Model::new(loss)
+    .trace_resident(|schema| schema.select_under("linear"))?;
+let loss = model.outputs()[0].clone();
+rxla_train::apply_model_sgd(&mut model, &trainable, &loss, 0.01)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The selected `ParameterSelection` is interpreted as session-owned state.
 Those parameters disappear from the visible execution ABI and must be
 initialized once, by canonical schema path, through `ModelSessionBuilder`.
 F32, BF16 and U8 storage preserve the same symbolic semantics as input-backed

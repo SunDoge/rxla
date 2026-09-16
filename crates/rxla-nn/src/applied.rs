@@ -143,9 +143,9 @@ impl AppliedModel {
 
     /// Validate that a selection belongs to this trace and every member uses
     /// resident storage. Performs no graph mutation.
-    pub fn validate_resident_parameters(&self, selection: &ParameterSelection<'_>) -> Result<()> {
+    pub fn validate_resident_parameters(&self, selection: &ParameterSelection) -> Result<()> {
         ensure!(
-            selection.schema() == &self.schema,
+            selection.schema().same_identity(&self.schema),
             SelectionSchemaMismatchSnafu
         );
         for (id, spec) in selection.parameters() {
@@ -167,9 +167,9 @@ impl AppliedModel {
     }
 
     /// Clone the cheap graph handles for parameters selected for a transform.
-    pub fn parameter_tensors(&self, selection: &ParameterSelection<'_>) -> Result<Vec<Tensor>> {
+    pub fn parameter_tensors(&self, selection: &ParameterSelection) -> Result<Vec<Tensor>> {
         ensure!(
-            selection.schema() == &self.schema,
+            selection.schema().same_identity(&self.schema),
             SelectionSchemaMismatchSnafu
         );
         Ok(selection
@@ -218,7 +218,7 @@ impl AppliedModel {
     /// before any symbolic slot is changed.
     pub fn write_resident_parameters(
         &mut self,
-        selection: &ParameterSelection<'_>,
+        selection: &ParameterSelection,
         values: &[Tensor],
     ) -> Result<()> {
         self.validate_resident_parameters(selection)?;
@@ -367,7 +367,7 @@ impl AppliedModel {
             validate_buffer(buffer, spec.shape(), spec.dtype(), "parameter", path)?;
         }
         self.schema
-            .parameters
+            .parameters()
             .iter()
             .enumerate()
             .map(|(index, spec)| {
@@ -403,13 +403,13 @@ impl AppliedModel {
 
     fn validate_inputs(&self, inputs: &[&Buffer]) -> Result<()> {
         ensure!(
-            inputs.len() == self.schema.inputs.len(),
+            inputs.len() == self.schema.inputs().len(),
             InputCountSnafu {
-                expected: self.schema.inputs.len(),
+                expected: self.schema.inputs().len(),
                 actual: inputs.len(),
             }
         );
-        for (index, (buffer, spec)) in inputs.iter().zip(&self.schema.inputs).enumerate() {
+        for (index, (buffer, spec)) in inputs.iter().zip(self.schema.inputs()).enumerate() {
             validate_buffer(buffer, spec.shape(), spec.dtype(), "input", index)?;
         }
         Ok(())
@@ -421,14 +421,14 @@ impl AppliedModel {
         parameters: &[Option<&'a Buffer>],
     ) -> Result<ModelArguments<'a>> {
         ensure!(
-            parameters.len() == self.schema.parameters.len(),
+            parameters.len() == self.schema.parameters().len(),
             ParameterCountSnafu {
-                expected: self.schema.parameters.len(),
+                expected: self.schema.parameters().len(),
                 actual: parameters.len(),
             }
         );
-        let mut values = Vec::with_capacity(self.schema.arguments.len());
-        for argument in &self.schema.arguments {
+        let mut values = Vec::with_capacity(self.schema.arguments().len());
+        for argument in self.schema.arguments() {
             match *argument {
                 ModelArgument::Input(index) => values.push(inputs[index]),
                 ModelArgument::Parameter(index) => {

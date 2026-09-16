@@ -215,7 +215,7 @@ impl ModelSgdStep {
 /// replacements `parameter - learning_rate * gradient`.
 pub fn prepare_model_sgd(
     model: &AppliedModel,
-    selection: &ParameterSelection<'_>,
+    selection: &ParameterSelection,
     loss: &Tensor,
     learning_rate: f32,
 ) -> ModelSgdResult<ModelSgdStep> {
@@ -254,7 +254,7 @@ pub fn prepare_model_sgd(
 /// parameter buffers are exposed in the execution result.
 pub fn apply_model_sgd(
     model: &mut AppliedModel,
-    selection: &ParameterSelection<'_>,
+    selection: &ParameterSelection,
     loss: &Tensor,
     learning_rate: f32,
 ) -> ModelSgdResult<()> {
@@ -362,9 +362,9 @@ mod tests {
     #[test]
     fn resident_sgd_hides_parameter_replacements_from_the_result_abi() {
         let definition = Model::new(linear_loss);
-        let schema = definition.init().unwrap();
-        let selection = schema.select_under("linear");
-        let mut model = definition.apply_resident(&schema, &selection).unwrap();
+        let (_, selection, mut model) = definition
+            .trace_resident(|schema| schema.select_under("linear"))
+            .unwrap();
         let loss = model.outputs()[0].clone();
 
         apply_model_sgd(&mut model, &selection, &loss, 0.1).unwrap();
@@ -517,9 +517,9 @@ mod tests {
         }
         .expect("load CPU plugin");
         let definition = Model::new(regression_loss);
-        let schema = definition.init().unwrap();
-        let selection = schema.select_under("linear");
-        let mut model = definition.apply_resident(&schema, &selection).unwrap();
+        let (_, selection, mut model) = definition
+            .trace_resident(|schema| schema.select_under("linear"))
+            .unwrap();
         let slot = model.resident_parameters().next().unwrap().2.clone();
         assert_eq!(
             model.prepare_stateful().unwrap().state_type(&slot).unwrap(),

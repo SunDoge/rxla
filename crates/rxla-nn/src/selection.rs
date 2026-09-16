@@ -20,21 +20,21 @@ impl ParameterId {
     }
 }
 
-/// An ordered, borrowed view of the parameters selected for one transformation.
+/// An ordered, cheaply owned view of parameters from one immutable schema.
 ///
 /// Selections preserve schema order, so gradient and optimizer argument order
 /// remains deterministic. Filters compose by intersection; exclusions subtract
 /// from the current selection.
 #[derive(Clone, Debug)]
-pub struct ParameterSelection<'schema> {
-    schema: &'schema ParamSchema,
+pub struct ParameterSelection {
+    schema: ParamSchema,
     ids: Vec<ParameterId>,
 }
 
-impl<'schema> ParameterSelection<'schema> {
-    pub(crate) fn all(schema: &'schema ParamSchema) -> Self {
+impl ParameterSelection {
+    pub(crate) fn all(schema: &ParamSchema) -> Self {
         Self {
-            schema,
+            schema: schema.clone(),
             ids: (0..schema.parameters().len())
                 .map(ParameterId::from_index)
                 .collect(),
@@ -65,9 +65,7 @@ impl<'schema> ParameterSelection<'schema> {
         &self.ids
     }
 
-    pub fn parameters(
-        &self,
-    ) -> impl ExactSizeIterator<Item = (ParameterId, &'schema ParameterSpec)> + '_ {
+    pub fn parameters(&self) -> impl ExactSizeIterator<Item = (ParameterId, &ParameterSpec)> + '_ {
         self.ids.iter().copied().map(|id| {
             let parameter = self.schema.parameter(id).expect("id came from schema");
             (id, parameter)
@@ -87,7 +85,7 @@ impl<'schema> ParameterSelection<'schema> {
     }
 
     pub(crate) fn schema(&self) -> &ParamSchema {
-        self.schema
+        &self.schema
     }
 }
 

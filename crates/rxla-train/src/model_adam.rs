@@ -221,7 +221,7 @@ impl ModelAdamOutputPlan<'_> {
 /// Differentiate `loss` and append a bias-corrected Adam update to the model IR.
 pub fn prepare_model_adam(
     model: &mut AppliedModel,
-    selection: &ParameterSelection<'_>,
+    selection: &ParameterSelection,
     loss: &Tensor,
     options: AdamOptions,
 ) -> ModelAdamResult<ModelAdamStep> {
@@ -320,7 +320,7 @@ pub fn prepare_model_adam(
 /// as the complete visible result ABI.
 pub fn apply_model_adam(
     model: &mut AppliedModel,
-    selection: &ParameterSelection<'_>,
+    selection: &ParameterSelection,
     loss: &Tensor,
     options: AdamOptions,
 ) -> ModelAdamResult<()> {
@@ -425,9 +425,9 @@ mod tests {
     #[test]
     fn resident_adam_hides_parameter_replacements_from_the_result_abi() {
         let definition = Model::new(linear_loss);
-        let schema = definition.init().unwrap();
-        let selection = schema.select_under("linear");
-        let mut model = definition.apply_resident(&schema, &selection).unwrap();
+        let (_, selection, mut model) = definition
+            .trace_resident(|schema| schema.select_under("linear"))
+            .unwrap();
         let loss = model.outputs()[0].clone();
 
         apply_model_adam(&mut model, &selection, &loss, AdamOptions::default()).unwrap();
@@ -515,9 +515,9 @@ mod tests {
         }
         .unwrap();
         let definition = Model::new(regression_loss);
-        let schema = definition.init().unwrap();
-        let selection = schema.select_under("linear");
-        let mut model = definition.apply_resident(&schema, &selection).unwrap();
+        let (_, selection, mut model) = definition
+            .trace_resident(|schema| schema.select_under("linear"))
+            .unwrap();
         let loss = model.outputs()[0].clone();
         apply_model_adam(
             &mut model,

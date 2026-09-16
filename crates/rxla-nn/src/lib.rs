@@ -151,6 +151,20 @@ where
         Ok((schema, applied))
     }
 
+    /// Discover the schema and trace a caller-selected resident parameter set.
+    ///
+    /// The owned selection is returned for later transforms such as SGD or
+    /// Adam; it retains schema identity without borrowing the returned schema.
+    pub fn trace_resident(
+        &self,
+        select: impl FnOnce(&ParamSchema) -> ParameterSelection,
+    ) -> Result<(ParamSchema, ParameterSelection, AppliedModel)> {
+        let schema = self.init()?;
+        let selection = select(&schema);
+        let applied = self.apply_resident(&schema, &selection)?;
+        Ok((schema, selection, applied))
+    }
+
     /// Discover the input/parameter effect schema from this model body.
     pub fn init(&self) -> Result<ParamSchema> {
         init(|cx| (self.apply)(cx)).map(|(schema, _)| schema)
@@ -165,7 +179,7 @@ where
     pub fn apply_resident(
         &self,
         schema: &ParamSchema,
-        selection: &ParameterSelection<'_>,
+        selection: &ParameterSelection,
     ) -> Result<AppliedModel> {
         apply_resident(schema, selection, |cx| (self.apply)(cx))
     }
@@ -183,6 +197,20 @@ where
         let schema = self.init()?;
         let applied = self.apply(&schema)?;
         Ok((schema, applied))
+    }
+
+    /// Discover typed inputs and trace a caller-selected resident parameter set.
+    pub fn trace_resident<Marker>(
+        &self,
+        select: impl FnOnce(&ParamSchema) -> ParameterSelection,
+    ) -> Result<(ParamSchema, ParameterSelection, AppliedModel)>
+    where
+        F: ModelHandler<I, Marker>,
+    {
+        let schema = self.init()?;
+        let selection = select(&schema);
+        let applied = self.apply_resident(&schema, &selection)?;
+        Ok((schema, selection, applied))
     }
 
     pub fn init<Marker>(&self) -> Result<ParamSchema>
@@ -203,7 +231,7 @@ where
     pub fn apply_resident<Marker>(
         &self,
         schema: &ParamSchema,
-        selection: &ParameterSelection<'_>,
+        selection: &ParameterSelection,
     ) -> Result<AppliedModel>
     where
         F: ModelHandler<I, Marker>,
@@ -337,10 +365,7 @@ impl Cx {
                         .clone());
                 }
                 let value = parameter_tensor(graph, shape, dtype)?;
-                let index = schema.parameters.len();
-                schema.parameters.push(requested);
-                schema.indices.insert(path.clone(), index);
-                schema.arguments.push(ModelArgument::Parameter(index));
+                schema.push_parameter(requested);
                 self.effect_index += 1;
                 values.insert(path, value.clone());
                 Ok(value)
@@ -359,12 +384,12 @@ impl Cx {
                 if let Some(value) = values.get(&path) {
                     return Ok(value.clone());
                 }
-                let parameter_index = *schema
-                    .indices
-                    .get(&path)
-                    .expect("every parameter schema entry has an index");
+                let parameter_index = schema
+                    .parameter_id(&path)
+                    .expect("every parameter schema entry has an index")
+                    .index();
                 ensure!(
-                    schema.arguments.get(self.effect_index)
+                    schema.arguments().get(self.effect_index)
                         == Some(&ModelArgument::Parameter(parameter_index)),
                     EffectMismatchSnafu {
                         index: self.effect_index
@@ -413,12 +438,12 @@ impl Cx {
         let input_index = self.input_index;
         match &mut self.mode {
             ParamMode::Init { schema, .. } => {
-                schema.inputs.push(requested.clone());
-                schema.arguments.push(ModelArgument::Input(input_index));
+                let declared = schema.push_input(requested.clone());
+                debug_assert_eq!(declared, input_index);
             }
             ParamMode::Apply { schema, .. } => {
                 let expected = schema
-                    .inputs
+                    .inputs()
                     .get(input_index)
                     .context(UnexpectedInputSnafu { index: input_index })?;
                 ensure!(
@@ -426,7 +451,7 @@ impl Cx {
                     IncompatibleInputSnafu { index: input_index }
                 );
                 ensure!(
-                    schema.arguments.get(self.effect_index)
+                    schema.arguments().get(self.effect_index)
                         == Some(&ModelArgument::Input(input_index)),
                     EffectMismatchSnafu {
                         index: self.effect_index
@@ -468,19 +493,14 @@ impl Cx {
             });
         }
         let state_index = match &mut self.mode {
-            ParamMode::Init { schema, .. } => {
-                let index = schema.states.len();
-                schema.states.push(StateSpec {
-                    path: path.clone(),
-                    shape: shape.to_vec(),
-                    dtype,
-                });
-                schema.arguments.push(ModelArgument::State(index));
-                index
-            }
+            ParamMode::Init { schema, .. } => schema.push_state(StateSpec {
+                path: path.clone(),
+                shape: shape.to_vec(),
+                dtype,
+            }),
             ParamMode::Apply { schema, .. } => {
                 let (index, expected) = schema
-                    .states
+                    .states()
                     .iter()
                     .enumerate()
                     .find(|(_, state)| state.path == path)
@@ -490,7 +510,7 @@ impl Cx {
                     IncompatibleStateSnafu { path }
                 );
                 ensure!(
-                    schema.arguments.get(self.effect_index) == Some(&ModelArgument::State(index)),
+                    schema.arguments().get(self.effect_index) == Some(&ModelArgument::State(index)),
                     EffectMismatchSnafu {
                         index: self.effect_index
                     }
@@ -590,13 +610,13 @@ impl Cx {
             .fail();
         }
         ensure!(
-            self.input_index == schema.inputs.len(),
+            self.input_index == schema.inputs().len(),
             UnreadInputSnafu {
                 index: self.input_index,
             }
         );
         ensure!(
-            self.effect_index == schema.arguments.len(),
+            self.effect_index == schema.arguments().len(),
             UnreadEffectSnafu {
                 index: self.effect_index,
             }
@@ -770,10 +790,13 @@ pub fn apply<T: ModelOutputs>(
 /// Interpret selected parameters as resident state rather than ABI inputs.
 pub fn apply_resident<T: ModelOutputs>(
     schema: &ParamSchema,
-    selection: &ParameterSelection<'_>,
+    selection: &ParameterSelection,
     body: impl FnOnce(&mut Cx) -> Result<T>,
 ) -> Result<AppliedModel> {
-    ensure!(selection.schema() == schema, SelectionSchemaMismatchSnafu);
+    ensure!(
+        selection.schema().same_identity(schema),
+        SelectionSchemaMismatchSnafu
+    );
     apply_with_resident(schema, selection.ids().iter().copied().collect(), body)
 }
 
@@ -880,6 +903,12 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, Error::SelectionSchemaMismatch));
+
+        let (same_shape, _) = init(|cx| cx.param("weight", &[2])).unwrap();
+        assert!(matches!(
+            applied.parameter_tensors(&same_shape.select_all()),
+            Err(Error::SelectionSchemaMismatch)
+        ));
     }
 
     #[test]
@@ -1060,11 +1089,13 @@ mod tests {
             cx.named("head")?.linear(2).bias(false).apply(&input)
         })
         .inputs(ModelInput::new([1, 3]));
-        let schema = definition.init().unwrap();
-        let selection = schema.select_under("head");
-        let applied = definition.apply_resident(&schema, &selection).unwrap();
+        let (schema, selection, applied) = definition
+            .trace_resident(|schema| schema.select_under("head"))
+            .unwrap();
 
         assert!(applied.is_stateful());
+        assert_eq!(selection.len(), 1);
+        assert_eq!(schema.parameters().len(), 1);
         assert_eq!(applied.resident_parameters().count(), 1);
         let prepared = applied.prepare_stateful().unwrap();
         assert_eq!(prepared.input_indices(), [0]);
