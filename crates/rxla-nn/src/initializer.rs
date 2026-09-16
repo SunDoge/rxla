@@ -96,6 +96,20 @@ impl Initializer {
                 shape,
                 &values.into_iter().map(bf16::from_f32).collect::<Vec<_>>(),
             )?),
+            DType::I32 if matches!(self, Self::Zeros | Self::Ones) => Ok(client.buffer(
+                shape,
+                &values
+                    .into_iter()
+                    .map(|value| value as i32)
+                    .collect::<Vec<_>>(),
+            )?),
+            DType::U8 if matches!(self, Self::Zeros | Self::Ones) => Ok(client.buffer(
+                shape,
+                &values
+                    .into_iter()
+                    .map(|value| value as u8)
+                    .collect::<Vec<_>>(),
+            )?),
             _ => Err(Error::InvalidInitializer {
                 path: path.to_owned(),
                 message: format!("initialization does not support {dtype:?} storage"),
@@ -170,5 +184,43 @@ mod tests {
             schema.initialize(&client, 42),
             Err(Error::MissingInitializer { path }) if path == "external"
         ));
+
+        let definition =
+            Model::new(|cx: &mut Cx, input: Tensor| cx.layer("norm")?.batch_norm().apply(&input))
+                .inputs(crate::ModelInput::new([1, 2, 2, 3]));
+        let (schema, _, model) = definition
+            .trace_resident(|schema| schema.select_all())
+            .unwrap();
+        assert_eq!(
+            schema.get("norm.weight").unwrap().initializer(),
+            Some(Initializer::Ones)
+        );
+        assert_eq!(
+            schema
+                .states()
+                .iter()
+                .find(|state| state.path() == "norm.running_variance")
+                .unwrap()
+                .initializer(),
+            Initializer::Ones
+        );
+        let compiled = model
+            .compile_stateful(&mut Compiler::new(client.clone(), CacheLimits::default()))
+            .unwrap();
+        let session = compiled
+            .session()
+            .parameters(schema.initialize(&client, 42).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+        let states = model.state_buffers(session.raw()).unwrap();
+        let variance = states
+            .iter()
+            .find(|(path, _)| *path == "norm.running_variance")
+            .unwrap()
+            .1
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(variance, [1.0; 3]);
     }
 }

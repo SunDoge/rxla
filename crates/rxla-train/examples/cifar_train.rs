@@ -293,20 +293,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => Dataset::synthetic(batch_size),
     };
     let data_rng = DataRng::new(args.seed);
-    let mut session_builder = compiled
+    let session_builder = compiled
         .session()
         .parameters(schema.initialize(&gpu, args.seed)?)?;
-    for state in schema
-        .states()
-        .iter()
-        .filter(|state| state.path().ends_with("running_variance"))
-    {
-        let count = state.shape().iter().product::<i64>() as usize;
-        session_builder = session_builder.state(
-            state.path(),
-            gpu.buffer(state.shape(), &vec![1.0_f32; count])?,
-        )?;
-    }
     let mut session = session_builder.build()?;
     let mut prepared = (args.steps != 0)
         .then(|| {

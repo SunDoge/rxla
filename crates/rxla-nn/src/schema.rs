@@ -45,6 +45,7 @@ pub struct StateSpec {
     pub(crate) path: String,
     pub(crate) shape: Vec<i64>,
     pub(crate) dtype: DType,
+    pub(crate) initializer: Initializer,
 }
 
 impl StateSpec {
@@ -56,6 +57,9 @@ impl StateSpec {
     }
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+    pub fn initializer(&self) -> Initializer {
+        self.initializer
     }
 }
 
@@ -216,7 +220,7 @@ impl ParamSchema {
     }
 }
 
-fn stable_seed(mut seed: u64, path: &str) -> u64 {
+pub(crate) fn stable_seed(mut seed: u64, path: &str) -> u64 {
     for byte in path.bytes() {
         seed ^= u64::from(byte);
         seed = seed.wrapping_mul(0x100_0000_01b3);

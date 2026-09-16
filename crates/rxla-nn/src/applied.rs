@@ -896,7 +896,26 @@ impl ModelSessionBuilder<'_> {
             .model
             .states
             .iter()
-            .map(|(_, slot)| Ok((slot.clone(), self.program.zero_state_slot(slot)?)))
+            .map(|(path, slot)| {
+                let initializer = self
+                    .model
+                    .schema
+                    .states()
+                    .iter()
+                    .find(|state| state.path() == path)
+                    .map_or(Initializer::Zeros, StateSpec::initializer);
+                let (dtype, shape) = self.program.state_type(slot)?;
+                Ok((
+                    slot.clone(),
+                    initializer.initialize(
+                        self.program.client(),
+                        path,
+                        &shape,
+                        dtype,
+                        crate::schema::stable_seed(0, path),
+                    )?,
+                ))
+            })
             .collect::<Result<Vec<_>>>()?;
         for ((name, _), (_, value)) in self.model.states.iter().zip(&mut ordinary) {
             if let Some(override_value) = self.overrides.remove(name) {

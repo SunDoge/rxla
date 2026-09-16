@@ -529,7 +529,12 @@ impl Cx {
         let weight = self.param_initialized("weight", &[channels], Initializer::Ones)?;
         let bias = self.param_initialized("bias", &[channels], Initializer::Zeros)?;
         let running_mean = self.state("running_mean", &[channels], DType::F32)?;
-        let running_variance = self.state("running_variance", &[channels], DType::F32)?;
+        let running_variance = self.state_initialized(
+            "running_variance",
+            &[channels],
+            DType::F32,
+            Initializer::Ones,
+        )?;
         if !training {
             return Ok(input.batch_norm_inference(
                 3,

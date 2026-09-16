@@ -319,6 +319,7 @@ struct StateDeclaration {
     slot: StateSlot,
     shape: Vec<i64>,
     dtype: DType,
+    initializer: Initializer,
 }
 
 /// Stable identity of a named resident value in a model trace.
@@ -565,11 +566,24 @@ impl Cx {
 
     /// Declare or read named resident state at the current lexical scope.
     pub fn state(&mut self, name: &str, shape: &[i64], dtype: DType) -> Result<State> {
+        self.state_initialized(name, shape, dtype, Initializer::Zeros)
+    }
+
+    /// Declare resident state with an explicit session initialization policy.
+    pub fn state_initialized(
+        &mut self,
+        name: &str,
+        shape: &[i64],
+        dtype: DType,
+        initializer: Initializer,
+    ) -> Result<State> {
         validate_name(name)?;
         let path = self.path(name);
         if let Some(existing) = self.states.get(&path) {
             ensure!(
-                existing.shape == shape && existing.dtype == dtype,
+                existing.shape == shape
+                    && existing.dtype == dtype
+                    && existing.initializer == initializer,
                 IncompatibleStateSnafu { path }
             );
             return Ok(State {
@@ -582,6 +596,7 @@ impl Cx {
                 path: path.clone(),
                 shape: shape.to_vec(),
                 dtype,
+                initializer,
             }),
             ParamMode::Apply { schema, .. } => {
                 let (index, expected) = schema
@@ -591,7 +606,9 @@ impl Cx {
                     .find(|(_, state)| state.path == path)
                     .context(IncompatibleStateSnafu { path: path.clone() })?;
                 ensure!(
-                    expected.shape == shape && expected.dtype == dtype,
+                    expected.shape == shape
+                        && expected.dtype == dtype
+                        && expected.initializer == initializer,
                     IncompatibleStateSnafu { path }
                 );
                 ensure!(
@@ -612,6 +629,7 @@ impl Cx {
                 slot: slot.clone(),
                 shape: shape.to_vec(),
                 dtype,
+                initializer,
             },
         );
         Ok(State { path, slot })

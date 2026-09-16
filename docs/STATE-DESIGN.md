@@ -249,6 +249,13 @@ can explicitly use `compile_stateful_program` and the raw session API. The older
 `StateCx` remain a compatibility layer for lazy-Tensor call sites; new model
 code should not combine that context with `rxla_nn::Cx`.
 
+State declarations carry their own `Initializer`. `cx.state` defaults to zero,
+while `state_initialized` records another policy; BatchNorm therefore declares
+running mean as zero and running variance as one at the use site. Session
+construction materializes these policies before applying explicit checkpoint or
+caller overrides. Optimizer moments, counters and RNG words keep the zero
+default, eliminating path-based initialization logic from training drivers.
+
 ## First implementation verification targets
 
 Start with a state slot plus compiled-session wrapper, not a Monad-heavy public

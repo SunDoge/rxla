@@ -396,23 +396,10 @@ fn prefetch_batches(
 fn initialize_session<'a>(
     model: &'a AppliedModel,
     program: &'a rxla_core::StateProgram,
-    schema: &ParamSchema,
-    gpu: &Client,
     seed: u64,
     parameters: Vec<(String, Buffer)>,
 ) -> Result<rxla_core::Session, Box<dyn std::error::Error>> {
     let mut builder = model.session(program).parameters(parameters)?;
-    for state in schema
-        .states()
-        .iter()
-        .filter(|state| state.path().ends_with("running_variance"))
-    {
-        let count = state.shape().iter().product::<i64>() as usize;
-        builder = builder.state(
-            state.path(),
-            gpu.buffer(state.shape(), &vec![1.0_f32; count])?,
-        )?;
-    }
     builder = builder.rng_seed("augmentation", seed)?;
     Ok(builder.build()?)
 }
@@ -441,7 +428,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut compiler = Compiler::new(gpu.clone(), CacheLimits::default());
     let program = model.compile_stateful_tensors(&mut compiler, &[metrics])?;
     let parameters = schema.initialize(&gpu, args.seed)?;
-    let mut session = initialize_session(&model, &program, &schema, &gpu, args.seed, parameters)?;
+    let mut session = initialize_session(&model, &program, args.seed, parameters)?;
     let rng = DataRng::new(args.seed);
     let started = Instant::now();
     let mut total_correct = 0;
