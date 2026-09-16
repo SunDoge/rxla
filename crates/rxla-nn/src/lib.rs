@@ -1163,6 +1163,13 @@ mod tests {
         let outputs = session.run(&[&input]).unwrap();
         let output: Buffer = applied.decode_outputs(outputs).unwrap();
         assert_eq!(output.to_vec::<f32>().unwrap(), [2.0, 3.0]);
+        let parameters = applied.resident_parameter_buffers(&session).unwrap();
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(parameters[0].0, "head.weight");
+        assert_eq!(
+            parameters[0].1.to_vec::<f32>().unwrap(),
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        );
     }
 
     #[test]

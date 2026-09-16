@@ -141,6 +141,31 @@ impl AppliedModel {
             })
     }
 
+    /// Borrow canonical resident parameter names and their current session buffers.
+    ///
+    /// This is suitable for checkpoint export. A session compiled from another
+    /// trace is rejected through state-slot identity before any buffers are
+    /// returned.
+    pub fn resident_parameter_buffers<'model, 'session>(
+        &'model self,
+        session: &'session Session,
+    ) -> Result<Vec<(&'model str, &'session Buffer)>> {
+        self.resident_parameters()
+            .map(|(_, spec, slot)| Ok((spec.path(), session.state(slot)?)))
+            .collect()
+    }
+
+    /// Borrow named model and transform state from a compatible session.
+    pub fn state_buffers<'model, 'session>(
+        &'model self,
+        session: &'session Session,
+    ) -> Result<Vec<(&'model str, &'session Buffer)>> {
+        self.states
+            .iter()
+            .map(|(path, slot)| Ok((path.as_str(), session.state(slot)?)))
+            .collect()
+    }
+
     /// Validate that a selection belongs to this trace and every member uses
     /// resident storage. Performs no graph mutation.
     pub fn validate_resident_parameters(&self, selection: &ParameterSelection) -> Result<()> {

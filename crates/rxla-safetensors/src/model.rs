@@ -1,7 +1,7 @@
 //! SafeTensors loading for parameter-effect model schemas.
 
 use super::*;
-use rxla_nn::ParamSchema;
+use rxla_nn::{ModelSessionBuilder, ParamSchema};
 use std::collections::HashMap;
 
 /// Weight buffers keyed by the stable paths in a parameter-effect schema.
@@ -20,6 +20,19 @@ impl SchemaBuffers {
             .iter()
             .map(|(path, buffer)| (path.as_str(), buffer))
             .collect()
+    }
+
+    /// Consume uploaded weights as canonical owned name/buffer pairs.
+    pub fn into_parameters(self) -> impl ExactSizeIterator<Item = (String, Buffer)> {
+        self.parameters.into_iter()
+    }
+
+    /// Initialize a resident model session directly from this checkpoint load.
+    pub fn initialize<'model>(
+        self,
+        builder: ModelSessionBuilder<'model>,
+    ) -> rxla_nn::Result<ModelSessionBuilder<'model>> {
+        builder.parameters(self.into_parameters())
     }
 }
 

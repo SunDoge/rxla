@@ -187,6 +187,11 @@ initialized once, by canonical schema path, through `ModelSessionBuilder`.
 `parameters(iter)` accepts a complete checkpoint-style stream of owned
 name/buffer pairs; each entry is checked immediately for residency, PJRT client,
 shape, dtype and duplication rather than failing later during session creation.
+With the `rxla-safetensors/model` feature, `SchemaBuffers::initialize` connects a
+schema load directly to that builder. In the other direction,
+`AppliedModel::resident_parameter_buffers` exposes the current session weights
+under the same canonical paths, including values changed by resident optimizers,
+for checkpoint export without rebinding or manually materializing host values.
 F32, BF16 and U8 storage preserve the same symbolic semantics as input-backed
 parameters, so frozen and quantized inference weights can use this policy too.
 
