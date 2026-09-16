@@ -2,8 +2,8 @@ use rxla_core::Tensor;
 use rxla_nn::{Cx, Model, ModelInput, Result};
 
 fn apply(cx: &mut Cx, input: Tensor) -> Result<Tensor> {
-    let hidden = cx.named("hidden")?.linear(256).apply(&input)?.relu()?;
-    cx.named("head")?.linear(10).apply(&hidden)
+    let hidden = cx.linear("hidden", &input, 256)?.relu()?;
+    cx.linear("head", &hidden, 10)
 }
 
 fn main() -> Result<()> {

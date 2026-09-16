@@ -192,7 +192,7 @@ fn classifier(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, 
         })
         .bias(false)
         .apply(&images)?;
-    hidden = cx.named("stem_bn")?.batch_norm().apply(&hidden)?.relu()?;
+    hidden = cx.batch_norm("stem_bn", &hidden)?.relu()?;
     for stage in 0..3 {
         let channels = 16 << stage;
         for block in 0..3 {
@@ -201,7 +201,7 @@ fn classifier(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, 
         }
     }
     let features = hidden.mean(&[1, 2], false)?;
-    let logits = cx.named("head")?.linear(CLASSES).apply(&features)?;
+    let logits = cx.linear("head", &features, CLASSES)?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;

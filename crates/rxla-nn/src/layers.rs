@@ -354,8 +354,78 @@ impl DerefMut for Named<'_> {
 }
 
 impl Cx {
+    /// Apply a named embedding without exposing the layer builder ceremony.
+    pub fn embedding(
+        &mut self,
+        name: &str,
+        indices: &Tensor,
+        vocabulary: i64,
+        width: i64,
+    ) -> Result<Tensor> {
+        self.named(name)?
+            .embedding(vocabulary, width)
+            .apply(indices)
+    }
+
+    /// Apply a named affine projection, inferring its input width at this use site.
+    pub fn linear(&mut self, name: &str, input: &Tensor, out_features: i64) -> Result<Tensor> {
+        self.named(name)?.linear(out_features).apply(input)
+    }
+
+    /// Apply a named weight-only quantized affine projection.
+    pub fn quantized_linear(
+        &mut self,
+        name: &str,
+        input: &Tensor,
+        out_features: i64,
+        group_size: i64,
+    ) -> Result<Tensor> {
+        self.named(name)?
+            .quantized_linear(out_features, group_size)
+            .apply(input)
+    }
+
+    /// Apply a named NHWC convolution with the default stride and padding.
+    ///
+    /// Use [`Self::named`] when non-default convolution options or a bias-free
+    /// convolution are required.
+    pub fn conv2d(
+        &mut self,
+        name: &str,
+        input: &Tensor,
+        out_channels: i64,
+        kernel: [i64; 2],
+    ) -> Result<Tensor> {
+        self.named(name)?.conv2d(out_channels, kernel).apply(input)
+    }
+
+    /// Apply named group normalization with learned affine parameters.
+    pub fn group_norm(&mut self, name: &str, input: &Tensor, groups: i64) -> Result<Tensor> {
+        self.named(name)?.group_norm(groups).apply(input)
+    }
+
+    /// Apply named stateful NHWC batch normalization in training mode.
+    pub fn batch_norm(&mut self, name: &str, input: &Tensor) -> Result<Tensor> {
+        self.named(name)?.batch_norm().apply(input)
+    }
+
+    /// Apply named layer normalization with learned affine parameters.
+    pub fn layer_norm(
+        &mut self,
+        name: &str,
+        input: &Tensor,
+        normalized_rank: usize,
+    ) -> Result<Tensor> {
+        self.named(name)?.layer_norm(normalized_rank).apply(input)
+    }
+
+    /// Apply named RMS normalization.
+    pub fn rms_norm(&mut self, name: &str, input: &Tensor) -> Result<Tensor> {
+        self.named(name)?.rms_norm().apply(input)
+    }
+
     /// Enter a named layer namespace without a closure. Layer constructors are
-    /// exposed by [`Named`], keeping `Cx` focused on tracing effects.
+    /// exposed by [`Named`] for operations that need non-default options.
     pub fn named(&mut self, name: &str) -> Result<Named<'_>> {
         validate_name(name)?;
         self.scope.push(name.to_owned());
@@ -577,5 +647,21 @@ mod tests {
             .unwrap()
             .prepare()
             .unwrap();
+    }
+
+    #[test]
+    fn direct_named_ops_preserve_scoped_parameter_identity() {
+        let (schema, output) = init(|cx| {
+            let input = cx.input(&[2, 8])?;
+            let hidden = cx.linear("encoder", &input, 4)?;
+            cx.linear("head", &hidden, 3)
+        })
+        .unwrap();
+
+        assert_eq!(output.shape(), [2, 3]);
+        assert_eq!(schema.get("encoder.weight").unwrap().shape(), [4, 8]);
+        assert_eq!(schema.get("encoder.bias").unwrap().shape(), [4]);
+        assert_eq!(schema.get("head.weight").unwrap().shape(), [3, 4]);
+        assert_eq!(schema.get("head.bias").unwrap().shape(), [3]);
     }
 }

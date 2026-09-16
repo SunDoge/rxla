@@ -47,7 +47,7 @@ The first implemented API exposes this directly:
 use rxla::{Tensor, nn::{Cx, Model, ModelInput, Result}};
 
 fn apply(cx: &mut Cx, x: Tensor) -> Result<Tensor> {
-    let x = cx.named("hidden")?.linear(8).apply(&x)?.relu()?;
+    let x = cx.linear("hidden", &x, 8)?.relu()?;
     cx.named("head")?.linear(3).apply(&x)
 }
 
