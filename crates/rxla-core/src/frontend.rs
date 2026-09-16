@@ -350,6 +350,29 @@ pub struct PendingEvaluation {
     requested_outputs: Vec<Tensor>,
 }
 
+/// A type-preserving single-Tensor view over [`PendingEvaluation`].
+#[must_use = "call wait to publish the Tensor and observe execution failures"]
+pub struct PendingTensorEvaluation {
+    inner: PendingEvaluation,
+}
+
+impl PendingTensorEvaluation {
+    pub fn is_ready(&self) -> Result<bool> {
+        self.inner.is_ready()
+    }
+
+    pub fn wait(self) -> Result<Tensor> {
+        let mut outputs = self.inner.wait()?;
+        if outputs.len() != 1 {
+            return Err(Error::MaterializedOutputCount {
+                expected: 1,
+                actual: outputs.len(),
+            });
+        }
+        Ok(outputs.remove(0))
+    }
+}
+
 impl PendingEvaluation {
     /// `true` means completion, including failed completion; `wait` observes
     /// the final status. A request containing no lazy outputs is immediately ready.
@@ -1272,6 +1295,15 @@ impl Tensor {
     /// Evaluate this lazy expression and return its materialized value.
     pub fn eval(&self, runtime: &mut Runtime) -> Result<Self> {
         runtime.eval(self)
+    }
+
+    /// Submit this lazy Tensor without waiting for device completion.
+    /// Compilation and host uploads may still complete synchronously. The
+    /// Tensor remains lazy until the returned handle's `wait` succeeds.
+    pub fn eval_async(&self, runtime: &mut Runtime) -> Result<PendingTensorEvaluation> {
+        Ok(PendingTensorEvaluation {
+            inner: runtime.eval_many_async(std::slice::from_ref(self))?,
+        })
     }
 }
 

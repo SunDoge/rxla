@@ -190,8 +190,8 @@ mod dtype_rules;
 mod metadata;
 mod tensor_handle;
 pub use frontend::{
-    Device, DeviceRuntime, Evaluable, PendingEvaluation, Program, Runtime, RuntimeBuilder,
-    TensorFunction, Tracer,
+    Device, DeviceRuntime, Evaluable, PendingEvaluation, PendingTensorEvaluation, Program, Runtime,
+    RuntimeBuilder, TensorFunction, Tracer,
 };
 pub use tensor_handle::{
     Storage, StorageError, StorageKind, StorageResult, TensorBuildError, TensorBuilder,

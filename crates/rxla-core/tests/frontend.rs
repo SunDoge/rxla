@@ -170,11 +170,9 @@ fn async_eval_publishes_only_after_wait_and_releases_dropped_claims() {
             .unwrap(),
     );
     assert!(!retry.is_materialized());
-    runtime
-        .eval_many_async(std::slice::from_ref(&retry))
-        .unwrap()
-        .wait()
-        .unwrap();
+    let pending_retry = retry.eval_async(&mut runtime).unwrap();
+    let retry_result = pending_retry.wait().unwrap();
+    assert!(retry_result.same_expression(&retry));
     assert_eq!(retry.to_vec::<f32>().unwrap(), [8.0, 9.0]);
 }
 
