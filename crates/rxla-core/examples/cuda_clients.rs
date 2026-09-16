@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let info = client.info()?;
         assert_eq!(info.platform.to_ascii_lowercase(), "cuda");
         println!("{info:?}");
-        let mut runtime = Runtime::new(client);
+        let mut runtime = Runtime::new(client)?;
         let executable = program.compile(&mut runtime)?;
         programs.push((runtime, executable));
     }

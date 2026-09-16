@@ -618,13 +618,13 @@ impl RuntimeBuilder {
 
     pub fn build(self) -> Result<Runtime> {
         if self.backends.is_empty() {
-            return Err(err("runtime builder requires a PJRT backend"));
+            return Err(Error::MissingRuntimeBackend);
         }
         let mut backends = BTreeMap::new();
         for registration in self.backends {
             let name = registration.name;
             if name.is_empty() {
-                return Err(err("runtime backend name must be nonempty"));
+                return Err(Error::EmptyRuntimeBackendName);
             }
             let backend = backend_from_client(
                 &name,
@@ -634,25 +634,29 @@ impl RuntimeBuilder {
                 registration.disk_cache,
             )?;
             if backends.insert(name.clone(), backend).is_some() {
-                return Err(err(format!(
-                    "runtime backend {name:?} is registered more than once"
-                )));
+                return Err(Error::DuplicateRuntimeBackend { name });
             }
         }
         let default_backend = match self.default_backend {
             Some(name) => name,
-            None if backends.len() == 1 => backends.keys().next().unwrap().clone(),
-            None => return Err(err("multiple backends require a default backend")),
+            None if backends.len() == 1 => backends
+                .keys()
+                .next()
+                .cloned()
+                .ok_or(Error::MissingRuntimeBackend)?,
+            None => return Err(Error::MissingDefaultRuntimeBackend),
         };
         let default_device = backends
             .get(&default_backend)
-            .ok_or_else(|| {
-                err(format!(
-                    "default runtime backend {default_backend:?} is not registered"
-                ))
+            .ok_or_else(|| Error::RuntimeBackendNotRegistered {
+                name: default_backend.clone(),
             })?
-            .devices[backends[&default_backend].default_ordinal]
-            .clone();
+            .devices
+            .get(backends[&default_backend].default_ordinal)
+            .cloned()
+            .ok_or_else(|| Error::RuntimeBackendWithoutSelectedDevice {
+                backend: default_backend.clone(),
+            })?;
         Ok(Runtime {
             backends,
             default_device,
@@ -674,7 +678,7 @@ impl Runtime {
     /// # Safety
     /// The resolved library must be trusted and implement the PJRT ABI.
     pub unsafe fn load(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        Ok(Self::new(unsafe { Client::load(path) }?))
+        Self::new(unsafe { Client::load(path) }?)
     }
 
     /// Load one trusted PJRT plugin with plugin-specific client options.
@@ -686,9 +690,7 @@ impl Runtime {
         path: impl AsRef<std::path::Path>,
         options: &ClientOptions,
     ) -> Result<Self> {
-        Ok(Self::new(unsafe {
-            Client::load_with_options(path, options)
-        }?))
+        Self::new(unsafe { Client::load_with_options(path, options) }?)
     }
 
     /// Load one trusted PJRT plugin and attach a trusted persistent executable
@@ -717,11 +719,11 @@ impl Runtime {
         .build()
     }
 
-    pub fn new(client: Client) -> Self {
+    pub fn new(client: Client) -> Result<Self> {
         Self::with_cache_limits(client, CacheLimits::default())
     }
 
-    pub fn with_cache_limits(client: Client, limits: CacheLimits) -> Self {
+    pub fn with_cache_limits(client: Client, limits: CacheLimits) -> Result<Self> {
         Self::with_planning_policy(client, limits, PlanningPolicy::SingleDevice)
     }
 
@@ -729,14 +731,13 @@ impl Runtime {
         client: Client,
         limits: CacheLimits,
         planning_policy: PlanningPolicy,
-    ) -> Self {
+    ) -> Result<Self> {
         let mut runtime = Self::builder()
             .client(client)
             .cache_limits(limits)
-            .build()
-            .expect("single-client runtime configuration is valid");
+            .build()?;
         runtime.planning_policy = planning_policy;
-        runtime
+        Ok(runtime)
     }
 
     pub fn planning_policy(&self) -> &PlanningPolicy {
@@ -766,17 +767,28 @@ impl Runtime {
 
     fn backend_for_device(&self, device: &Device) -> Result<&Backend> {
         let backend = self.backends.get(device.backend()).ok_or_else(|| {
-            err(format!(
-                "runtime backend {:?} is not registered",
-                device.backend()
-            ))
+            Error::RuntimeBackendNotRegistered {
+                name: device.backend().to_owned(),
+            }
         })?;
         if backend.devices.get(device.ordinal()) != Some(device) {
-            return Err(err(format!(
-                "device {device:?} does not belong to this runtime backend"
-            )));
+            return Err(Error::RuntimeDeviceNotRegistered {
+                backend: device.backend().to_owned(),
+                ordinal: device.ordinal(),
+                id: device.id(),
+                kind: device.kind().to_owned(),
+            });
         }
         Ok(backend)
+    }
+
+    fn backend_for_device_mut(&mut self, device: &Device) -> Result<&mut Backend> {
+        self.backend_for_device(device)?;
+        self.backends
+            .get_mut(device.backend())
+            .ok_or_else(|| Error::RuntimeBackendNotRegistered {
+                name: device.backend().to_owned(),
+            })
     }
 
     pub fn backend_names(&self) -> impl ExactSizeIterator<Item = &str> {
@@ -787,11 +799,8 @@ impl Runtime {
         self.backends
             .get(backend.as_ref())
             .map(|backend| backend.devices.as_slice())
-            .ok_or_else(|| {
-                err(format!(
-                    "runtime backend {:?} is not registered",
-                    backend.as_ref()
-                ))
+            .ok_or_else(|| Error::RuntimeBackendNotRegistered {
+                name: backend.as_ref().to_owned(),
             })
     }
 
@@ -841,10 +850,7 @@ impl Runtime {
         outputs: &[Tensor],
     ) -> Result<StateProgram> {
         let device = self.default_device.clone();
-        let backend = self
-            .backends
-            .get_mut(device.backend())
-            .ok_or_else(|| err(format!("runtime device {device:?} is not registered")))?;
+        let backend = self.backend_for_device_mut(&device)?;
         graph.compile(&mut backend.compiler, outputs)
     }
 
@@ -863,16 +869,12 @@ impl Runtime {
                     .planning
                     .lower_spmd(&target_lowered, &plan, &config.device_ids)?;
             return self
-                .backends
-                .get_mut(device.backend())
-                .expect("client_on validated the backend")
+                .backend_for_device_mut(device)?
                 .compiler
                 .compile_lowered_with_options(&lowered, &config.options);
         }
         let options = single_device_options(device);
-        self.backends
-            .get_mut(device.backend())
-            .ok_or_else(|| err(format!("runtime device {device:?} is not registered")))?
+        self.backend_for_device_mut(device)?
             .compiler
             .compile_lowered_with_options(&target_lowered, &options)
     }
@@ -1171,7 +1173,9 @@ fn backend_from_client(
         .addressable_devices
         .iter()
         .position(|device| device.selected)
-        .ok_or_else(|| err("PJRT client has no selected device"))?;
+        .ok_or_else(|| Error::RuntimeBackendWithoutSelectedDevice {
+            backend: name.to_owned(),
+        })?;
     let devices = info
         .addressable_devices
         .iter()
@@ -1184,7 +1188,9 @@ fn backend_from_client(
         })
         .collect::<Vec<_>>();
     if devices.is_empty() {
-        return Err(err("PJRT backend has no addressable devices"));
+        return Err(Error::RuntimeBackendWithoutDevices {
+            backend: name.to_owned(),
+        });
     }
     let compiler = Compiler::new(client, limits);
     #[cfg(feature = "disk-cache")]
@@ -1542,9 +1548,61 @@ mod tests {
 
     #[test]
     fn runtime_builder_validates_configuration_before_backend_use() {
-        assert!(Runtime::builder().build().is_err());
+        assert!(matches!(
+            Runtime::builder().build(),
+            Err(Error::MissingRuntimeBackend)
+        ));
         let mesh = crate::Mesh::new([("data", 1)]).unwrap();
         assert!(Runtime::builder().auto_sharding(mesh, 0).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+    fn runtime_builder_and_device_failures_are_structured() {
+        // SAFETY: the test operator explicitly supplies a trusted plugin path.
+        let client =
+            unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").expect("PJRT_PLUGIN_PATH")) }
+                .unwrap();
+        assert!(matches!(
+            Runtime::builder().backend("", client.clone()).build(),
+            Err(Error::EmptyRuntimeBackendName)
+        ));
+        assert!(matches!(
+            Runtime::builder()
+                .backend("cpu", client.clone())
+                .backend("cpu", client.clone())
+                .build(),
+            Err(Error::DuplicateRuntimeBackend { name }) if name == "cpu"
+        ));
+        assert!(matches!(
+            Runtime::builder()
+                .backend("left", client.clone())
+                .backend("right", client.clone())
+                .build(),
+            Err(Error::MissingDefaultRuntimeBackend)
+        ));
+        assert!(matches!(
+            Runtime::builder()
+                .backend("cpu", client.clone())
+                .default_backend("missing")
+                .build(),
+            Err(Error::RuntimeBackendNotRegistered { name }) if name == "missing"
+        ));
+
+        let mut runtime = Runtime::new(client).unwrap();
+        assert!(matches!(
+            runtime.devices("missing"),
+            Err(Error::RuntimeBackendNotRegistered { name }) if name == "missing"
+        ));
+        let mut foreign = runtime.default_device().clone();
+        foreign.ordinal = usize::MAX;
+        assert!(matches!(
+            runtime.set_default_device(&foreign),
+            Err(Error::RuntimeDeviceNotRegistered {
+                ordinal: usize::MAX,
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -179,6 +179,29 @@ pub enum Error {
     MissingOptimizedHloModule,
     #[snafu(display("unsupported optimized program format {format:?}"))]
     UnsupportedOptimizedProgram { format: String },
+    #[snafu(display("runtime requires at least one PJRT backend"))]
+    MissingRuntimeBackend,
+    #[snafu(display("runtime backend name must be nonempty"))]
+    EmptyRuntimeBackendName,
+    #[snafu(display("runtime backend {name:?} is registered more than once"))]
+    DuplicateRuntimeBackend { name: String },
+    #[snafu(display("multiple runtime backends require an explicit default backend"))]
+    MissingDefaultRuntimeBackend,
+    #[snafu(display("runtime backend {name:?} is not registered"))]
+    RuntimeBackendNotRegistered { name: String },
+    #[snafu(display(
+        "device ordinal {ordinal} (id {id}, kind {kind:?}) is not registered on runtime backend {backend:?}"
+    ))]
+    RuntimeDeviceNotRegistered {
+        backend: String,
+        ordinal: usize,
+        id: i32,
+        kind: String,
+    },
+    #[snafu(display("PJRT backend {backend:?} has no selected device"))]
+    RuntimeBackendWithoutSelectedDevice { backend: String },
+    #[snafu(display("PJRT backend {backend:?} has no addressable devices"))]
+    RuntimeBackendWithoutDevices { backend: String },
     #[snafu(display("invalid tensor operation: {message}"))]
     InvalidArgument { message: String },
 }

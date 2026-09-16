@@ -317,7 +317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let cpu = unsafe { Client::load(&args.cpu_plugin) }?;
     let gpu = unsafe { Client::load(&args.gpu_plugin) }?;
-    let mut augmentation_runtime = Runtime::new(cpu);
+    let mut augmentation_runtime = Runtime::new(cpu)?;
     let batch_size = args.batch_size;
     let (schema, trainable, mut model) = Model::new(classifier)
         .inputs(classifier_inputs(batch_size))

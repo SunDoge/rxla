@@ -13,7 +13,7 @@ fn client() -> Client {
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn explicit_program_compiles_on_first_execution_and_reuses_cache() {
-    let mut executor = Runtime::new(client());
+    let mut executor = Runtime::new(client()).unwrap();
     let program = executor
         .trace(|trace| {
             let x = trace.input(&[2])?;
@@ -42,7 +42,7 @@ fn runtime_dispatches_typed_buffers() {
         Ok(vec![x.wrapping_add_scalar(7)?])
     })
     .unwrap();
-    let mut executor = Runtime::new(client());
+    let mut executor = Runtime::new(client()).unwrap();
     let input = executor.client().buffer(&[3], &[1, -2, i32::MAX]).unwrap();
     let outputs = program.run_buffers(&mut executor, &[&input]).unwrap();
     assert_eq!(outputs[0].to_vec::<i32>().unwrap(), [8, 5, i32::MIN + 6]);
@@ -64,7 +64,7 @@ fn runtime_results_are_materialized_lazy_tensor_leaves() {
         .with_host_storage(Storage::host(DType::F32, bytes), layout)
         .unwrap();
 
-    let mut executor = Runtime::new(client());
+    let mut executor = Runtime::new(client()).unwrap();
     let result = program
         .run_tensors(&mut executor, &[&input])
         .unwrap()
@@ -109,7 +109,7 @@ fn runtime_results_are_materialized_lazy_tensor_leaves() {
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn eval_many_preserves_materialized_values_and_only_executes_lazy_roots() {
-    let mut runtime = Runtime::new(client());
+    let mut runtime = Runtime::new(client()).unwrap();
     assert!(runtime.eval_many(&[]).unwrap().is_empty());
     let empty: [Tensor; 0] = runtime.eval([] as [&Tensor; 0]).unwrap();
     assert!(empty.is_empty());
@@ -130,7 +130,7 @@ fn eval_many_preserves_materialized_values_and_only_executes_lazy_roots() {
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn async_eval_publishes_only_after_wait_and_releases_dropped_claims() {
-    let mut runtime = Runtime::new(client());
+    let mut runtime = Runtime::new(client()).unwrap();
     assert!(
         runtime
             .eval_many_async(&[])
@@ -187,7 +187,7 @@ fn mlx_style_eval_materializes_lazy_tensor_operations_and_reuses_cache() {
     let expression = x.add(&y).unwrap().exp().unwrap();
     let alias = expression.clone();
     assert!(!expression.is_materialized());
-    let mut executor = Runtime::new(client());
+    let mut executor = Runtime::new(client()).unwrap();
     expression.eval(&mut executor).unwrap();
     assert!(expression.is_materialized());
     assert!(alias.is_materialized());
@@ -237,7 +237,7 @@ fn tensor_function_reuses_a_tensor_only_computation() -> Result<(), Box<dyn std:
     let function = TensorFunction::new([2], DType::F32, |x| x.square()?.add_scalar(1.0))?;
     let first = Tensor::from_slice([2], DType::F32, [2.0, 3.0])?;
     let second = Tensor::from_slice([2], DType::F32, [4.0, 5.0])?;
-    let mut runtime = Runtime::new(client());
+    let mut runtime = Runtime::new(client())?;
 
     let first = function.call(&mut runtime, &first)?;
     assert_eq!(first.to_vec::<f32>()?, [5.0, 10.0]);

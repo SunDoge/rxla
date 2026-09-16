@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Instant};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Loading native code requires trusting the operator-selected plugin.
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?)? };
-    let mut runtime = Runtime::new(client);
+    let mut runtime = Runtime::new(client)?;
     // Weights are runtime inputs, so changing their values does not change the key.
     let program = Tracer::trace(|trace| {
         let x = trace.input(&[2, 3])?;

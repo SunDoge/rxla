@@ -41,7 +41,7 @@ fn real_arbitrary_resize_and_normalization_match_reference()
     let values = [0., 10., 2., 12., 4., 14., 6., 16., 8., 18., 10., 20.];
     let input = Tensor::from_slice(shape, DType::F32, values)?;
     let nearest = input.resize_nearest2d([3, 2])?;
-    let mut runtime = Runtime::new(client);
+    let mut runtime = Runtime::new(client)?;
     assert_eq!(
         nearest.eval(&mut runtime)?.to_vec::<f32>()?,
         vec![0., 10., 2., 12., 0., 10., 2., 12., 6., 16., 8., 18.]

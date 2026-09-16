@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "PJRT platform: {}; devices: {:?}",
         info.platform, info.addressable_devices
     );
-    let mut runtime = Runtime::new(client);
+    let mut runtime = Runtime::new(client)?;
     let x = Tensor::from_slice([2, 3], rxla_core::DType::F32, [1., 2., 3., 4., 5., 6.])?;
     let w = Tensor::from_slice([3, 2], rxla_core::DType::F32, [1., 2., 3., 4., 5., 6.])?;
     let bias = Tensor::from_slice([2, 2], rxla_core::DType::F32, [1., 1., 1., 1.])?;

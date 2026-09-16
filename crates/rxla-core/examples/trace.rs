@@ -10,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish();
     let _subscriber = tracing::subscriber::set_default(subscriber);
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?)? };
-    let mut runtime = Runtime::new(client);
+    let mut runtime = Runtime::new(client)?;
     let program = Tracer::trace(|trace| {
         let input = trace.input(&[2])?;
         Ok(vec![input.add_scalar(1.)?])

@@ -3,7 +3,7 @@ use rxla_core::{Client, Runtime, Tracer};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?) }?;
-    let mut runtime = Runtime::new(client.clone());
+    let mut runtime = Runtime::new(client.clone())?;
     let program = Tracer::trace(|trace| {
         let x = trace.input(&[2, 3])?;
         let transposed = x.transpose(&[1, 0])?;

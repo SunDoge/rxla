@@ -30,7 +30,7 @@ fn real_chained_augmentations_match_scalar_reference() -> Result<(), Box<dyn std
         .adjust_contrast(1.5)?
         .solarize(0.7)?
         .rgb_to_grayscale("rec601")?;
-    let mut runtime = Runtime::new(client);
+    let mut runtime = Runtime::new(client)?;
     let actual = output.eval(&mut runtime)?.to_vec::<f32>()?;
 
     let mut transformed = [0.0f32; 3 * 3 * 3];
