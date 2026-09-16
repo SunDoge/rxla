@@ -91,14 +91,14 @@ impl LoweredProgram {
 impl Graph {
     /// Lower and encode one output once, preserving all declared inputs.
     pub fn prepare(&self, output: &Tensor) -> Result<LoweredProgram> {
-        self.prepare_outputs(std::slice::from_ref(output))
+        self.prepare_many(std::slice::from_ref(output))
     }
 
     /// Snapshot ordered F32/I32/BF16 outputs and all currently declared inputs.
     /// Unlike pruned compilation, unused parameters remain in the input ABI.
     /// The snapshot can be reused with different Compiler instances; each keeps
     /// its own device placement, options and memory/disk cache policy.
-    pub fn prepare_outputs(&self, outputs: &[Tensor]) -> Result<LoweredProgram> {
+    pub fn prepare_many(&self, outputs: &[Tensor]) -> Result<LoweredProgram> {
         if outputs.is_empty() {
             return Err(err("program requires at least one output"));
         }
@@ -112,10 +112,7 @@ impl Graph {
     /// are modified. A constant-only snapshot has an empty input mapping.
     /// This is a value-graph API, not a StateProgram snapshot: state update roots
     /// and slot mappings must not be silently omitted when preparing stateful work.
-    pub fn prepare_outputs_pruned(
-        &self,
-        outputs: &[Tensor],
-    ) -> Result<(LoweredProgram, Vec<usize>)> {
+    pub fn prepare_pruned(&self, outputs: &[Tensor]) -> Result<(LoweredProgram, Vec<usize>)> {
         if outputs.is_empty() {
             return Err(err("program requires at least one output"));
         }
@@ -334,7 +331,7 @@ impl Compiler {
         graph: &Graph,
         outputs: &[Tensor],
     ) -> Result<(Rc<Executable>, Vec<usize>)> {
-        let (lowered, parameters) = graph.prepare_outputs_pruned(outputs)?;
+        let (lowered, parameters) = graph.prepare_pruned(outputs)?;
         Ok((self.compile_lowered(&lowered)?, parameters))
     }
 

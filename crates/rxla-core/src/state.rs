@@ -117,7 +117,7 @@ impl StateGraph {
     /// existing modules. Bind exact BF16 buffers through `bind_parameters`.
     /// `parameter_type` reports storage dtype, while `tensor()` is the explicit
     /// F32 conversion. No trainable state or implicit BF16 derivative is added;
-    /// see `Graph::input_bf16_as_f32` for the differentiation boundary.
+    /// see `Tracer::input_bf16_as_f32` for the differentiation boundary.
     pub fn parameter_bf16_as_f32(&mut self, dims: &[i64]) -> Result<Parameter> {
         let index = self.input_count;
         let tensor = self.input_bf16_as_f32(dims)?;
@@ -213,7 +213,7 @@ impl StateGraph {
         Ok(self.slots[slot.index].clone())
     }
     pub fn write(&mut self, slot: &StateSlot, value: &Tensor) -> Result<()> {
-        self.write_outputs(&[(slot, value.clone())])
+        self.record_updates(&[(slot, value.clone())])
     }
     /// Transform the current symbolic state and record its next version.
     /// The closure runs once now, during graph construction, not on each session
@@ -248,7 +248,7 @@ impl StateGraph {
     ) -> Result<Tensor> {
         self.validate_condition(condition)?;
         let next = transform(&self.read(slot)?)?;
-        self.write_outputs_if(condition, &[(slot, next)])?;
+        self.write_many_if(condition, &[(slot, next)])?;
         self.read(slot)
     }
     /// Atomically update a subset of symbolic state slots, e.g. a K/V pair.
@@ -260,16 +260,14 @@ impl StateGraph {
     /// is simultaneous. This changes the recorded graph, not live session state;
     /// tensor operations already built by the caller are not rolled back.
     pub fn write_many(&mut self, updates: &[(&StateSlot, &Tensor)]) -> Result<()> {
-        self.write_outputs(
+        self.record_updates(
             &updates
                 .iter()
                 .map(|(s, t)| (*s, (*t).clone()))
                 .collect::<Vec<_>>(),
         )
     }
-    /// Atomically record mixed F32/I32 updates. Slot types/shapes cannot change;
-    /// duplicates/foreign values fail without advancing any symbolic slot.
-    pub fn write_outputs(&mut self, updates: &[(&StateSlot, Tensor)]) -> Result<()> {
+    pub(super) fn record_updates(&mut self, updates: &[(&StateSlot, Tensor)]) -> Result<()> {
         self.validate_updates(updates)?;
         for (slot, value) in updates {
             self.slots[slot.index] = value.clone();
@@ -285,7 +283,7 @@ impl StateGraph {
     /// swaps are simultaneous. This is dataflow selection, not lazy execution:
     /// proposed values still compute, and visible outputs are not gated. It does
     /// not catch execution errors or provide arbitrary side-effect rollback.
-    pub fn write_outputs_if(
+    pub fn write_many_if(
         &mut self,
         condition: &Tensor,
         updates: &[(&StateSlot, Tensor)],
@@ -300,7 +298,7 @@ impl StateGraph {
                 Ok((*slot, value))
             })
             .collect::<Result<Vec<_>>>()?;
-        self.write_outputs(&selected)
+        self.record_updates(&selected)
     }
     fn validate_condition(&self, condition: &Tensor) -> Result<()> {
         if condition.dtype() != DType::F32 {
@@ -345,27 +343,27 @@ impl StateGraph {
     /// Snapshot visible outputs and all final state versions before native
     /// compilation. Later graph writes/registrations do not affect the snapshot.
     /// All declared inputs and original slot identities are retained.
-    pub fn prepare_outputs(&self, outputs: &[Tensor]) -> Result<PreparedStateGraph> {
+    pub fn prepare(&self, outputs: &[Tensor]) -> Result<PreparedStateGraph> {
         self.prepare_state(outputs, false)
     }
 
     /// Prepare with unused input parameters removed, keeping hidden state
     /// updates as roots and retaining the complete state schema. Compiled plans
     /// expose compact visible input order through `StateProgram::input_indices`.
-    pub fn prepare_outputs_pruned(&self, outputs: &[Tensor]) -> Result<PreparedStateGraph> {
+    pub fn prepare_pruned(&self, outputs: &[Tensor]) -> Result<PreparedStateGraph> {
         self.prepare_state(outputs, true)
     }
 
     fn prepare_state(&self, outputs: &[Tensor], pruned: bool) -> Result<PreparedStateGraph> {
         let all = self.outputs_with_state(outputs);
         let (graph, arguments) = if pruned {
-            let (graph, parameters) = self.graph.prepare_outputs_pruned(&all)?;
+            let (graph, parameters) = self.graph.prepare_pruned(&all)?;
             (
                 graph,
                 parameters.iter().map(|&i| self.arguments[i]).collect(),
             )
         } else {
-            (self.graph.prepare_outputs(&all)?, self.arguments.clone())
+            (self.graph.prepare_many(&all)?, self.arguments.clone())
         };
         let mut input_parameters = vec![None; self.input_count];
         for (parameter, argument) in arguments.iter().enumerate() {
@@ -387,18 +385,6 @@ impl StateGraph {
     /// Final state versions become hidden output roots, including updates that
     /// do not contribute to user-visible results. Empty visible outputs are valid.
     pub fn compile(&self, compiler: &mut Compiler, outputs: &[Tensor]) -> Result<StateProgram> {
-        self.compile_outputs(compiler, outputs)
-    }
-    /// Compile ordered mixed F32/I32 visible outputs followed internally by the
-    /// final state versions. `Session::run` returns only these visible buffers,
-    /// without converting their types. All visible AND hidden outputs validate
-    /// before committing any state. Empty visible outputs remain valid when
-    /// there is state; a graph with no results at all is rejected.
-    pub fn compile_outputs(
-        &self,
-        compiler: &mut Compiler,
-        outputs: &[Tensor],
-    ) -> Result<StateProgram> {
         let all_outputs = self.outputs_with_state(outputs);
         let executable = compiler.compile_graph_outputs(&self.graph, &all_outputs)?;
         Ok(StateProgram(Rc::new(Plan {
@@ -422,15 +408,6 @@ impl StateGraph {
     /// `StateProgram::input_indices` for the compact runtime order. Unlike
     /// `compile`, unused fixed parameters cannot be bound to this program.
     pub fn compile_pruned(
-        &self,
-        compiler: &mut Compiler,
-        outputs: &[Tensor],
-    ) -> Result<StateProgram> {
-        self.compile_outputs_pruned(compiler, outputs)
-    }
-
-    /// Mixed-output variant of `compile_pruned`; hidden state updates are roots.
-    pub fn compile_outputs_pruned(
         &self,
         compiler: &mut Compiler,
         outputs: &[Tensor],
@@ -1194,7 +1171,7 @@ mod tests {
         let _unused = graph.parameter(&[2]).unwrap();
         let used = graph.parameter(&[2]).unwrap();
         let output = used.tensor().add(used.tensor()).unwrap();
-        let (lowered, parameters) = graph.graph.prepare_outputs_pruned(&[output]).unwrap();
+        let (lowered, parameters) = graph.graph.prepare_pruned(&[output]).unwrap();
         assert_eq!(lowered.format(), "mlir");
         assert_eq!(parameters, [1]);
         assert_eq!(lowered.input_count(), 1);
@@ -1216,18 +1193,15 @@ mod tests {
             vec![(&a, good.clone()), (&b, wrong)],
             vec![(&a, good.clone()), (&a, good.clone())],
         ] {
-            assert!(g.write_outputs_if(&yes, &updates).is_err());
+            assert!(g.write_many_if(&yes, &updates).is_err());
             assert_eq!(g.read(&a).unwrap().node_id(), old_a.node_id());
             assert_eq!(g.read(&b).unwrap().node_id(), old_b.node_id());
         }
         for condition in [foreign, vector] {
-            assert!(
-                g.write_outputs_if(&condition, &[(&a, good.clone())])
-                    .is_err()
-            );
+            assert!(g.write_many_if(&condition, &[(&a, good.clone())]).is_err());
             assert_eq!(g.read(&a).unwrap().node_id(), old_a.node_id());
         }
-        g.write_outputs_if(&yes, &[]).unwrap();
+        g.write_many_if(&yes, &[]).unwrap();
         assert_eq!(g.read(&a).unwrap().node_id(), old_a.node_id());
         assert_eq!(g.read(&b).unwrap().node_id(), old_b.node_id());
     }
@@ -1239,7 +1213,7 @@ mod tests {
         let mut graph = StateGraph::default();
         let state = graph.state_i32(&[]).unwrap();
         let value = graph.read(&state).unwrap();
-        let program = graph.compile_outputs(&mut compiler, &[value]).unwrap();
+        let program = graph.compile(&mut compiler, &[value]).unwrap();
         let mut session = program
             .session(vec![(state.clone(), client.buffer(&[], &[7]).unwrap())])
             .unwrap();
@@ -1266,7 +1240,7 @@ mod tests {
             vec![(&f, next_f.clone()), (&i, next_f.clone())],
             vec![(&i, next_i.clone()), (&i, next_i.clone())],
         ] {
-            assert!(g.write_outputs(&updates).is_err());
+            assert!(g.record_updates(&updates).is_err());
             assert_eq!(g.read(&f).unwrap().node_id(), old_f.node_id());
             assert_eq!(g.read(&i).unwrap().node_id(), old_i.node_id());
         }

@@ -60,7 +60,7 @@ fn real_normal_reparameterization_gradients_reuse_the_resident_draw() {
         .unwrap();
     let accepted = sequence.commit_if(&mut g, &requested).unwrap();
     let program = g
-        .compile_outputs(
+        .compile(
             &mut compiler,
             &[
                 noise,
@@ -202,7 +202,7 @@ fn real_normal_sequence_replays_and_commits_only_accepted_draws() {
     let scalar = sequence.normal_f32(&[]).unwrap();
     let accepted = sequence.commit_if(&mut g, &requested).unwrap();
     let program = g
-        .compile_outputs(&mut compiler, &[noise, scalar, empty, accepted])
+        .compile(&mut compiler, &[noise, scalar, empty, accepted])
         .unwrap();
     let yes = client.buffer(&[], &[1.]).unwrap();
     let no = client.buffer(&[], &[0.]).unwrap();

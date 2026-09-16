@@ -297,15 +297,15 @@ fn real_training_cache_restores_code_not_optimizer_state() {
         .unwrap();
     let next_step = graph.read(&steps).unwrap().wrapping_add_scalar(1).unwrap();
     graph
-        .write_outputs_if(
+        .write_many_if(
             &valid,
             &[(&weight, next_w), (&momentum, next_m), (&steps, next_step)],
         )
         .unwrap();
     let outputs = [loss, grad, graph.read(&steps).unwrap()];
-    let program = graph.compile_outputs(&mut compiler, &outputs).unwrap();
+    let program = graph.compile(&mut compiler, &outputs).unwrap();
     // Rebuilding/reusing the same symbolic program also exercises memory caching.
-    graph.compile_outputs(&mut compiler, &outputs).unwrap();
+    graph.compile(&mut compiler, &outputs).unwrap();
     assert_eq!(compiler.stats().misses, u64::from(child_path.is_none()));
     assert_eq!(compiler.stats().disk_hits, u64::from(child_path.is_some()));
     assert_eq!(compiler.stats().hits, 1);
@@ -425,11 +425,9 @@ fn real_cached_integer_position_restarts_with_fresh_state_in_child() {
             std::slice::from_ref(&old_position),
         )
         .unwrap();
+    let next_position = old_position.wrapping_add_scalar(1).unwrap();
     graph
-        .write_outputs(&[
-            (&data, next_data),
-            (&position, old_position.wrapping_add_scalar(1).unwrap()),
-        ])
+        .write_many(&[(&data, &next_data), (&position, &next_position)])
         .unwrap();
     let program = graph.compile(&mut compiler, &[]).unwrap();
     assert_eq!(compiler.stats().misses, u64::from(child_path.is_none()));
@@ -569,7 +567,7 @@ fn real_cached_state_program_rebinds_fresh_sessions_across_processes() {
     // Parent publishes ordinary compilation; child prepares its independently
     // reconstructed schema and must restore the same native cache entry.
     let program = if child_path.is_some() {
-        let prepared = graph.prepare_outputs(&[output]).unwrap();
+        let prepared = graph.prepare(&[output]).unwrap();
         prepared.compile(&mut compiler).unwrap()
     } else {
         graph.compile(&mut compiler, &[output]).unwrap()

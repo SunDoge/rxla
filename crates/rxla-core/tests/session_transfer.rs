@@ -13,7 +13,7 @@ fn real_session_state_transfer_and_rebinding() {
     let next = graph.read(&count).unwrap().wrapping_add_scalar(1).unwrap();
     let sum = graph.read(&total).unwrap().add(weight.tensor()).unwrap();
     graph
-        .write_outputs(&[(&count, next), (&total, sum.clone())])
+        .write_many(&[(&count, &next), (&total, &sum)])
         .unwrap();
     let program = graph.compile(&mut compiler, &[sum]).unwrap();
     let shared = Rc::new(client.buffer(&[], &[2.]).unwrap());

@@ -13,7 +13,7 @@ fn real_finite_result_gate_preserves_state_and_allows_retry() {
     let count = proposed.is_finite_mask().unwrap().sum(&[0], false).unwrap();
     let accepted = count.eq_mask(&g.constant(&[], &[2.]).unwrap()).unwrap();
     let next = g.read(&position).unwrap().wrapping_add_scalar(1).unwrap();
-    g.write_outputs_if(&accepted, &[(&data, proposed.clone()), (&position, next)])
+    g.write_many_if(&accepted, &[(&data, proposed.clone()), (&position, next)])
         .unwrap();
     let program = g.compile(&mut compiler, &[count, proposed]).unwrap();
     let mut session = program
@@ -71,10 +71,10 @@ fn real_guarded_cache_and_position_update_together() {
         .unwrap()
         .dynamic_update_slice(&value, &[old_position])
         .unwrap();
-    g.write_outputs_if(&condition, &[(&data, updated), (&position, next)])
+    g.write_many_if(&condition, &[(&data, updated), (&position, next)])
         .unwrap();
     let program = g
-        .compile_outputs(
+        .compile(
             &mut compiler,
             &[g.read(&data).unwrap(), g.read(&position).unwrap()],
         )

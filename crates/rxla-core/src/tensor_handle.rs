@@ -539,7 +539,7 @@ impl Tensor {
     }
 
     /// Create an I32 scalar in the same trace as this tensor.
-    pub fn index_scalar(&self, value: i32) -> Result<Self> {
+    pub fn scalar_i32(&self, value: i32) -> Result<Self> {
         self.graph().scalar_i32(value)
     }
 

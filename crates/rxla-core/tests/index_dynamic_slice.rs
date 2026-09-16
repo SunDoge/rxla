@@ -129,7 +129,7 @@ fn real_resident_token_history_rejects_full_capacity_without_overwriting() {
         .unwrap()
         .dynamic_update_slice(&token.reshape(&[1]).unwrap(), std::slice::from_ref(&pos))
         .unwrap();
-    g.write_outputs_if(
+    g.write_many_if(
         &accepted,
         &[
             (&history, next),
@@ -138,7 +138,7 @@ fn real_resident_token_history_rejects_full_capacity_without_overwriting() {
     )
     .unwrap();
     let program = g
-        .compile_outputs(&mut compiler, &[g.read(&history).unwrap(), accepted])
+        .compile(&mut compiler, &[g.read(&history).unwrap(), accepted])
         .unwrap();
     let mut session = program
         .session(

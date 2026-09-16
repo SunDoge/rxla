@@ -55,7 +55,7 @@ fn real_sampled_dropout_reuses_mask_for_derivatives_and_explicit_recomputation()
     let empty_sample = sequence.dropout(&empty, 0.5).unwrap();
     let accept = sequence.commit_if(&mut graph, &condition).unwrap();
     let program = graph
-        .compile_outputs(
+        .compile(
             &mut compiler,
             &[
                 sample.output,

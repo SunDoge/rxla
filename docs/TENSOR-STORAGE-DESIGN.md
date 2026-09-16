@@ -107,7 +107,7 @@ additionally run directly on both backends; its ignored native test passed on
 CPU. It is now included in the CPU example and selected CUDA scripts for future
 runs. No full-model, multi-GPU or speed-parity claim follows from these checks.
 
-Executor results are managed Tensor handles with PJRT storage and owned
+Runtime results are managed Tensor handles with PJRT storage and owned
 physical-layout metadata. They can be used as inputs to another Program or as
 materialized leaves in further lazy Tensor expressions. Lazy graph identity is
 private and is never part of the public descriptor API.
@@ -119,7 +119,7 @@ constructor with an explicit lifetime contract. These constructors and the
 lower-level `from_host_storage` construct materialized leaves in a private lazy
 session. Ordinary operations
 append expressions without dispatching; `Tensor::eval` and
-`Executor::eval_many` compile, cache, and materialize requested roots. Explicit
+`Runtime::eval_many` compile, cache, and materialize requested roots. Explicit
 Tracer/Program construction remains available for repeated execution.
 
 `TensorBuilder::from_raw_parts` makes external allocation ownership explicit:

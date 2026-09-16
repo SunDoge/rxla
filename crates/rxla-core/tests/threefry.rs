@@ -38,7 +38,7 @@ fn real_batch_blocks_allocate_counters_and_commit_conditionally() {
         let accept = graph.input(&[]).unwrap();
         let draw = threefry2x32_blocks([&keys[0], &keys[1]], [&low, &high], &shape).unwrap();
         graph
-            .write_outputs_if(
+            .write_many_if(
                 &accept,
                 &[
                     (&low_slot, draw.next_counter[0].clone()),
@@ -47,7 +47,7 @@ fn real_batch_blocks_allocate_counters_and_commit_conditionally() {
             )
             .unwrap();
         let program = graph
-            .compile_outputs(
+            .compile(
                 &mut compiler,
                 &[
                     draw.bits[0].clone(),
@@ -236,11 +236,9 @@ fn real_resident_counter_carry_wrap_and_resume() {
         .select(&high.wrapping_add_scalar(1).unwrap(), &high)
         .unwrap();
     graph
-        .write_outputs(&[(&low_slot, next_low), (&high_slot, next_high)])
+        .write_many(&[(&low_slot, &next_low), (&high_slot, &next_high)])
         .unwrap();
-    let program = graph
-        .compile_outputs(&mut compiler, &bits.map(Into::into))
-        .unwrap();
+    let program = graph.compile(&mut compiler, &bits.map(Into::into)).unwrap();
     let initial = [0_u64, (7_u64 << 32) | 0xfffffffe, 0xffffffff, u64::MAX];
     let fresh = || {
         vec![

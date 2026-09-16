@@ -73,7 +73,7 @@ fn real_split_and_child_reset_share_parent_acceptance() {
     let draw = seq.blocks(&[]).unwrap();
     seq.commit_if(&mut g, &accepted).unwrap();
     let program = g
-        .compile_outputs(
+        .compile(
             &mut compiler,
             &[
                 keys[0].clone(),

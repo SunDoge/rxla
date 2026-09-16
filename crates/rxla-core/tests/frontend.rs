@@ -1,6 +1,6 @@
 use rxla_core::{
-    Client, DType, Executor, Mesh, PartitionSpec, Runtime, Sharding, Storage, Tensor,
-    TensorFunction, TensorLayout, Tracer,
+    Client, DType, Mesh, PartitionSpec, Runtime, Sharding, Storage, Tensor, TensorFunction,
+    TensorLayout, Tracer,
 };
 use rxla_pjrt::{Shape, StridedLayout};
 
@@ -13,7 +13,7 @@ fn client() -> Client {
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn explicit_program_compiles_on_first_execution_and_reuses_cache() {
-    let mut executor = Executor::new(client());
+    let mut executor = Runtime::new(client());
     let program = executor
         .trace(|trace| {
             let x = trace.input(&[2])?;
@@ -36,13 +36,13 @@ fn explicit_program_compiles_on_first_execution_and_reuses_cache() {
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
-fn executor_dispatches_typed_buffers_without_compile_outputs() {
+fn runtime_dispatches_typed_buffers() {
     let program = Tracer::trace(|trace| {
         let x = trace.input_dtype(&[3], rxla_core::DType::I32)?;
         Ok(vec![x.wrapping_add_scalar(7)?])
     })
     .unwrap();
-    let mut executor = Executor::new(client());
+    let mut executor = Runtime::new(client());
     let input = executor.client().buffer(&[3], &[1, -2, i32::MAX]).unwrap();
     let outputs = program.run_buffers(&mut executor, &[&input]).unwrap();
     assert_eq!(outputs[0].to_vec::<i32>().unwrap(), [8, 5, i32::MIN + 6]);
@@ -50,7 +50,7 @@ fn executor_dispatches_typed_buffers_without_compile_outputs() {
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
-fn executor_results_are_materialized_lazy_tensor_leaves() {
+fn runtime_results_are_materialized_lazy_tensor_leaves() {
     let tracer = Tracer::new();
     let input = tracer.input(&[2]).unwrap();
     let output = input.exp().unwrap();
@@ -64,7 +64,7 @@ fn executor_results_are_materialized_lazy_tensor_leaves() {
         .with_host_storage(Storage::host(DType::F32, bytes), layout)
         .unwrap();
 
-    let mut executor = Executor::new(client());
+    let mut executor = Runtime::new(client());
     let result = program
         .run_tensors(&mut executor, &[&input])
         .unwrap()
@@ -117,7 +117,7 @@ fn mlx_style_eval_materializes_lazy_tensor_operations_and_reuses_cache() {
     let expression = x.add(&y).unwrap().exp().unwrap();
     let alias = expression.clone();
     assert!(!expression.is_materialized());
-    let mut executor = Executor::new(client());
+    let mut executor = Runtime::new(client());
     expression.eval(&mut executor).unwrap();
     assert!(expression.is_materialized());
     assert!(alias.is_materialized());

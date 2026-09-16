@@ -169,7 +169,7 @@ impl StateUpdates {
     /// symbolic slots unchanged; omitted slots keep their current values.
     pub fn commit(self, graph: &mut StateGraph) -> Result<()> {
         let updates: Vec<_> = self.updates.iter().map(|(s, v)| (s, v.clone())).collect();
-        graph.write_outputs(&updates)
+        graph.record_updates(&updates)
     }
 
     /// Apply all proposals under one scalar F32 mask. Zero keeps versions
@@ -177,7 +177,7 @@ impl StateUpdates {
     /// Inherits StateGraph's eager dataflow, not lazy branch execution.
     pub fn commit_if(self, graph: &mut StateGraph, condition: &Tensor) -> Result<()> {
         let updates: Vec<_> = self.updates.iter().map(|(s, v)| (s, v.clone())).collect();
-        graph.write_outputs_if(condition, &updates)
+        graph.write_many_if(condition, &updates)
     }
 }
 
@@ -251,14 +251,14 @@ macro_rules! state_type {
             }
             /// Record a guarded update of this one slot. This inherits the
             /// StateGraph mask semantics: zero rejects, nonzero (even NaN)
-            /// accepts. For atomic multi-slot proposals use write_outputs_if.
+            /// accepts. For atomic multi-slot proposals use `write_many_if`.
             pub fn write_if(
                 &self,
                 graph: &mut StateGraph,
                 value: &$value,
                 condition: &Tensor,
             ) -> Result<()> {
-                graph.write_outputs_if(condition, &[(&self.slot, value.clone().into())])
+                graph.write_many_if(condition, &[(&self.slot, value.clone().into())])
             }
         }
     };

@@ -81,8 +81,7 @@ mod dtype_rules;
 mod metadata;
 mod tensor_handle;
 pub use frontend::{
-    Device, DeviceRuntime, Evaluable, Executor, Program, Runtime, RuntimeBuilder, TensorFunction,
-    Tracer,
+    Device, DeviceRuntime, Evaluable, Program, Runtime, RuntimeBuilder, TensorFunction, Tracer,
 };
 pub use tensor_handle::{
     Storage, StorageKind, TensorBuildError, TensorBuilder, TensorDescriptor, TensorDownloadError,
@@ -313,7 +312,7 @@ impl Graph {
     }
 
     pub fn compile_many(&self, client: &Client, outputs: &[Tensor]) -> Result<Executable> {
-        let lowered = self.prepare_outputs(outputs)?;
+        let lowered = self.prepare_many(outputs)?;
         lowered.compile_uncached(client)
     }
 }

@@ -33,7 +33,7 @@ fn real_distributions_match_raw_bits_and_preserve_cursor_on_invalid_or_endpoint_
         let yes = graph.constant(&[], &[1.]).unwrap();
         let accept = sequence.commit_if(&mut graph, &yes).unwrap();
         let program = graph
-            .compile_outputs(
+            .compile(
                 &mut compiler,
                 &[
                     uniform,
@@ -182,7 +182,7 @@ fn real_sequence_chains_draws_and_rejects_whole_sequence_after_wrap() {
     let second = sequence.blocks(&[3]).unwrap();
     let accepted = sequence.commit_if(&mut graph, &condition).unwrap();
     let program = graph
-        .compile_outputs(
+        .compile(
             &mut compiler,
             &[
                 first[0].clone(),

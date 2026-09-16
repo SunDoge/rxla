@@ -18,7 +18,7 @@ LLVM.
 
 ## Quick start
 
-New applications should use `Tensor` with `Tracer`/`Program` and `Executor`.
+New applications should use `Tensor` with `Tracer`/`Program` and `Runtime`.
 The tracer's graph belongs to one tracing session and is discarded after an
 immutable program snapshot is produced; the executor compiles, caches, and
 dispatches that snapshot in eager or lazy mode. The public `Graph`/`Compiler`
@@ -36,6 +36,6 @@ PJRT_PLUGIN_PATH=/path/to/libzml_cpu.so \
   cargo test --offline -p rxla-core --test unified_tensor -- --include-ignored
 ```
 
-`Index` is a compatibility alias for `Tensor`; runtime dtype is carried by the
-descriptor. The active design and limitations are documented in `SCOPE.md` and
+All runtime dtypes use `Tensor`; the removed `Index` compatibility type is no
+longer part of the API. The active design and limitations are documented in `SCOPE.md` and
 `TENSOR-STORAGE-DESIGN.md`.

@@ -11,9 +11,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let next_position = position.wrapping_add_scalar(1)?;
     let indices = [position, graph.scalar_i32(0)?];
     let updated = graph.read(&cache)?.dynamic_update_slice(&value, &indices)?;
-    graph.write_outputs(&[(&cache, updated), (&position_slot, next_position)])?;
+    graph.write_many(&[(&cache, &updated), (&position_slot, &next_position)])?;
     let selected = graph.read(&cache)?.dynamic_slice(&indices, &[1, 2])?;
-    let program = graph.compile_outputs(&mut compiler, &[selected, graph.read(&position_slot)?])?;
+    let program = graph.compile(&mut compiler, &[selected, graph.read(&position_slot)?])?;
     let mut session = program.session(vec![
         (cache.clone(), client.buffer(&[4, 2], &[0.; 8])?),
         (position_slot.clone(), client.buffer(&[], &[0])?),

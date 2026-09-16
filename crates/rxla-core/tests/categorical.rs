@@ -123,7 +123,7 @@ fn real_topk_sequence_only_reserves_candidates_and_rejects_invalid_rows() {
         .unwrap();
     let accepted = sequence.commit_if(&mut g, &valid).unwrap();
     let program = g
-        .compile_outputs(&mut compiler, &[first.indices, second.indices, accepted])
+        .compile(&mut compiler, &[first.indices, second.indices, accepted])
         .unwrap();
     let mut session = program
         .session(rng.initial_state(&client, [3, 7], 0).unwrap())
@@ -198,10 +198,10 @@ fn real_sequence_rejection_resume_and_wrap_are_atomic() {
         .unwrap();
     let accepted = sequence.commit_if(&mut graph, &condition).unwrap();
     graph
-        .write_outputs_if(&accepted, &[(&tokens, second.indices.clone())])
+        .write_many_if(&accepted, &[(&tokens, second.indices.clone())])
         .unwrap();
     let program = graph
-        .compile_outputs(&mut compiler, &[first.indices, second.indices, accepted])
+        .compile(&mut compiler, &[first.indices, second.indices, accepted])
         .unwrap();
     let good = client.buffer(&[2, 3], &[0., 1., -1., 2., 0., 1.]).unwrap();
     let bad = client

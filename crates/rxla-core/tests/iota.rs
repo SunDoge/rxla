@@ -55,9 +55,7 @@ fn real_resident_offset_and_iota_generate_position_blocks() {
         .unwrap();
     g.write(&offset, &start.wrapping_add_scalar(4).unwrap())
         .unwrap();
-    let program = g
-        .compile_outputs(&mut compiler, &[positions, features])
-        .unwrap();
+    let program = g.compile(&mut compiler, &[positions, features]).unwrap();
     let mut session = program
         .session(vec![(offset.clone(), client.buffer(&[], &[3]).unwrap())])
         .unwrap();

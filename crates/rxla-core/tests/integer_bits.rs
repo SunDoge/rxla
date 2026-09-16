@@ -100,7 +100,7 @@ fn real_resident_bitwise_transition_and_nondifferentiable_float_selection() {
         .wrapping_add_scalar(3)
         .unwrap();
     graph.write(&state, &next).unwrap();
-    let program = graph.compile_outputs(&mut compiler, &[next]).unwrap();
+    let program = graph.compile(&mut compiler, &[next]).unwrap();
     let mut expected = [1_i32, i32::MIN, 0xdeadbeef_u32 as i32];
     let mut session = program
         .session(vec![(

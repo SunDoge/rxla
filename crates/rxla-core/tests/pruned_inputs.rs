@@ -20,13 +20,9 @@ fn real_pruned_inputs_preserve_identities_hidden_updates_and_state_transfer() {
         .unwrap();
     let y = x.mul(weight.tensor()).unwrap();
     let outputs = [y, graph.scalar_i32(9).unwrap()];
-    let pruned = graph
-        .compile_outputs_pruned(&mut compiler, &outputs)
-        .unwrap();
-    let cached = graph
-        .compile_outputs_pruned(&mut compiler, &outputs)
-        .unwrap();
-    let legacy = graph.compile_outputs(&mut compiler, &outputs).unwrap();
+    let pruned = graph.compile_pruned(&mut compiler, &outputs).unwrap();
+    let cached = graph.compile_pruned(&mut compiler, &outputs).unwrap();
+    let legacy = graph.compile(&mut compiler, &outputs).unwrap();
     assert_eq!(pruned.input_indices(), [0, 2, 3]);
     assert_eq!(cached.input_indices(), [0, 2, 3]);
     assert_eq!(legacy.input_indices(), [0, 1, 2, 3, 4]);

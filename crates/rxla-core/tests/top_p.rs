@@ -106,7 +106,7 @@ fn real_top_p_includes_crossing_category_and_sequence_reserves_full_shape() {
     let accepted = sequence.commit_if(&mut g, &sample.valid).unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let program = g
-        .compile_outputs(&mut compiler, &[sample.indices, accepted])
+        .compile(&mut compiler, &[sample.indices, accepted])
         .unwrap();
     let mut session = program
         .session(rng.initial_state(&client, [3, 7], 0).unwrap())

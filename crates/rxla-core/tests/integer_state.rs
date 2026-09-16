@@ -12,11 +12,11 @@ fn real_state_program_returns_ordered_mixed_outputs_without_exposing_hidden_root
     let next_count = old_count.wrapping_add_scalar(1).unwrap();
     let next_total = graph.read(&total).unwrap().add_scalar(2.).unwrap();
     graph
-        .write_outputs(&[(&count, next_count.clone()), (&total, next_total.clone())])
+        .write_many(&[(&count, &next_count), (&total, &next_total)])
         .unwrap();
     let visible = [old_count, next_total, next_count];
-    let program = graph.compile_outputs(&mut compiler, &visible).unwrap();
-    graph.compile_outputs(&mut compiler, &visible).unwrap();
+    let program = graph.compile(&mut compiler, &visible).unwrap();
+    graph.compile(&mut compiler, &visible).unwrap();
     let mut session = program
         .session(vec![
             (total.clone(), client.buffer(&[], &[1.]).unwrap()),
@@ -79,7 +79,7 @@ fn real_mixed_state_position_updates_and_replacement_are_atomic() {
         .dynamic_update_slice(&value, std::slice::from_ref(&old_position))
         .unwrap();
     let next = old_position.wrapping_add_scalar(1).unwrap();
-    g.write_outputs(&[(&cache, updated), (&position, next)])
+    g.write_many(&[(&cache, &updated), (&position, &next)])
         .unwrap();
     let program = g.compile(&mut compiler, &[]).unwrap(); // Both state roots hidden.
     let initial = || {

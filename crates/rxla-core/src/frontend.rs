@@ -118,11 +118,11 @@ impl Tracer {
     }
 
     pub fn prepare_many(&self, outputs: &[Tensor]) -> Result<LoweredProgram> {
-        self.graph.prepare_outputs(outputs)
+        self.graph.prepare_many(outputs)
     }
 
     pub fn prepare_pruned(&self, outputs: &[Tensor]) -> Result<(LoweredProgram, Vec<usize>)> {
-        self.graph.prepare_outputs_pruned(outputs)
+        self.graph.prepare_pruned(outputs)
     }
 
     pub fn compile(&self, client: &Client, output: &Tensor) -> Result<Executable> {
@@ -1097,10 +1097,6 @@ impl Tensor {
         runtime.eval(self)
     }
 }
-
-/// Compatibility name for the earlier execution API. New code should use
-/// [`Runtime`] to make resource and placement ownership explicit.
-pub type Executor = Runtime;
 
 #[cfg(test)]
 mod tests {

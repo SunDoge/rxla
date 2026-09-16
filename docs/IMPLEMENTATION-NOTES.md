@@ -135,8 +135,8 @@ Tile assignment reorders physical device IDs from mesh-axis order into tensor
 partition-axis order and represents unused mesh axes as a replicated tile
 dimension.
 
-Tensor dtype unification (2026-09-13): `Index = Tensor` is now a compatibility
-alias, not a separate representation. Use `Graph::input_dtype(shape, dtype)`
+Tensor dtype unification (2026-09-13): the former `Index` type was folded into
+`Tensor` and removed. Use `Tracer::input_dtype(shape, dtype)`
 for F32/I32/BF16 inputs; all share managed storage and one-pointer descriptors.
 Shape transforms/gathers preserve dtype. Mixed arithmetic is rejected, and
 `to_f32()` explicitly converts I32/BF16. NN arithmetic/autodiff remain F32-only;
@@ -465,13 +465,13 @@ let next = steps.read(&graph)?.wrapping_add_scalar(1)?;
 steps.write(&mut graph, &next)?;
 ```
 
-`State<F32>` and `State<I32>` both read/write Tensor (Index is a compatibility alias).
+`State<F32>` and `State<I32>` both read/write `Tensor`.
 Dtype mismatches fail at write/commit time. `from_slot(&graph, slot)` validates an
 existing erased slot before wrapping it; `as_slot()`/`into_slot()` bridge to
 Session initialization, checkpoint and optimizer APIs. Clones alias the same
 identity. Shapes/graph ownership remain dynamically checked. `write_if` guards
 one slot using existing mask semantics (zero rejects, nonzero including NaN
-accepts); use existing `write_outputs_if` for an atomic mixed-slot proposal, not
+accepts); use `write_many_if` for an atomic mixed-slot proposal, not
 a sequence of typed writes that might fail partway. These operations record
 symbolic state, not arbitrary Rust side effects or live device mutations.
 CPU/CUDA tests cover exact I32 counter overflow, accepted/rejected F32/I32 updates,
@@ -1305,7 +1305,7 @@ including scalar/empty tensors and NaN payloads, and verify typed reads,
 byte counts and no-overwrite behavior. No dependency or binding generation was
 added. This is weight/buffer I/O, not a BF16 optimizer or safe mixed-precision AD.
 
-For frozen weights, `Graph::input_bf16_as_f32(shape)` and the corresponding
+For frozen weights, `Tracer::input_bf16_as_f32(shape)` and the corresponding
 `StateGraph` method declare a BF16 input and return an explicit HLO conversion
 to an ordinary F32 Tensor. Bind `upload_bf16_bits` buffers directly; no host F32
 expansion is needed. `Session::bind_inputs` can retain these frozen buffers while
@@ -1991,9 +1991,9 @@ are explicit, out-of-range starts clamp, and the caller constructs the mask.
 TinyLlama and the masked-decode test use this facade; general Module derivation
 is not implemented.
 
-`StateGraph::state_i32(shape)` registers resident integer state; `read_index` and
-`write_index` operate on Index values. `write_outputs(&[(slot, Output), ...])`
-validates and records mixed F32/I32 updates atomically. Slot shape/dtype cannot
+`StateGraph::state_i32(shape)` registers resident integer state. `read`, `write`
+and `write_many` operate on ordinary dtype-carrying tensors and validate mixed
+F32/I32 updates atomically. Slot shape/dtype cannot
 change. Initialization, replacement and execution results all check the recorded
 dtype before session commit. The `stateful_cache` example now maintains both
 cache and position internally: each call supplies only the new F32 data. It is
@@ -2017,14 +2017,13 @@ position tables, not the fixed-capacity KV cache or its context bounds. F32
 position conversion can round integers beyond 2^24; this example does not claim
 arbitrary-long-context RoPE accuracy or implement model-specific RoPE scaling.
 
-`StateGraph::compile_outputs` returns mixed visible F32/I32 buffers in requested
-order, while final state roots stay hidden. `compile(&[Tensor])` remains the F32
-convenience API. Every visible and hidden result is type-checked before commit;
+`StateGraph::compile` returns mixed visible F32/I32 buffers in requested order,
+while final state roots stay hidden. Every visible and hidden result is type-checked before commit;
 even a malformed visible integer result leaves old state intact. The cache
 example returns selected F32 data plus the updated I32 position, with no cast.
 
-`Graph::compile_outputs` and `Compiler::compile_outputs` accept `Output::Tensor`
-and `Output::Index` roots. Use `execute` and the matching `to_vec_f32`/`to_vec_i32`
+`Tracer::compile_many` and `Compiler::compile_many` accept tensor roots of any
+supported runtime dtype. Use `execute` and the matching typed buffer downloads
 on returned buffers; the existing host convenience methods remain F32-only.
 Tests verify exact mixed output restoration, cache reuse, independent sessions,
 integer counters, mixed-state replacement and rejected-result atomicity. The
@@ -2054,7 +2053,7 @@ the selected version: scalar F32 zero (including negative zero) retains the old
 value, while nonzero (including NaN) takes the proposal. Later updates read this
 selected value. Mask ownership/shape and slot ownership/type are checked before
 the closure runs. Invalid proposals leave the current symbolic version unchanged.
-These helpers use the same selection lowering as `write_outputs_if`, not lazy
+These helpers use the same selection lowering as `write_many_if`, not lazy
 branches: even a constant false mask still invokes the closure during graph
 construction. Use the batch API for jointly validated multi-slot updates.
 Native tests check repeated session calls, selected-value gradients, mixed
@@ -2077,11 +2076,10 @@ buffer for inspection. Slot shape is fixed; this layer currently supports F32/I3
 state and F32/I32 visible inputs. There is no native-buffer donation, async API,
 automatic RNG handling or tracing of arbitrary Rust mutations.
 
-`StateGraph::compile_pruned` (F32 outputs) and `compile_outputs_pruned` (mixed
-outputs) opt into removing unused input parameters from the compiled ABI.
+`StateGraph::compile_pruned` opts into removing unused input parameters from the compiled ABI.
 Reachability includes all visible outputs AND final state versions, so inputs
 used only by hidden updates remain live. The original graph is not changed;
-ordinary `compile`/`compile_outputs` still preserve all declared inputs.
+ordinary `compile` still preserves all declared inputs.
 
 `program.input_indices()` lists required original visible-input registration
 numbers in call order, before fixed binding. For example, `[0, 2]` means input 1
@@ -2207,7 +2205,7 @@ This is not live migration, zero-copy transport, or cross-thread native ownershi
 Conditional multi-slot updates can be recorded directly:
 
 ```rust,ignore
-graph.write_outputs_if(&accepted, &[
+graph.write_many_if(&accepted, &[
     (&cache_slot, next_cache.into()),
     (&position_slot, next_position.into()),
 ])?;
@@ -3154,7 +3152,7 @@ are not meaningful: validate labels or explicitly guard state updates on finite
 loss. Shape/owner/axis errors still fail during graph construction. Batch
 reduction is explicit, and no ignore-index or smoothing policy is implied.
 
-`Graph::iota_indices(shape, axis)` and `StateGraph::iota_indices(shape, axis)`
+`Tracer::iota_i32(shape, axis)` and `StateGraph::iota_i32(shape, axis)`
 generate I32 coordinates along a static axis with native HLO iota, without a
 host-built literal array or an additional input/state slot. Coordinates repeat
 over the other dimensions. Scalars have no valid axis; empty tensors are valid.
@@ -3492,7 +3490,7 @@ train_batchnorm -- --accumulate`; both modes are in the native regression gate.
 It registers affine/head parameters, momentum velocities and running statistics
 (ten slots), then compiles a read-only inference plan before recording training
 writes. Both plans retain the same graph-local slot identities. Inference uses
-`compile_outputs_pruned` to omit labels and the training rate from its input ABI;
+`compile_pruned` to omit labels and the training rate from its input ABI;
 training requires data, labels and a scalar learning rate. Training combines
 finite loss, finite optimizer candidates and finite proposed statistics into one predicate for both optimizer and statistic
 updates; after 50 steps an invalid-label batch verifies that all ten state values
@@ -3614,7 +3612,7 @@ let lowered = graph.prepare(&output)?; // Lower + encode once, no plugin needed.
 let executable = compiler.compile_lowered(&lowered)?;
 ```
 
-`prepare_outputs` accepts ordered mixed-dtype outputs. A `LoweredProgram` owns
+`Tracer::prepare_many` accepts ordered mixed-dtype outputs. A `LoweredProgram` owns
 a StableHLO payload and encoded key, not the source
 graph or native handles, and is Send + Sync. It preserves all inputs declared
 at preparation time; later source graph mutations do not alter its ABI. It can
@@ -3636,7 +3634,7 @@ Keep and execute an executable directly
 when no cache lookup is needed. Native compilation and execution are not sped up
 by preparing a graph, and this is not automatic graph-mutation memoization.
 
-Use `graph.prepare_outputs_pruned(&outputs)` to explicitly remove unreachable
+Use `tracer.prepare_pruned(&outputs)` to explicitly remove unreachable
 inputs. It returns `(prepared, input_indices)`, where each index refers to the
 original parameter registration order, listed in the compact executable order.
 Supply only those buffers in that order. Output order (including duplicates)
@@ -3645,7 +3643,7 @@ snapshot does not remove derivative dependencies from the source graph.
 This API snapshots value outputs, not StateProgram updates or state slot schemas;
 use StateGraph's state-aware preparation or compilation for resident state.
 
-`StateGraph::prepare_outputs` and `prepare_outputs_pruned` return a
+`StateGraph::prepare` and `prepare_pruned` return a
 `PreparedStateGraph` containing hidden final state outputs, slot identities,
 types and argument mappings along with the lowered graph. Call
 `prepared.compile(&mut compiler)` to obtain a normal `StateProgram`, then
@@ -3891,8 +3889,8 @@ and is not an eviction policy or an untrusted-cache security audit.
 
 `disk.invalidate(&lowered_program)` explicitly removes just the entry for that
 exact prepared StableHLO program, namespace and captured flags, returning false
-if it is already absent. Obtain it with `Graph::prepare` or
-`Graph::prepare_outputs_pruned`; the latter also returns the compact input mapping.
+if it is already absent. Obtain it with `Tracer::prepare` or
+`Tracer::prepare_pruned`; the latter also returns the compact input mapping.
 It deletes valid or invalid entries alike; no recursive removal, native loading
 or automatic repair occurs. Later graph/state changes can produce a different key.
 Other namespaces and keys are unaffected. Already loaded executables and compiler
@@ -4464,7 +4462,7 @@ non-positive strides instead of applying Python-style normalization. `split`
 accepts explicit sizes that must sum to the axis length; zero-sized pieces are
 supported. These operations are useful for projection splitting and RoPE.
 
-`Graph::index_input` creates a scalar I32 parameter (in declaration order alongside
+`Tracer::input_i32_scalar` creates a scalar I32 parameter (in declaration order alongside
 F32 parameters); `index_constant` supplies fixed axes. Pass these to
 `dynamic_slice` or `dynamic_update_slice`. Unlike static slicing, dynamic indices
 are clamped to `[0, dimension - slice_size]` by XLA, not rejected or wrapped.
@@ -4478,7 +4476,7 @@ is a distinct I32 indexing tensor, not yet a general integer arithmetic API.
 PJRT buffers support F32/I32 transfers with checked typed readback; broader dtypes,
 general integer arithmetic, public boolean tensors and cache donation remain future work.
 
-`Graph::indices_input(dims)` and `indices_constant(dims, values)` create index
+`Tracer::input_i32(dims)` and `constant_i32(dims, values)` create integer
 tensors; `index_input`/`index_constant` remain scalar conveniences. Dynamic slice
 starts still require scalars. `table.take(&ids, axis)` replaces the chosen axis
 with the index tensor's shape, e.g. `[vocab, hidden]` and `[batch, sequence]` IDs
@@ -4550,7 +4548,7 @@ TinyLlama uses SplitHalf and half-width host-generated position tables.
 the lowest index; a row containing NaNs selects its first NaN. All-negative-infinity
 and signed-zero ties therefore return index zero unless an earlier NaN rule
 applies. The reduced axis must be nonempty and no longer than i32::MAX; other
-empty axes are supported. Return the indices through `compile_outputs` or consume
+empty axes are supported. Return the indices through `compile_many` or consume
 them in gather/state updates without converting through F32. Native tests compare
 every axis with a direct Rust reference, including ties, NaNs and infinities.
 Lowering uses maximum plus integer minimum reductions and comparisons/iota,
@@ -4609,7 +4607,7 @@ integer comparisons, not lossy counter-to-F32 conversion.
 
 No state write is recorded by the helper. After using `draw.bits` to compute
 the model/loss, callers can include `draw.next_counter` in an explicit
-`write_outputs_if` alongside model/optimizer writes. Rejected writes therefore
+`write_many_if` alongside model/optimizer writes. Rejected writes therefore
 need not advance the random stream. Multiple draws from an unchanged counter
 reuse the same blocks: explicitly chain proposed counters to allocate disjoint
 ranges. Arithmetic wraps modulo 2^64; `counter_wrapped` reports crossing the

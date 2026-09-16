@@ -50,12 +50,10 @@ fn build(compiler: &mut Compiler, reordered: bool) -> (StateProgram, [StateSlot;
         .unwrap();
     let next_count = graph.read(&count).unwrap().wrapping_add_scalar(1).unwrap();
     graph
-        .write_outputs(&[(&value, next.clone()), (&count, next_count.clone())])
+        .write_many(&[(&value, &next), (&count, &next_count)])
         .unwrap();
     (
-        graph
-            .compile_outputs_pruned(compiler, &[next, next_count])
-            .unwrap(),
+        graph.compile_pruned(compiler, &[next, next_count]).unwrap(),
         [value, count],
         usize::from(reordered),
     )

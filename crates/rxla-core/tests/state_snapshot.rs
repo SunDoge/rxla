@@ -9,10 +9,8 @@ fn prepared_parameter_metadata_handles_pruning_storage_dtype_and_identity() {
     let weight = graph.parameter_bf16_as_f32(&[2]).unwrap();
     let empty = graph.trainable_parameter(&[2, 0]).unwrap();
     let output = trainable.tensor().add(weight.tensor()).unwrap();
-    let full = graph
-        .prepare_outputs(std::slice::from_ref(&output))
-        .unwrap();
-    let pruned = graph.prepare_outputs_pruned(&[output]).unwrap();
+    let full = graph.prepare(std::slice::from_ref(&output)).unwrap();
+    let pruned = graph.prepare_pruned(&[output]).unwrap();
     let late = graph.parameter(&[2]).unwrap();
     let late_state = graph.trainable_parameter(&[2]).unwrap();
     let foreign = StateGraph::default().parameter_bf16_as_f32(&[2]).unwrap();
@@ -45,14 +43,12 @@ fn prepared_state_metadata_validates_schema_without_plugin() {
     let count = graph.state_i32(&[]).unwrap();
     let replacement = graph.input_i32_scalar().unwrap();
     graph.write(&count, &replacement).unwrap();
-    let full = graph.prepare_outputs(&[]).unwrap();
-    let pruned = graph.prepare_outputs_pruned(&[]).unwrap();
+    let full = graph.prepare(&[]).unwrap();
+    let pruned = graph.prepare_pruned(&[]).unwrap();
     assert_eq!(full.input_indices(), [0, 1]);
     assert!(full.output_spec(0).is_none()); // hidden state is not a visible output
     assert!(pruned.output_spec(usize::MAX).is_none());
-    let visible = graph
-        .prepare_outputs(&[graph.read(&count).unwrap()])
-        .unwrap();
+    let visible = graph.prepare(&[graph.read(&count).unwrap()]).unwrap();
     assert_eq!(
         visible.output_spec(0),
         Some(rxla_core::OutputSpec {
@@ -107,7 +103,7 @@ fn prepared_state_keeps_bf16_binding_identity_and_session_isolation() {
         .add(&input.mul(weight.tensor()).unwrap())
         .unwrap();
     graph.write(&total, &next).unwrap();
-    let prepared = graph.prepare_outputs_pruned(&[next]).unwrap();
+    let prepared = graph.prepare_pruned(&[next]).unwrap();
     drop(graph);
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let program = prepared.compile(&mut compiler).unwrap();
@@ -187,11 +183,11 @@ fn state_preparation_is_host_only_and_requires_at_least_one_root() {
     fn send_sync<T: Send + Sync>() {}
     send_sync::<rxla_core::PreparedStateGraph>();
     let mut graph = StateGraph::default();
-    assert!(graph.prepare_outputs(&[]).is_err());
-    assert!(graph.prepare_outputs_pruned(&[]).is_err());
+    assert!(graph.prepare(&[]).is_err());
+    assert!(graph.prepare_pruned(&[]).is_err());
     State::<I32>::new(&mut graph, &[]).unwrap();
-    graph.prepare_outputs(&[]).unwrap();
-    graph.prepare_outputs_pruned(&[]).unwrap();
+    graph.prepare(&[]).unwrap();
+    graph.prepare_pruned(&[]).unwrap();
 }
 
 #[test]
@@ -217,13 +213,13 @@ fn prepared_state_freezes_hidden_updates_schema_and_input_mapping() {
         let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
         let (prepared, ordinary) = if pruned {
             (
-                graph.prepare_outputs_pruned(&[]).unwrap(),
-                graph.compile_outputs_pruned(&mut compiler, &[]).unwrap(),
+                graph.prepare_pruned(&[]).unwrap(),
+                graph.compile_pruned(&mut compiler, &[]).unwrap(),
             )
         } else {
             (
-                graph.prepare_outputs(&[]).unwrap(),
-                graph.compile_outputs(&mut compiler, &[]).unwrap(),
+                graph.prepare(&[]).unwrap(),
+                graph.compile(&mut compiler, &[]).unwrap(),
             )
         };
         let compile_time = compiler.stats().compile_time;

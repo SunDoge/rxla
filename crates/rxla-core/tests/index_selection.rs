@@ -66,7 +66,7 @@ fn real_masked_state_advances_only_active_positions() {
         .select(&old.wrapping_add_scalar(1).unwrap(), &old)
         .unwrap();
     g.write(&positions, &next).unwrap();
-    let program = g.compile_outputs(&mut compiler, &[next]).unwrap();
+    let program = g.compile(&mut compiler, &[next]).unwrap();
     let mut session = program
         .session(vec![(
             positions.clone(),

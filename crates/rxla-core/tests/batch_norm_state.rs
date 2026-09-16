@@ -54,7 +54,7 @@ fn real_proposed_statistic_finiteness_can_gate_other_state() {
         let finite = proposal.finite_mask().unwrap();
         let next_count = graph.read(&count).unwrap().wrapping_add_scalar(1).unwrap();
         graph
-            .write_outputs_if(&finite, &[(&count, next_count)])
+            .write_many_if(&finite, &[(&count, next_count)])
             .unwrap();
         proposal.commit_if(&mut graph, &finite).unwrap();
         let program = graph.compile(&mut compiler, &[finite]).unwrap();

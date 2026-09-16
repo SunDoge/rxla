@@ -72,7 +72,7 @@ impl ThreefryState {
             }
         }
         let zero = graph.scalar_i32(0)?;
-        graph.write_outputs_if(
+        graph.write_many_if(
             condition,
             &[
                 (&self.slots[0], key[0].clone()),
@@ -339,7 +339,7 @@ impl ThreefrySequence {
             }
         }
         let accepted = condition.select(&self.available, &graph.constant(&[], &[0.])?)?;
-        graph.write_outputs_if(
+        graph.write_many_if(
             &accepted,
             &[
                 (&self.state.slots[2], self.next[0].clone()),

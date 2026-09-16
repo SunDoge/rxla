@@ -192,7 +192,7 @@ empty state. No new backend compilation is required to resume.
 
 ### Conditional state transitions
 
-`StateGraph::write_outputs_if(&scalar_mask, &updates)` records one condition
+`StateGraph::write_many_if(&scalar_mask, &updates)` records one condition
 across mixed F32/I32 state slots. It broadcasts the scalar mask to each slot and
 selects between the proposed value and the version current at this call, then
 advances all selected symbolic versions together. Zero keeps old values; nonzero

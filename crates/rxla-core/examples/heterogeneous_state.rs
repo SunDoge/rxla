@@ -35,7 +35,7 @@ fn main() -> Result<()> {
             .with(&value, &next_value)?
             .with(&count, &next_count)?
             .commit_if(&accept)?;
-        (g.prepare_outputs_pruned(&[value.read(&g)?])?, value, count)
+        (g.prepare_pruned(&[value.read(&g)?])?, value, count)
     }; // Source graph and all symbolic tensor handles are gone before compilation.
     let mut cpu_compiler = Compiler::new(cpu.clone(), CacheLimits::default());
     let mut gpu_compiler = Compiler::new(gpu.clone(), CacheLimits::default());

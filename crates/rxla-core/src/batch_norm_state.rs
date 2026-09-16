@@ -176,8 +176,8 @@ impl BatchNormUpdate {
             (slots[1], self.proposed[1].clone()),
         ];
         match condition {
-            Some(condition) => graph.write_outputs_if(condition, &updates),
-            None => graph.write_outputs(&updates),
+            Some(condition) => graph.write_many_if(condition, &updates),
+            None => graph.record_updates(&updates),
         }
     }
 }
