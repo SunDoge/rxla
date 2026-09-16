@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph, Tensor};
+use rxla_core::{Client, Tensor, Tracer};
 
 #[test]
 fn stack_and_singleton_shape_validation() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[2, 1, 3]).unwrap();
     assert_eq!(x.squeeze(1).unwrap().shape(), [2, 3]);
     assert_eq!(x.unsqueeze(0).unwrap().shape(), [1, 2, 1, 3]);
@@ -13,7 +13,7 @@ fn stack_and_singleton_shape_validation() {
     assert!(Tensor::stack(&[], 0).is_err());
     assert!(Tensor::stack(std::slice::from_ref(&x), 4).is_err());
     assert!(Tensor::stack(&[x.clone(), graph.input(&[2, 3]).unwrap()], 0).is_err());
-    assert!(Tensor::stack(&[x, Graph::default().input(&[2, 1, 3]).unwrap()], 0).is_err());
+    assert!(Tensor::stack(&[x, Tracer::default().input(&[2, 1, 3]).unwrap()], 0).is_err());
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn real_stack_preserves_values_on_every_insertion_axis() {
         let a: Vec<_> = (0..count).map(|i| i as f32).collect();
         let b: Vec<_> = a.iter().map(|x| x + 10.).collect();
         for axis in 0..=shape.len() {
-            let graph = Graph::default();
+            let graph = Tracer::default();
             let x = graph.input(&shape).unwrap();
             let y = graph.input(&shape).unwrap();
             let joined = Tensor::stack(&[x.clone(), y], axis).unwrap();

@@ -1,4 +1,4 @@
-use rxla_core::{Graph, Output, Result};
+use rxla_core::{Result, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -16,7 +16,7 @@ fn real_owned_client_metadata() {
         1
     );
     assert_eq!(info, client.info().unwrap());
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[1]).unwrap();
     assert_eq!(
         graph.compile(&client, &x).unwrap().run(&[&[42.]]).unwrap(),
@@ -34,11 +34,11 @@ fn static_metadata_and_public_result_work_without_native_execution() -> Result<(
         (vec![2, 0, 3], 0),
         (vec![0], 0),
     ] {
-        let graph = Graph::default();
+        let graph = Tracer::default();
         let tensor = graph.input(&shape)?;
         let index = graph.input_i32(&shape)?;
-        let outputs = [Output::from(tensor.clone()), Output::from(index.clone())];
-        let before = graph.stablehlo_outputs(&outputs)?;
+        let outputs = [tensor.clone(), index.clone()];
+        let before = graph.stablehlo_many(&outputs)?;
         assert_eq!(tensor.ndim(), shape.len());
         assert_eq!(index.ndim(), shape.len());
         assert_eq!(tensor.numel(), count);
@@ -50,14 +50,14 @@ fn static_metadata_and_public_result_work_without_native_execution() -> Result<(
             assert_eq!(output.numel(), count);
             assert_eq!(output.is_empty(), count == 0);
         }
-        assert_eq!(before, graph.stablehlo_outputs(&outputs)?);
+        assert_eq!(before, graph.stablehlo_many(&outputs)?);
     }
     Ok(())
 }
 
 #[test]
 fn invalid_shapes_are_rejected_before_queries_are_available() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     for shape in [&[-1][..], &[i64::MAX, i64::MAX][..]] {
         assert!(graph.input(shape).is_err());
         assert!(graph.input_i32(shape).is_err());

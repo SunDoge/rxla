@@ -1,5 +1,5 @@
 //! Explicit native artifact export/load. Not an automatic persistent cache.
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 use std::io::Write;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?)? };
     if args[0] == "save" {
-        let graph = Graph::default();
+        let graph = Tracer::default();
         let x = graph.input(&[2, 3])?;
         let w = graph.input(&[3, 2])?;
         let y = x.matmul(&w)?;

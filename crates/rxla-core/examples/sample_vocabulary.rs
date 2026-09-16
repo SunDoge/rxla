@@ -1,6 +1,6 @@
 //! Synthetic sampling microbenchmark, not LLM decode throughput.
 use rxla_core::{
-    Client, Graph,
+    Client, Tracer,
     random::{top_p_categorical_from_bits, topk_categorical_from_bits},
 };
 use std::{io::Write, time::Instant};
@@ -85,7 +85,7 @@ fn main() -> Result<()> {
     let values = client.buffer(&[VOCAB as i64], &logits)?;
     let mut plans = Vec::new();
     for nucleus in [false, true] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&[VOCAB as i64])?;
         let count = if nucleus { VOCAB } else { TOP_K };
         let bits = g.input_i32(&[count as i64])?;
@@ -95,7 +95,7 @@ fn main() -> Result<()> {
             topk_categorical_from_bits(&x, &bits, TOP_K, 0)?
         };
         let start = Instant::now();
-        let executable = g.compile_outputs(&client, &[sample.indices, sample.valid])?;
+        let executable = g.compile_many(&client, &[sample.indices, sample.valid])?;
         let compile_ms = start.elapsed().as_secs_f64() * 1000.;
         let bits = client.buffer(&[count as i64], &words[..count])?;
         let expected = reference(&logits, &words, nucleus) as i32;

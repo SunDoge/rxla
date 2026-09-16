@@ -1,10 +1,10 @@
-use rxla_core::{Client, Conv2dOptions, Graph};
+use rxla_core::{Client, Conv2dOptions, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_ocr_stem_layout_matches_f64_with_scale_aware_roundoff_budget() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[1, 3, 9, 11]).unwrap();
     let w = graph.input(&[16, 3, 3, 3]).unwrap();
     let b = graph.input(&[16]).unwrap();

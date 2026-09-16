@@ -1,11 +1,11 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_strided_slice_polynomial_derivatives_and_empty_selection() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for empty in [false, true] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&[3, 4]).unwrap();
         let selected = x
             .slice(&[1, 0], &[if empty { 1 } else { 3 }, 4], &[1, 2])

@@ -8,7 +8,7 @@ This is not a complete MLX-style auto-evaluating array API.
 ```text
 Tensor (one Rc pointer)
   -> immutable TensorDescriptor
-       -> optional tracing identity { Graph, node ID }
+       -> optional private tracing identity { session, node ID }
        -> SmallVec<i64, 5> logical shape + explicit dtype
        -> optional input binding
             host:   Storage owner + checked StridedLayout
@@ -32,11 +32,12 @@ requiring allocation/clone benchmarks, overflow/drop tests and a safety audit;
 there is no demonstrated performance gain from replacing Rc at this point.
 
 Native storage makes **all Tensor handles !Send/!Sync**, including unbound ones.
-This is an intentional API change; no unsafe Send/Sync bypass exists. Graph and
+This is an intentional API change; no unsafe Send/Sync bypass exists. Tracers and
 prepared host snapshots retain their existing separation from native storage.
 Build/prepare on the caller, send the snapshot to a worker and keep native
 Tensor/Storage owners on that worker. Host-only cross-thread owners can still
-be passed separately (for example Arc byte storage). Index is a compatibility alias for Tensor and uses the same descriptor.
+be passed separately (for example Arc byte storage). Integer values use the same
+`Tensor` descriptor with `DType::I32`.
 
 ## Managed ownership and execution
 
@@ -48,7 +49,8 @@ revalidates its reachable interval against the currently supplied slice. Only
 read-only byte access is exposed, never aligned typed references. Storage erases
 the Rust element type and records dtype explicitly; it does not use a per-dtype
 Vec enum. Tensor descriptors also record their logical dtype, propagated from
-the IR when reconstructing autodiff values. Graph::input_dtype selects F32/I32/BF16. Shape transforms and gathers preserve
+the IR when reconstructing autodiff values. `Tracer::input_dtype` selects
+F32/I32/BF16. Shape transforms and gathers preserve
 dtype; integer arithmetic stays exact. Unsupported BF16 arithmetic and non-F32
 autodiff are rejected. to_f32 is explicit conversion, not a bitcast.
 

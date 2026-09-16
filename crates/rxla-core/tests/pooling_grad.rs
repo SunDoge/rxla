@@ -1,4 +1,4 @@
-use rxla_core::{Client, Graph, Pool2dOptions};
+use rxla_core::{Client, Pool2dOptions, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -52,7 +52,7 @@ fn real_average_pool_grad_matches_scalar_scatter_reference() {
         ),
     ];
     for (shape, options, include_pad) in cases {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let y = x.avg_pool2d(options, include_pad).unwrap();
         let seed = g.input(y.shape()).unwrap();
@@ -136,7 +136,7 @@ fn real_average_pool_empty_gradients() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for shape in [[0, 3, 4, 2], [2, 0, 3, 2], [1, 3, 4, 0], [1, 1, 1, 2]] {
         for include_pad in [false, true] {
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input(&shape).unwrap();
             let y = x.avg_pool2d(Pool2dOptions::default(), include_pad).unwrap();
             let gradient = y.sum(&[0, 1, 2, 3], false).unwrap().grad(&[x]).unwrap();
@@ -154,7 +154,7 @@ fn real_average_pool_empty_gradients() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_average_pool_squared_input_second_derivative() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 3, 3, 1]).unwrap();
     let loss = x
         .square()

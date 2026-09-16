@@ -1,15 +1,15 @@
-use rxla_core::{Client, DType, Graph};
+use rxla_core::{Client, DType, Tracer};
 
 #[test]
 fn dynamic_index_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[4, 2]).unwrap();
     let i = g.input_i32_scalar().unwrap();
     let z = g.scalar_i32(0).unwrap();
     assert!(x.dynamic_slice(std::slice::from_ref(&i), &[1, 2]).is_err());
     assert!(x.dynamic_slice(&[i.clone(), z.clone()], &[5, 2]).is_err());
     assert!(x.dynamic_slice(&[i.clone(), z.clone()], &[-1, 2]).is_err());
-    let other = Graph::default();
+    let other = Tracer::default();
     assert!(
         x.dynamic_slice(&[other.input_i32_scalar().unwrap(), z.clone()], &[1, 2])
             .is_err()
@@ -28,7 +28,7 @@ fn dynamic_index_validation() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_runtime_indexed_cache() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let cache = g.input(&[4, 2]).unwrap();
     let update = g.input(&[1, 2]).unwrap();
     let position = g.input_i32_scalar().unwrap();

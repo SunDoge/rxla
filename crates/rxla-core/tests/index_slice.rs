@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn integer_and_float_slice_validation_agree() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let i = g.input_i32(&[2, 3]).unwrap();
     let f = g.input(&[2, 3]).unwrap();
     for (starts, limits, strides) in [
@@ -40,14 +40,14 @@ fn integer_and_float_slice_validation_agree() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_i32_slices_preserve_full_words_scalar_and_empty_shapes() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input_i32(&[2, 3, 4]).unwrap();
     let mut outputs = vec![x.slice(&[0, 1, 0], &[2, 3, 4], &[1, 1, 2]).unwrap()];
     for axis in 0..3 {
         outputs.push(x.narrow(axis, 1, 1).unwrap());
     }
     outputs.push(x.narrow(2, 4, 0).unwrap());
-    let executable = g.compile_outputs(&client, &outputs.to_vec()).unwrap();
+    let executable = g.compile_many(&client, &outputs.to_vec()).unwrap();
     let values: Vec<_> = (0..24)
         .map(|i| match i % 4 {
             0 => i32::MIN + i,
@@ -76,12 +76,12 @@ fn real_i32_slices_preserve_full_words_scalar_and_empty_shapes() {
         assert_eq!(buffer.to_vec::<i32>().unwrap(), expected);
     }
     for shape in [vec![], vec![2, 0, 4]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input_i32(&shape).unwrap();
         let sliced = x
             .slice(&vec![0; shape.len()], &shape, &vec![1; shape.len()])
             .unwrap();
-        let exe = g.compile_outputs(&client, &[sliced]).unwrap();
+        let exe = g.compile_many(&client, &[sliced]).unwrap();
         let data = if shape.is_empty() {
             vec![i32::MIN]
         } else {

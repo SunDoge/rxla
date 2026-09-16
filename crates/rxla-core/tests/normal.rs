@@ -1,15 +1,15 @@
 use rxla_core::{
-    CacheLimits, Client, Compiler, Graph, StateGraph,
+    CacheLimits, Client, Compiler, StateGraph, Tracer,
     random::{ThreefryState, normal_f32_from_bits},
 };
 
 #[test]
 fn validates_normal_word_shapes_and_graphs() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let a = g.input_i32(&[2]).unwrap();
     for b in [
         g.input_i32_scalar().unwrap(),
-        Graph::default().input_i32(&[2]).unwrap(),
+        Tracer::default().input_i32(&[2]).unwrap(),
     ] {
         assert!(normal_f32_from_bits([&a, &b]).is_err());
     }
@@ -163,7 +163,7 @@ fn real_normal_matches_f64_formula_at_grid_boundaries() {
             b.push(y);
         }
     }
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input_i32(&[8, 8]).unwrap();
     let y = g.input_i32(&[8, 8]).unwrap();
     let z = normal_f32_from_bits([&x, &y]).unwrap();

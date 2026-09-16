@@ -1,5 +1,5 @@
 //! Bounded, single-thread native inference scheduling. Not a throughput benchmark.
-use rxla_core::{CacheLimits, Client, Compiler, Graph, PendingExecution};
+use rxla_core::{CacheLimits, Client, Compiler, PendingExecution, Tracer};
 use std::collections::VecDeque;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -22,7 +22,7 @@ fn run(plugin: &str, requests: usize, capacity: usize) -> Result<Report> {
     }
     let client = unsafe { Client::load(plugin) }?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 2])?;
     let w = g.input(&[2, 2])?;
     let exe = compiler.compile(&g, &x.matmul(&w)?)?;

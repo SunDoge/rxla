@@ -1,6 +1,6 @@
 //! Opt-in placement preflight test using at least two logical CPU devices.
 use prost::Message;
-use rxla_core::{CacheLimits, Client, ClientOptions, Compiler, Graph};
+use rxla_core::{CacheLimits, Client, ClientOptions, Compiler, Tracer};
 use rxla_xla_proto::xla::{
     CompileOptionsProto, DeviceAssignmentProto, ExecutableBuildOptionsProto,
     device_assignment_proto::ComputationDevice,
@@ -38,7 +38,7 @@ fn check_shared_cache(path: &str) -> Result<(), Box<dyn std::error::Error>> {
         };
         let mut compiler =
             Compiler::new(client.clone(), CacheLimits::default()).with_disk_cache(cache);
-        let graph = Graph::default();
+        let graph = Tracer::default();
         let x = graph.input(&[2])?;
         let executable = compiler.compile(&graph, &x.add_scalar(3.)?)?;
         let input = client.buffer(&[2], &[1., 2.])?;
@@ -95,7 +95,7 @@ fn check_device(
         .find(|d| !d.selected)
         .ok_or("missing second device")?
         .id as i64;
-    let g = Graph::default();
+    let g = Tracer::default();
     let input = g.input(&[2])?;
     let output = input.add_scalar(1.)?;
     let module = g.stablehlo(&output)?;

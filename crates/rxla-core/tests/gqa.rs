@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn gqa_layout_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let q = g.input(&[2, 4, 3, 2]).unwrap();
     let k = g.input(&[2, 2, 5, 2]).unwrap();
     let v = g.input(&[2, 2, 5, 7]).unwrap();
@@ -25,7 +25,7 @@ fn gqa_layout_validation() {
         q.grouped_query_attention(&k, &v, Some(&bad_mask), None)
             .is_err()
     );
-    let foreign = Graph::default().input(&[2, 2, 5, 2]).unwrap();
+    let foreign = Tracer::default().input(&[2, 2, 5, 2]).unwrap();
     assert!(q.grouped_query_attention(&foreign, &v, None, None).is_err());
 }
 
@@ -45,7 +45,7 @@ fn real_gqa_multiquery_head_masks_match_f64() {
         })
         .collect();
     for kv_heads in [1usize, 2, 4] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let q = g.input(&[2, 4, 3, 2]).unwrap();
         let k = g.input(&[2, kv_heads as i64, 4, 2]).unwrap();
         let v = g.input(&[2, kv_heads as i64, 4, 3]).unwrap();

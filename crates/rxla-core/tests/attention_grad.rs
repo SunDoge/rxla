@@ -1,4 +1,4 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 // Independent scalar reference, deliberately without tensor library operations.
 // Two batches, four Q heads, two queries, three keys, depth 2, value depth 3.
@@ -41,7 +41,7 @@ fn reference(data: &[Vec<f64>], kv_heads: usize, weights: &[f32]) -> f64 {
 fn real_mqa_gqa_mha_gradients_match_independent_f64_differences() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for kv_heads in [1, 2, 4] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let q = g.input(&[2, 4, 2, 2]).unwrap();
         let k = g.input(&[2, kv_heads as i64, 3, 2]).unwrap();
         let v = g.input(&[2, kv_heads as i64, 3, 3]).unwrap();

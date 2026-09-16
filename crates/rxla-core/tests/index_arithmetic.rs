@@ -1,13 +1,13 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn index_arithmetic_stays_i32_and_requires_explicit_broadcast() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input_i32(&[2, 3]).unwrap();
     let scalar = g.input_i32_scalar().unwrap();
     assert!(x.wrapping_add(&scalar).is_err());
     assert!(
-        x.wrapping_sub(&Graph::default().input_i32(&[2, 3]).unwrap())
+        x.wrapping_sub(&Tracer::default().input_i32(&[2, 3]).unwrap())
             .is_err()
     );
     let rhs = scalar.broadcast_to(x.shape()).unwrap();
@@ -32,7 +32,7 @@ fn index_arithmetic_stays_i32_and_requires_explicit_broadcast() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_i32_arithmetic_matches_wrapping_reference_exactly() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let a = g.input_i32(&[8]).unwrap();
     let b = g.input_i32(&[8]).unwrap();
     let expected = (0..3)
@@ -69,7 +69,7 @@ fn real_i32_arithmetic_matches_wrapping_reference_exactly() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_runtime_positions_drive_strided_gather() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let base = g.input_i32_scalar().unwrap();
     let stride = g.input_i32_scalar().unwrap();
     let offsets = g.constant_i32(&[3], &[0, 1, 2]).unwrap();

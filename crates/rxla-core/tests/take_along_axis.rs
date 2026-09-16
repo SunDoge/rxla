@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn rejects_incompatible_indices() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     let integers = g.input_i32(&[2, 3]).unwrap();
     for shape in [&[2][..], &[1, 1], &[2, 1, 1]] {
@@ -23,13 +23,13 @@ fn rejects_incompatible_indices() {
     );
     assert!(
         integers
-            .take_along_axis(&Graph::default().input_i32(&[2, 1]).unwrap(), 1)
+            .take_along_axis(&Tracer::default().input_i32(&[2, 1]).unwrap(), 1)
             .is_err()
     );
     assert!(x.take_along_axis(&ids, 2).is_err());
     assert!(g.input(&[2, 0]).unwrap().take_along_axis(&ids, 1).is_err());
     assert!(
-        x.take_along_axis(&Graph::default().input_i32(&[2, 1]).unwrap(), 1)
+        x.take_along_axis(&Tracer::default().input_i32(&[2, 1]).unwrap(), 1)
             .is_err()
     );
 }
@@ -46,13 +46,13 @@ fn real_integer_gather_preserves_bits_all_axes_and_empty_outputs() {
         .collect();
     for axis in 0..3 {
         for length in [0, 5] {
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input_i32(&shape).unwrap();
             let mut out_shape = shape;
             out_shape[axis] = length;
             let ids = g.input_i32(&out_shape).unwrap();
             let output = x.take_along_axis(&ids, axis).unwrap();
-            let exe = g.compile_outputs(&client, &[output]).unwrap();
+            let exe = g.compile_many(&client, &[output]).unwrap();
             let count = out_shape.iter().product::<i64>() as usize;
             let picks: Vec<_> = (0..count)
                 .map(|i| [i32::MIN, 0, 1, 2, i32::MAX][i % 5])
@@ -81,7 +81,7 @@ fn real_integer_gather_preserves_bits_all_axes_and_empty_outputs() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_topk_sampling_maps_candidates_to_original_ids() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let logits = g.input(&[2, 5]).unwrap();
     let bits = g.input_i32(&[2, 2]).unwrap();
     let (values, candidates) = logits.topk(2, 1).unwrap();
@@ -89,7 +89,7 @@ fn real_topk_sampling_maps_candidates_to_original_ids() {
     let tokens = candidates
         .take_along_axis(&sample.indices.reshape(&[2, 1]).unwrap(), 1)
         .unwrap();
-    let exe = g.compile_outputs(&client, &[tokens, sample.valid]).unwrap();
+    let exe = g.compile_many(&client, &[tokens, sample.valid]).unwrap();
     let input = client
         .buffer(&[2, 5], &[0., 10., 0., 9., 0., 3., 0., 0., 0., 4.])
         .unwrap();
@@ -108,7 +108,7 @@ fn real_per_position_gather_every_axis() {
     let shape = [2i64, 3, 4];
     let values: Vec<_> = (0..24).map(|i| i as f32).collect();
     for axis in 0..3 {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let mut out_shape = shape;
         out_shape[axis] = 5;
@@ -145,7 +145,7 @@ fn real_per_position_gather_every_axis() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_token_log_probs_and_empty_gather() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let logits = g.input(&[2, 3]).unwrap();
     let ids = g.input_i32(&[2, 1]).unwrap();
     let selected = logits
@@ -164,7 +164,7 @@ fn real_token_log_probs_and_empty_gather() {
     assert_eq!(result[0], -2000.);
     assert!((result[1] + 3f32.ln()).abs() < 2e-6);
     for (shape, ids_shape) in [([0, 3], [0, 1]), ([2, 3], [2, 0])] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let ids = g.input_i32(&ids_shape).unwrap();
         let output = x.take_along_axis(&ids, 1).unwrap();

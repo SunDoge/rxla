@@ -1,8 +1,7 @@
 //! User-facing tracing and execution facade.
 //!
-//! The original `Graph` API remains available as a low-level compatibility
-//! layer. New code should use [`Tracer`], [`Program`] and [`Runtime`]: graph
-//! ownership is then an implementation detail of one tracing session. The
+//! The mutable graph owner is an implementation detail. Explicit construction
+//! uses [`Tracer`], while ordinary code composes lazy tensors. The
 //! tracer is Pliron-only and rejects operations that have not been migrated;
 //! it never silently switches to the compatibility representation. The
 //! runtime owns compilation, placement policy, and PJRT resources while tensor
@@ -52,7 +51,7 @@ impl Device {
 /// A single IR-building session.
 #[derive(Clone, Default)]
 pub struct Tracer {
-    graph: Graph,
+    pub(crate) graph: Graph,
 }
 
 impl Tracer {
@@ -68,8 +67,70 @@ impl Tracer {
         self.graph.input_dtype(shape, dtype)
     }
 
+    pub fn input_bf16_as_f32(&self, shape: &[i64]) -> Result<Tensor> {
+        self.graph.input_bf16_as_f32(shape)
+    }
+
+    pub fn input_i32(&self, shape: &[i64]) -> Result<Tensor> {
+        self.graph.input_i32(shape)
+    }
+
+    pub fn input_i32_scalar(&self) -> Result<Tensor> {
+        self.graph.input_i32_scalar()
+    }
+
     pub fn constant(&self, shape: &[i64], values: &[f32]) -> Result<Tensor> {
         self.graph.constant(shape, values)
+    }
+
+    pub fn constant_i32(&self, shape: &[i64], values: &[i32]) -> Result<Tensor> {
+        self.graph.constant_i32(shape, values)
+    }
+
+    pub fn scalar_i32(&self, value: i32) -> Result<Tensor> {
+        self.graph.scalar_i32(value)
+    }
+
+    pub fn iota_i32(&self, shape: &[i64], axis: usize) -> Result<Tensor> {
+        self.graph.iota_i32(shape, axis)
+    }
+
+    pub fn causal_attention_mask(
+        &self,
+        queries: i64,
+        keys: i64,
+        query_offset: i64,
+    ) -> Result<Tensor> {
+        self.graph
+            .causal_attention_mask(queries, keys, query_offset)
+    }
+
+    pub fn stablehlo(&self, output: &Tensor) -> Result<String> {
+        self.graph.stablehlo(output)
+    }
+
+    pub fn stablehlo_many(&self, outputs: &[Tensor]) -> Result<String> {
+        self.graph.stablehlo_many(outputs)
+    }
+
+    pub fn prepare(&self, output: &Tensor) -> Result<LoweredProgram> {
+        self.graph.prepare(output)
+    }
+
+    pub fn prepare_many(&self, outputs: &[Tensor]) -> Result<LoweredProgram> {
+        self.graph.prepare_outputs(outputs)
+    }
+
+    pub fn prepare_pruned(&self, outputs: &[Tensor]) -> Result<(LoweredProgram, Vec<usize>)> {
+        self.graph.prepare_outputs_pruned(outputs)
+    }
+
+    pub fn compile(&self, client: &Client, output: &Tensor) -> Result<Executable> {
+        self.graph.compile(client, output)
+    }
+
+    pub fn compile_many(&self, client: &Client, outputs: &[Tensor]) -> Result<Executable> {
+        self.graph.compile_many(client, outputs)
     }
 
     /// Trace a function into a reusable immutable [`Program`].

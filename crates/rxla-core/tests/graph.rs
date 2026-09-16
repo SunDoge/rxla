@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn stablehlo_and_shape_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     let w = g.input(&[3, 4]).unwrap();
     let y = x.matmul(&w).unwrap();
@@ -12,7 +12,7 @@ fn stablehlo_and_shape_validation() {
     assert!(x.reshape(&[5]).is_err());
     assert!(g.input(&[-1]).is_err());
     assert!(g.constant(&[2], &[1.]).is_err());
-    assert!(x.add(&Graph::default().input(&[2, 3]).unwrap()).is_err());
+    assert!(x.add(&Tracer::default().input(&[2, 3]).unwrap()).is_err());
     let stablehlo = g.stablehlo(&y).unwrap();
     assert!(stablehlo.contains("stablehlo.dot_general"));
 }
@@ -22,7 +22,7 @@ fn stablehlo_and_shape_validation() {
 fn real_cpu_execution_and_lifetimes() {
     let path = std::env::var("PJRT_PLUGIN_PATH").expect("set PJRT_PLUGIN_PATH");
     let client = unsafe { Client::load(path) }.unwrap();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[2, 3]).unwrap();
     let w = graph.input(&[3, 2]).unwrap();
     let y = x.matmul(&w).unwrap();

@@ -1,6 +1,6 @@
 //! Explicit bootstrap/trace boundaries using ordinary tensor composition.
 //! Synthetic rollout validation, not an RL trainer or environment integration.
-use rxla_core::{CacheLimits, Client, Compiler, Graph, Tensor};
+use rxla_core::{CacheLimits, Client, Compiler, Tensor, Tracer};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn advantages(
@@ -29,7 +29,7 @@ fn advantages(
 fn run() -> Result<()> {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?) }?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let rewards = graph.input(&[2, 5])?;
     let values = graph.input(&[2, 5])?;
     let next_values = graph.input(&[2, 5])?;

@@ -1,4 +1,4 @@
-use rxla_core::{Client, Error, Graph, Tensor};
+use rxla_core::{Client, Error, Tensor, Tracer};
 
 type Compare = fn(&Tensor, &Tensor) -> Result<Tensor, Error>;
 const OPS: [Compare; 6] = [
@@ -12,11 +12,11 @@ const OPS: [Compare; 6] = [
 
 #[test]
 fn comparison_shapes_and_ownership() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let a = g.input(&[2]).unwrap();
     let b = g.input(&[2]).unwrap();
     let scalar = g.input(&[]).unwrap();
-    let foreign = Graph::default().input(&[2]).unwrap();
+    let foreign = Tracer::default().input(&[2]).unwrap();
     for op in OPS {
         assert_eq!(op(&a, &b).unwrap().shape(), [2]);
         assert!(op(&a, &scalar).is_err());
@@ -28,7 +28,7 @@ fn comparison_shapes_and_ownership() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_comparison_ieee_semantics_and_selection() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let a = g.input(&[6, 6]).unwrap();
     let b = g.input(&[6, 6]).unwrap();
     let mut outputs: Vec<_> = OPS.iter().map(|op| op(&a, &b).unwrap()).collect();
@@ -64,7 +64,7 @@ fn real_comparison_ieee_semantics_and_selection() {
         }
     }
     for shape in [vec![], vec![0, 2]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let a = g.input(&shape).unwrap();
         let b = g
             .constant(&[], &[0.])

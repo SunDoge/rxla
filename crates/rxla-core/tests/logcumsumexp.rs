@@ -1,4 +1,4 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -45,7 +45,7 @@ fn real_signed_prefix_vjp_and_nonuniform_hessian_vector() {
         }
         assert!(expected_hvp.iter().any(|x| x.abs() > 0.01));
         for tree in [false, true] {
-            let graph = Graph::default();
+            let graph = Tracer::default();
             let x = graph.input(&shape).unwrap();
             let seed = graph.input(&shape).unwrap();
             let vector = graph.input(&shape).unwrap();
@@ -90,7 +90,7 @@ fn real_signed_prefix_vjp_and_nonuniform_hessian_vector() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_logaddexp_retains_small_increments_and_tie_hessian() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[5]).unwrap();
     let z = graph.input(&[5]).unwrap();
     let y = x.logaddexp(&z).unwrap();
@@ -141,18 +141,21 @@ fn real_logaddexp_retains_small_increments_and_tie_hessian() {
 
 #[test]
 fn validates_axes_and_builds_logarithmic_stages() {
-    let g = Graph::default();
+    let g = Tracer::default();
     assert!(g.input(&[]).unwrap().logcumsumexp(0).is_err());
     assert!(g.input(&[2]).unwrap().logcumsumexp(1).is_err());
     assert!(g.input(&[]).unwrap().logcumsumexp_tree(0).is_err());
     assert!(g.input(&[2]).unwrap().logcumsumexp_tree(1).is_err());
     let x = g.input(&[2]).unwrap();
     assert!(x.logaddexp(&g.input(&[]).unwrap()).is_err());
-    assert!(x.logaddexp(&Graph::default().input(&[2]).unwrap()).is_err());
+    assert!(
+        x.logaddexp(&Tracer::default().input(&[2]).unwrap())
+            .is_err()
+    );
     let counts: Vec<_> = [8, 4096]
         .into_iter()
         .map(|length| {
-            let graph = Graph::default();
+            let graph = Tracer::default();
             let output = graph
                 .input(&[length])
                 .unwrap()
@@ -177,7 +180,7 @@ fn real_prefix_values_and_gradients_match_stable_f64_reference() {
         .flat_map(|shape| [false, true].map(|tree| (shape, tree)))
     {
         for axis in 0..2 {
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input(&shape).unwrap();
             let y = if tree {
                 x.logcumsumexp_tree(axis)
@@ -248,7 +251,7 @@ fn real_prefix_values_and_gradients_match_stable_f64_reference() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_nonfinite_values_only_affect_prefix_successors() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[6]).unwrap();
     let exe = g.compile(&client, &x.logcumsumexp(0).unwrap()).unwrap();
     let input = client

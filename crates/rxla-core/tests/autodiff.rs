@@ -1,13 +1,16 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph, StateGraph};
+use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 
 #[test]
 fn grad_rejects_unsupported_non_scalar_and_non_leaf_requests() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2]).unwrap();
     assert!(x.grad(std::slice::from_ref(&x)).is_err());
     let loss = x.sum(&[0], false).unwrap();
     assert!(loss.grad(&[x.neg().unwrap()]).is_err());
-    assert!(loss.grad(&[Graph::default().input(&[2]).unwrap()]).is_err());
+    assert!(
+        loss.grad(&[Tracer::default().input(&[2]).unwrap()])
+            .is_err()
+    );
     assert!(
         x.is_finite_mask()
             .unwrap()
@@ -22,7 +25,7 @@ fn grad_rejects_unsupported_non_scalar_and_non_leaf_requests() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_grad_smooth_unary_rules() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[3]).unwrap();
     let ops = [
         x.neg(),
@@ -74,7 +77,7 @@ fn real_grad_smooth_unary_rules() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_grad_batched_matmul_vector_promotion_and_empty_broadcast() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let a = g.input(&[2, 1, 3]).unwrap();
     let b = g.input(&[1, 3, 2]).unwrap();
     let loss = a.matmul(&b).unwrap().sum(&[0, 1, 2], false).unwrap();
@@ -86,7 +89,7 @@ fn real_grad_batched_matmul_vector_promotion_and_empty_broadcast() {
             .unwrap(),
         [vec![3., 7., 11., 3., 7., 11.], vec![5., 5., 7., 7., 9., 9.]]
     );
-    let g = Graph::default();
+    let g = Tracer::default();
     let a = g.input(&[3]).unwrap();
     let b = g.input(&[3]).unwrap();
     let grads = a.matmul(&b).unwrap().grad(&[a, b]).unwrap();
@@ -97,7 +100,7 @@ fn real_grad_batched_matmul_vector_promotion_and_empty_broadcast() {
             .unwrap(),
         [vec![4., 5., 6.], vec![1., 2., 3.]]
     );
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[]).unwrap();
     let loss = x
         .broadcast_to(&[0, 2])
@@ -130,7 +133,7 @@ fn reference(x: &[f64], w: &[f64], b: &[f64]) -> f64 {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_grad_mlp_matches_independent_f64_finite_differences() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     let w = g.input(&[3, 2]).unwrap();
     let b = g.input(&[2]).unwrap();
@@ -185,7 +188,7 @@ fn real_grad_mlp_matches_independent_f64_finite_differences() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_grad_layouts_shared_inputs_disconnected_and_second_derivative() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 2]).unwrap();
     let unused = g.input(&[3]).unwrap();
     let y = x.broadcast_to(&[3, 2]).unwrap().transpose(&[1, 0]).unwrap();
@@ -198,7 +201,7 @@ fn real_grad_layouts_shared_inputs_disconnected_and_second_derivative() {
             .unwrap(),
         [vec![12., 18.], vec![0.; 3], vec![12., 18.]]
     );
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[]).unwrap();
     let cubic = x.mul(&x).unwrap().mul(&x).unwrap();
     let first = cubic.grad(std::slice::from_ref(&x)).unwrap().remove(0);

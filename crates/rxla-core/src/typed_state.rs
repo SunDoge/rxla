@@ -1,5 +1,5 @@
 //! Lightweight state dtype checking; shapes and graph identities remain dynamic.
-use crate::{Output, Result, StateGraph, StateSlot, Tensor, err};
+use crate::{Result, StateGraph, StateSlot, Tensor, err};
 use std::marker::PhantomData;
 
 /// Marker for F32 state, read/written as Tensor.
@@ -18,7 +18,7 @@ mod sealed {
 /// Sealed mapping from supported state markers to symbolic value types.
 pub trait StateDType: sealed::Sealed {
     const DTYPE: crate::DType;
-    type Value: Clone + Into<Output>;
+    type Value: Clone + Into<Tensor>;
     #[doc(hidden)]
     fn read(graph: &StateGraph, slot: &StateSlot) -> Result<Self::Value>;
 }
@@ -126,7 +126,7 @@ impl StateTransaction<'_> {
 #[derive(Default)]
 #[must_use = "commit the group explicitly; dropping discards proposals"]
 pub struct StateUpdates {
-    updates: Vec<(StateSlot, Output)>,
+    updates: Vec<(StateSlot, Tensor)>,
 }
 impl StateUpdates {
     pub fn new() -> Self {

@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn log_softmax_shape_validation() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     assert!(graph.input(&[]).unwrap().log_softmax(0).is_err());
     assert!(graph.input(&[2, 3]).unwrap().log_softmax(2).is_err());
     assert!(graph.input(&[2, 0]).unwrap().log_softmax(1).is_err());
@@ -44,7 +44,7 @@ fn real_log_softmax_matches_f64_on_every_axis() {
         .collect();
     let shifted: Vec<_> = values.iter().map(|x| x + 10000.).collect();
     for axis in 0..3 {
-        let graph = Graph::default();
+        let graph = Tracer::default();
         let input = graph.input(&[2, 3, 4]).unwrap();
         let output = input.log_softmax(axis).unwrap();
         let executable = graph.compile(&client, &output).unwrap();
@@ -64,7 +64,7 @@ fn real_log_softmax_matches_f64_on_every_axis() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_log_softmax_extremes_masks_and_empty_output() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let input = graph.input(&[2, 3]).unwrap();
     let output = input.log_softmax(1).unwrap();
     let executable = graph.compile(&client, &output).unwrap();
@@ -75,7 +75,7 @@ fn real_log_softmax_extremes_masks_and_empty_output() {
     for index in [3, 5] {
         assert!((actual[index] + std::f32::consts::LN_2).abs() < 2e-6);
     }
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let singleton = graph.input(&[2, 1]).unwrap().log_softmax(1).unwrap();
     assert_eq!(
         graph
@@ -85,7 +85,7 @@ fn real_log_softmax_extremes_masks_and_empty_output() {
             .unwrap(),
         [0., 0.]
     );
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let empty = graph.input(&[0, 3]).unwrap().log_softmax(1).unwrap();
     assert!(
         graph

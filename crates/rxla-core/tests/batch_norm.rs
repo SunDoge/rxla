@@ -1,8 +1,8 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph};
+use rxla_core::{CacheLimits, Client, Compiler, Tracer};
 
 #[test]
 fn inference_batch_norm_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3, 4]).unwrap();
     let p = g.input(&[3]).unwrap();
     assert_eq!(
@@ -16,7 +16,7 @@ fn inference_batch_norm_validation() {
         assert!(x.batch_norm_inference(1, &p, &p, &p, &p, epsilon).is_err());
     }
     let wrong = g.input(&[1, 3]).unwrap();
-    let foreign = Graph::default().input(&[3]).unwrap();
+    let foreign = Tracer::default().input(&[3]).unwrap();
     // Every parameter position must enforce both exact shape and graph ownership.
     for invalid in [&wrong, &foreign] {
         for position in 0..4 {
@@ -51,7 +51,7 @@ fn real_inference_batch_norm_uses_runtime_statistics_without_recompile() {
     let shape = [2, 3, 2, 2];
     let values: Vec<f32> = (0..24).map(|i| i as f32 * 0.25 - 2.).collect();
     for axis in [0, 1, 3] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let channels = shape[axis];
         let mean = g.input(&[channels]).unwrap();

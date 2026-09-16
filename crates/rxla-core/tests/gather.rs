@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn index_tensor_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     assert!(g.input_i32(&[-1]).is_err());
     assert!(g.constant_i32(&[2], &[1]).is_err());
     let x = g.input(&[4, 3]).unwrap();
@@ -12,7 +12,7 @@ fn index_tensor_validation() {
     assert!(x.take(&ids, 2).is_err());
     assert!(g.input(&[0, 3]).unwrap().take(&ids, 0).is_err());
     assert!(
-        x.take(&Graph::default().input_i32_scalar().unwrap(), 0)
+        x.take(&Tracer::default().input_i32_scalar().unwrap(), 0)
             .is_err()
     );
     assert!(
@@ -32,7 +32,7 @@ fn real_gather_shapes_constants_and_clamping() {
         (vec![4], 0, vec![3], vec![3, 3, 0]),
         (vec![4, 2], 0, vec![0], vec![]),
     ] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let ids = g.input_i32(&index_shape).unwrap();
         let constants = g.constant_i32(&index_shape, &indices).unwrap();
@@ -68,7 +68,7 @@ fn real_gather_shapes_constants_and_clamping() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_batched_embedding_projection() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let table = g.input(&[4, 3]).unwrap();
     let ids = g.input_i32(&[2, 2]).unwrap();
     let weights = g.constant(&[3, 2], &[1., -1., 0.5, 0., 0., 1.]).unwrap();

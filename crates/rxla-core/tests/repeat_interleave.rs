@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn validates_count_axis_and_overflow() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[2, 3]).unwrap();
     assert!(x.repeat_interleave(-1, 0).is_err());
     assert!(x.repeat_interleave(i64::MAX, 0).is_err());
@@ -43,7 +43,7 @@ fn real_values_and_first_second_derivatives() {
     for shape in [vec![3], vec![2, 3], vec![2, 1, 3], vec![0, 3]] {
         for axis in 0..shape.len() {
             for repeats in [0, 1, 2, 3] {
-                let graph = Graph::default();
+                let graph = Tracer::default();
                 let x = graph.input(&shape).unwrap();
                 let y = x.repeat_interleave(repeats, axis).unwrap();
                 let n = shape.iter().product::<i64>() as usize;

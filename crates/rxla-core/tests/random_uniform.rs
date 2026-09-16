@@ -1,5 +1,5 @@
 use rxla_core::{
-    CacheLimits, Client, Compiler, Graph,
+    CacheLimits, Client, Compiler, Tracer,
     random::{threefry2x32, uniform_f32_from_bits},
 };
 
@@ -9,7 +9,7 @@ fn real_uniform_bits_have_exact_endpoints_scalar_and_empty_shapes() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     for shape in [vec![8], vec![], vec![0, 3]] {
-        let graph = Graph::default();
+        let graph = Tracer::default();
         let bits = graph.input_i32(&shape).unwrap();
         let uniform = uniform_f32_from_bits(&bits).unwrap();
         let executable = compiler.compile(&graph, &uniform).unwrap();
@@ -51,7 +51,7 @@ fn real_graph_uniform_drives_dropout_without_host_masks() {
     const N: usize = 8192;
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let key0 = graph
         .input_i32_scalar()
         .unwrap()
@@ -90,7 +90,7 @@ fn real_graph_uniform_drives_dropout_without_host_masks() {
         .unwrap()
         .remove(0);
     let executable = compiler
-        .compile_outputs(&graph, &[bits[0].clone(), uniform, mask, dropped, gradient])
+        .compile_many(&graph, &[bits[0].clone(), uniform, mask, dropped, gradient])
         .unwrap();
     let values: Vec<_> = (0..N).map(|i| (i % 17) as f32 - 8.).collect();
     let input = client.buffer(&[N as i64], &values).unwrap();

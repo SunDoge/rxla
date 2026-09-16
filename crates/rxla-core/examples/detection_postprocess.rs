@@ -1,19 +1,18 @@
 //! Device candidate selection followed by explicit host filtering/NMS.
 //! Synthetic class-agnostic/class-aware postprocessing, not a YOLO importer.
-use rxla_core::{CacheLimits, Client, Compiler, Graph, vision};
+use rxla_core::{CacheLimits, Client, Compiler, Tracer, vision};
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?) }?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let boxes = graph.input(&[8, 4])?; // cxcywh model output
     let scores = graph.input(&[8])?; // finite confidence scores
     let classes = graph.input_i32(&[8])?;
     let (selected_scores, ids) = scores.topk(4, 0)?;
     let selected_boxes = boxes.take(&ids, 0)?.box_cxcywh_to_xyxy()?;
     let selected_classes = classes.take_along_axis(&ids, 0)?;
-    let prepared =
-        graph.prepare_outputs(&[selected_boxes, selected_scores, ids, selected_classes])?;
+    let prepared = graph.prepare_many(&[selected_boxes, selected_scores, ids, selected_classes])?;
     let executable = compiler.compile_lowered(&prepared)?;
     let coordinates = [
         [1., 1., 2., 2.],

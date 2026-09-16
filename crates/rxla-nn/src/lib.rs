@@ -4,7 +4,7 @@
 //! interpret the same `param` calls differently, so model code is written once
 //! without making parameter identity depend on call order.
 
-use rxla_core::{DType, Graph, Tensor};
+use rxla_core::{DType, Tensor, Tracer};
 use snafu::{OptionExt, Snafu, ensure};
 use std::collections::{BTreeMap, HashSet};
 
@@ -143,7 +143,7 @@ enum ParamMode {
 /// Model functions receive this same type during [`init`] and [`apply`]. The
 /// mode is selected by the caller, never inferred from prior invocations.
 pub struct Cx {
-    graph: Graph,
+    graph: Tracer,
     scope: Vec<String>,
     input_index: usize,
     effect_index: usize,
@@ -180,7 +180,7 @@ impl<const N: usize> TraceOutputs for [Tensor; N] {
 impl Cx {
     fn init() -> Self {
         Self {
-            graph: Graph::default(),
+            graph: Tracer::default(),
             scope: Vec::new(),
             input_index: 0,
             effect_index: 0,
@@ -193,7 +193,7 @@ impl Cx {
 
     fn apply(schema: ParamSchema) -> Self {
         Self {
-            graph: Graph::default(),
+            graph: Tracer::default(),
             scope: Vec::new(),
             input_index: 0,
             effect_index: 0,
@@ -406,7 +406,7 @@ impl Cx {
     }
 }
 
-fn parameter_tensor(graph: &Graph, shape: &[i64], dtype: DType) -> Result<Tensor> {
+fn parameter_tensor(graph: &Tracer, shape: &[i64], dtype: DType) -> Result<Tensor> {
     match dtype {
         DType::F32 => Ok(graph.input(shape)?),
         DType::BF16 => Ok(graph.input_bf16_as_f32(shape)?),

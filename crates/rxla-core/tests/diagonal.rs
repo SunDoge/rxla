@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn diagonal_validates_axes_and_extreme_offsets() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[3, 2, 4]).unwrap();
     assert_eq!(x.diagonal(0, 0, 2).unwrap().shape(), [2, 3]);
     assert_eq!(x.diagonal(-1, 0, 2).unwrap().shape(), [2, 2]);
@@ -21,7 +21,7 @@ fn diagonal_validates_axes_and_extreme_offsets() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_diag_embed_offsets_nonfinite_and_derivatives() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     let positive = x.diag_embed(1).unwrap();
     let negative = x.diag_embed(-2).unwrap();
@@ -76,7 +76,7 @@ fn real_diag_embed_offsets_nonfinite_and_derivatives() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_empty_diag_embed() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 0]).unwrap();
     let y = x.diag_embed(-2).unwrap();
     assert_eq!(y.shape(), [2, 2, 2]);
@@ -100,7 +100,7 @@ fn real_empty_diag_embed() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_batched_offset_diagonals_trace_and_second_derivative() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[3, 2, 4]).unwrap();
     let positive = x.diagonal(1, 0, 2).unwrap();
     let loss = positive
@@ -156,7 +156,7 @@ fn real_batched_offset_diagonals_trace_and_second_derivative() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_empty_matrix_diagonal_and_trace() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 0, 3]).unwrap();
     let diagonal = x.diagonal(0, 1, 2).unwrap();
     assert_eq!(diagonal.shape(), [2, 0]);

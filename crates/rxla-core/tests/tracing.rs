@@ -1,4 +1,4 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph};
+use rxla_core::{CacheLimits, Client, Compiler, Tracer};
 use std::sync::{Arc, Mutex};
 use tracing::{
     Subscriber,
@@ -21,7 +21,7 @@ fn real_trace_distinguishes_cache_lookup_backend_and_transfers() {
     tracing::subscriber::with_default(subscriber, || {
         let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
         let mut compiler = Compiler::new(client, CacheLimits::default());
-        let graph = Graph::default();
+        let graph = Tracer::default();
         let input = graph.input(&[2]).unwrap();
         let output = input.add_scalar(1.).unwrap();
         let executable = compiler.compile(&graph, &output).unwrap();

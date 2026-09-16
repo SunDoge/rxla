@@ -84,7 +84,7 @@ enum InputBinding {
 pub struct StateGraph {
     graph: Graph,
     owner: Arc<()>,
-    slots: Vec<Output>,
+    slots: Vec<Tensor>,
     arguments: Vec<Argument>,
     input_count: usize,
 }
@@ -199,7 +199,7 @@ impl StateGraph {
         let value = self.graph.input_i32(dims)?;
         Ok(self.register_state(value))
     }
-    fn register_state(&mut self, value: Output) -> StateSlot {
+    fn register_state(&mut self, value: Tensor) -> StateSlot {
         let index = self.slots.len();
         self.slots.push(value);
         self.arguments.push(Argument::State(index));
@@ -269,7 +269,7 @@ impl StateGraph {
     }
     /// Atomically record mixed F32/I32 updates. Slot types/shapes cannot change;
     /// duplicates/foreign values fail without advancing any symbolic slot.
-    pub fn write_outputs(&mut self, updates: &[(&StateSlot, Output)]) -> Result<()> {
+    pub fn write_outputs(&mut self, updates: &[(&StateSlot, Tensor)]) -> Result<()> {
         self.validate_updates(updates)?;
         for (slot, value) in updates {
             self.slots[slot.index] = value.clone();
@@ -288,7 +288,7 @@ impl StateGraph {
     pub fn write_outputs_if(
         &mut self,
         condition: &Tensor,
-        updates: &[(&StateSlot, Output)],
+        updates: &[(&StateSlot, Tensor)],
     ) -> Result<()> {
         self.validate_condition(condition)?;
         self.validate_updates(updates)?;
@@ -314,7 +314,7 @@ impl StateGraph {
         }
         Ok(())
     }
-    pub(super) fn validate_updates(&self, updates: &[(&StateSlot, Output)]) -> Result<()> {
+    pub(super) fn validate_updates(&self, updates: &[(&StateSlot, Tensor)]) -> Result<()> {
         let mut seen = std::collections::HashSet::with_capacity(updates.len());
         for (slot, value) in updates {
             self.validate_write(slot, value)?;
@@ -324,7 +324,7 @@ impl StateGraph {
         }
         Ok(())
     }
-    fn validate_write(&self, slot: &StateSlot, value: &Output) -> Result<()> {
+    fn validate_write(&self, slot: &StateSlot, value: &Tensor) -> Result<()> {
         validate_slot(&self.owner, self.slots.len(), slot)?;
         if !Arc::ptr_eq(&self.graph.0, &value.graph().0) {
             return Err(err("cross-graph state value"));
@@ -336,7 +336,7 @@ impl StateGraph {
         }
         Ok(())
     }
-    fn outputs_with_state(&self, outputs: &[Output]) -> Vec<Output> {
+    fn outputs_with_state(&self, outputs: &[Tensor]) -> Vec<Tensor> {
         let mut all = outputs.to_vec();
         all.extend(self.slots.iter().cloned());
         all
@@ -345,18 +345,18 @@ impl StateGraph {
     /// Snapshot visible outputs and all final state versions before native
     /// compilation. Later graph writes/registrations do not affect the snapshot.
     /// All declared inputs and original slot identities are retained.
-    pub fn prepare_outputs(&self, outputs: &[Output]) -> Result<PreparedStateGraph> {
+    pub fn prepare_outputs(&self, outputs: &[Tensor]) -> Result<PreparedStateGraph> {
         self.prepare_state(outputs, false)
     }
 
     /// Prepare with unused input parameters removed, keeping hidden state
     /// updates as roots and retaining the complete state schema. Compiled plans
     /// expose compact visible input order through `StateProgram::input_indices`.
-    pub fn prepare_outputs_pruned(&self, outputs: &[Output]) -> Result<PreparedStateGraph> {
+    pub fn prepare_outputs_pruned(&self, outputs: &[Tensor]) -> Result<PreparedStateGraph> {
         self.prepare_state(outputs, true)
     }
 
-    fn prepare_state(&self, outputs: &[Output], pruned: bool) -> Result<PreparedStateGraph> {
+    fn prepare_state(&self, outputs: &[Tensor], pruned: bool) -> Result<PreparedStateGraph> {
         let all = self.outputs_with_state(outputs);
         let (graph, arguments) = if pruned {
             let (graph, parameters) = self.graph.prepare_outputs_pruned(&all)?;
@@ -397,10 +397,10 @@ impl StateGraph {
     pub fn compile_outputs(
         &self,
         compiler: &mut Compiler,
-        outputs: &[Output],
+        outputs: &[Tensor],
     ) -> Result<StateProgram> {
         let all_outputs = self.outputs_with_state(outputs);
-        let executable = compiler.compile_outputs(&self.graph, &all_outputs)?;
+        let executable = compiler.compile_graph_outputs(&self.graph, &all_outputs)?;
         Ok(StateProgram(Rc::new(Plan {
             executable,
             owner: self.owner.clone(),
@@ -433,11 +433,11 @@ impl StateGraph {
     pub fn compile_outputs_pruned(
         &self,
         compiler: &mut Compiler,
-        outputs: &[Output],
+        outputs: &[Tensor],
     ) -> Result<StateProgram> {
         let all_outputs = self.outputs_with_state(outputs);
         let (executable, parameters) =
-            compiler.compile_outputs_pruned(&self.graph, &all_outputs)?;
+            compiler.compile_graph_outputs_pruned(&self.graph, &all_outputs)?;
         let arguments: Vec<_> = parameters.iter().map(|&i| self.arguments[i]).collect();
         let mut input_parameters = vec![None; self.input_count];
         for (parameter, argument) in arguments.iter().enumerate() {

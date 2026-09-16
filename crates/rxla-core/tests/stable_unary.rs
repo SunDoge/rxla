@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn stable_unary_shape_and_native_lowering() {
-    let g = Graph::default();
+    let g = Tracer::default();
     for shape in [vec![], vec![2, 3], vec![0]] {
         let x = g.input(&shape).unwrap();
         for (y, opcode) in [
@@ -24,7 +24,7 @@ fn real_small_log1p_and_expm1_match_f64() {
     let values = [
         -0.999999, -0.5, -1e-4, -1e-8, -1e-12, 0., 1e-12, 1e-8, 1e-4, 0.5, 10.,
     ];
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[values.len() as i64]).unwrap();
     let outputs = g
         .compile_many(&client, &[x.log1p().unwrap(), x.expm1().unwrap()])
@@ -50,7 +50,7 @@ fn real_small_log1p_and_expm1_match_f64() {
 fn real_softplus_extremes_and_unary_special_values() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let values = [-1000., -80., -20., -1., 0., 1., 20., 80., 1000.];
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[values.len() as i64]).unwrap();
     let outputs = g
         .compile(&client, &x.softplus().unwrap())
@@ -68,7 +68,7 @@ fn real_softplus_extremes_and_unary_special_values() {
             actual.is_finite() && (actual as f64 - expected).abs() <= 3e-7 * expected.abs() + 1e-40
         );
     }
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[4]).unwrap();
     let outputs = g
         .compile_many(

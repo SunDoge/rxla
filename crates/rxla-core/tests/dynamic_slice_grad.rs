@@ -1,10 +1,10 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_dynamic_index_dependencies_are_not_differentiated_and_scalars_work() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[2]).unwrap();
     let index = x.argmax(0, false).unwrap();
     let y = x.dynamic_slice(&[index], &[1]).unwrap();
@@ -25,7 +25,7 @@ fn real_dynamic_index_dependencies_are_not_differentiated_and_scalars_work() {
         exe.run_many(&[&[1., 4.]]).unwrap(),
         [vec![0., 8.], vec![0., 2.]]
     );
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[]).unwrap();
     let u = graph.input(&[]).unwrap();
     let y = x
@@ -44,7 +44,7 @@ fn real_dynamic_slice_and_update_derivatives_follow_clamped_runtime_positions() 
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for updating in [false, true] {
         for empty in [false, true] {
-            let graph = Graph::default();
+            let graph = Tracer::default();
             let x = graph.input(&[3, 4]).unwrap();
             let shape = [if empty { 0 } else { 2 }, 2];
             let u = graph.input(&shape).unwrap();

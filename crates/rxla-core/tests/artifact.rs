@@ -1,4 +1,4 @@
-use rxla_core::{Client, DType, Graph, InputSpec};
+use rxla_core::{Client, DType, InputSpec, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -50,7 +50,7 @@ fn real_tensor_artifact_cross_process() {
         assert_eq!(outputs[1].to_vec::<f32>().unwrap(), [3., 5., 7.]);
         return;
     }
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[3]).unwrap();
     let index = graph.input_i32_scalar().unwrap();
     let shifted = x.add_scalar(1.).unwrap();
@@ -83,7 +83,7 @@ fn real_tensor_artifact_cross_process() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_signature_retains_unused_inputs_and_zero_input_programs() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let _unused = graph.input_i32(&[0, 3]).unwrap();
     let output = graph.constant(&[], &[7.]).unwrap();
     let executable = graph.compile(&client, &output).unwrap();
@@ -105,7 +105,7 @@ fn real_signature_retains_unused_inputs_and_zero_input_programs() {
             .unwrap(),
         [7.]
     );
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let output = graph.constant(&[], &[9.]).unwrap();
     let executable = graph.compile(&client, &output).unwrap();
     assert_eq!(executable.input_count(), 0);
@@ -118,7 +118,7 @@ fn real_signature_retains_unused_inputs_and_zero_input_programs() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_tensor_artifact_host_convenience() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[2]).unwrap();
     let y = x.add_scalar(1.).unwrap();
     let bytes = graph
@@ -137,7 +137,7 @@ fn real_tensor_artifact_host_convenience() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_serialized_executable_lifetimes() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2]).unwrap();
     let y = x.add_scalar(1.).unwrap();
     let executable = g.compile_many(&client, &[y.clone(), y]).unwrap();

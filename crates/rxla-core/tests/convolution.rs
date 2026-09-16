@@ -1,8 +1,8 @@
-use rxla_core::{Client, Conv2dOptions, Graph};
+use rxla_core::{Client, Conv2dOptions, Tracer};
 
 #[test]
 fn forward_convolutions_use_highest_precision_and_training_is_explicitly_scoped() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[1, 3, 3, 2]).unwrap();
     let w = graph.input(&[2, 2, 2, 3]).unwrap();
     let y = x.conv2d(&w, Default::default()).unwrap();
@@ -25,7 +25,7 @@ fn forward_convolutions_use_highest_precision_and_training_is_explicitly_scoped(
 
 #[test]
 fn convolution_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 4, 5, 4]).unwrap();
     let k = g.input(&[3, 2, 2, 6]).unwrap();
     let options = Conv2dOptions {
@@ -70,7 +70,7 @@ fn convolution_validation() {
     assert!(x.conv2d(&g.input(&[3, 2, 1, 6]).unwrap(), options).is_err());
     assert!(x.conv2d(&g.input(&[3, 2]).unwrap(), options).is_err());
     assert!(
-        x.conv2d(&Graph::default().input(&[3, 2, 2, 6]).unwrap(), options)
+        x.conv2d(&Tracer::default().input(&[3, 2, 2, 6]).unwrap(), options)
             .is_err()
     );
 }
@@ -160,7 +160,7 @@ fn real_standard_grouped_depthwise_convolutions() {
         ),
     ];
     for (xs, ws, ys, options) in cases {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&xs).unwrap();
         let w = g.input(&ws).unwrap();
         let y = x.conv2d(&w, options).unwrap();
@@ -192,7 +192,7 @@ fn real_standard_grouped_depthwise_convolutions() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_small_vision_graph() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 4, 4, 3]).unwrap();
     let w1 = g.input(&[3, 3, 3, 4]).unwrap();
     let w2 = g.input(&[3, 3, 1, 4]).unwrap();

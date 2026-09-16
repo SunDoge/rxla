@@ -263,7 +263,7 @@ fn only_requested_payload_is_read() {
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_loaded_weights_in_linear_layer() {
-    use rxla_core::{Client, Graph};
+    use rxla_core::{Client, Tracer};
     let bytes = fixture(&[
         (
             "weight",
@@ -293,7 +293,7 @@ fn real_loaded_weights_in_linear_layer() {
     assert_eq!(checkpoint.stats().payload_bytes, 18);
     assert_eq!(checkpoint.stats().uploaded_bytes, 36);
     drop(checkpoint);
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 2]).unwrap();
     let w = g.input(&[2, 3]).unwrap();
     let b = g.input(&[3]).unwrap();

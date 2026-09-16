@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph, Output};
+use rxla_core::{Client, Tensor, Tracer};
 
 #[test]
 fn argmax_shapes_and_axis_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3, 4]).unwrap();
     assert_eq!(x.argmax(1, false).unwrap().shape(), [2, 4]);
     assert_eq!(x.argmax(1, true).unwrap().shape(), [2, 1, 4]);
@@ -43,12 +43,12 @@ fn reference(values: &[f32], outer: usize, length: usize, inner: usize) -> Vec<i
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_argmax_axes_ties_nan_and_infinity() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3, 4]).unwrap();
-    let outputs: Vec<Output> = (0..3)
+    let outputs: Vec<Tensor> = (0..3)
         .flat_map(|a| [x.argmax(a, false).unwrap(), x.argmax(a, true).unwrap()])
         .collect();
-    let exe = g.compile_outputs(&client, &outputs).unwrap();
+    let exe = g.compile_many(&client, &outputs).unwrap();
     let mut values: Vec<f32> = (0..24).map(|i| (i % 7) as f32 - 3.).collect();
     values[1] = f32::NAN;
     values[17] = f32::NAN;
@@ -64,10 +64,10 @@ fn real_argmax_axes_ties_nan_and_infinity() {
             assert_eq!(result.to_vec::<i32>().unwrap(), expected);
         }
     }
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[6]).unwrap();
     let exe = g
-        .compile_outputs(&client, &[x.argmax(0, false).unwrap()])
+        .compile_many(&client, &[x.argmax(0, false).unwrap()])
         .unwrap();
     for values in [
         [f32::NEG_INFINITY; 6],
@@ -83,10 +83,10 @@ fn real_argmax_axes_ties_nan_and_infinity() {
             reference(&values, 1, 6, 1)
         );
     }
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[0, 3]).unwrap();
     let exe = g
-        .compile_outputs(&client, &[x.argmax(1, false).unwrap()])
+        .compile_many(&client, &[x.argmax(1, false).unwrap()])
         .unwrap();
     let empty = client.buffer::<f32>(&[0, 3], &[]).unwrap();
     assert!(

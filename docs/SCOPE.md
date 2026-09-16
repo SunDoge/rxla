@@ -34,8 +34,8 @@ second computational graph. Existing tested capabilities below are unchanged.
 
 The [Tensor/storage refactor](TENSOR-STORAGE-DESIGN.md) adds pointer-sized shared
 descriptors, SmallVec shape metadata and managed U8/F16/F32/I32/BF16 host/native
-input bindings. Index and Output are compatibility aliases for runtime-dtype
-Tensor, not separate representations. Shape operations
+input bindings. Every runtime dtype uses `Tensor`; the former `Index` and
+`Output` compatibility names have been removed. Shape operations
 preserve dtype, unsupported arithmetic is rejected, and autodiff remains F32-only.
 Tensor is now thread-affine; prepared snapshots remain the cross-thread path.
 CPU/CUDA managed-input and Tensor-first lazy evaluation paths pass. Device views,

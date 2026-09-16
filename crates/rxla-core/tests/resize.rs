@@ -1,8 +1,8 @@
-use rxla_core::{Client, Conv2dOptions, DType, Graph, Pool2dOptions, Runtime, Tensor};
+use rxla_core::{Client, Conv2dOptions, DType, Pool2dOptions, Runtime, Tensor, Tracer};
 
 #[test]
 fn upsample_shape_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3, 4, 5]).unwrap();
     assert_eq!(x.upsample_nearest2d([2, 3]).unwrap().shape(), [2, 6, 12, 5]);
     for scales in [[0, 1], [1, -1], [i64::MAX, 1]] {
@@ -69,7 +69,7 @@ fn real_integer_upsampling_matches_pixel_reference() {
             .map(|i| i as f32 - 5.)
             .collect();
         for scales in [[1, 1], [2, 3], [3, 1]] {
-            let g = Graph::default();
+            let g = Tracer::default();
             let input = g.input(&shape).unwrap();
             let output = input.upsample_nearest2d(scales).unwrap();
             let mut expected = Vec::new();
@@ -100,7 +100,7 @@ fn real_integer_upsampling_matches_pixel_reference() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_convolution_pool_upsample_channel_merge() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 4, 4, 1]).unwrap();
     let kernel = g.constant(&[1, 1, 1, 2], &[1., -1.]).unwrap();
     let fine = x

@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn attention_validation_and_broadcast_shapes() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let q = g.input(&[2, 1, 2]).unwrap();
     let k = g.input(&[1, 3, 2]).unwrap();
     let v = g.input(&[2, 3, 4]).unwrap();
@@ -48,7 +48,7 @@ fn attention_validation_and_broadcast_shapes() {
         q.scaled_dot_product_attention(&k, &v, Some(&bad_mask), None)
             .is_err()
     );
-    let foreign = Graph::default().input(&[3]).unwrap();
+    let foreign = Tracer::default().input(&[3]).unwrap();
     assert!(
         q.scaled_dot_product_attention(&k, &v, Some(&foreign), None)
             .is_err()
@@ -65,7 +65,7 @@ fn attention_validation_and_broadcast_shapes() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_attention_broadcast_mask_and_explicit_scales() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let q = g.input(&[2, 1, 2]).unwrap();
     let k = g.input(&[1, 3, 2]).unwrap();
     let v = g.input(&[2, 3, 1]).unwrap();
@@ -100,7 +100,7 @@ fn real_attention_broadcast_mask_and_explicit_scales() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_multihead_attention() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     // Two batches, three heads, four queries, five keys, head dimension two.
     let q = g.input(&[2, 3, 4, 2]).unwrap();
     let k = g.input(&[2, 3, 5, 2]).unwrap();
@@ -158,7 +158,7 @@ fn real_multihead_attention() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_attention_gradients_match_portable_decomposition() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let q = g.input(&[1, 2, 2]).unwrap();
     let k = g.input(&[1, 3, 2]).unwrap();
     let v = g.input(&[1, 3, 2]).unwrap();

@@ -1,5 +1,5 @@
 use rxla_core::random::{ThreefryState, threefry2x32_blocks};
-use rxla_core::{CacheLimits, Client, Compiler, Graph, StateGraph};
+use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 
 #[test]
 fn sampled_dropout_validates_probability_and_graph() {
@@ -10,7 +10,7 @@ fn sampled_dropout_validates_probability_and_graph() {
     for p in [0., -0.1, 1.1, f32::NAN, f32::INFINITY] {
         assert!(sequence.dropout(&x, p).is_err());
     }
-    let foreign = Graph::default().input(&[6]).unwrap();
+    let foreign = Tracer::default().input(&[6]).unwrap();
     for p in [0.5, 1.] {
         assert!(sequence.dropout(&foreign, p).is_err());
     }
@@ -37,7 +37,7 @@ fn real_sampled_dropout_reuses_mask_for_derivatives_and_explicit_recomputation()
     assert!(sequence.dropout(&x, 0.).is_err());
     assert!(
         sequence
-            .dropout(&Graph::default().input(&[6]).unwrap(), 0.5)
+            .dropout(&Tracer::default().input(&[6]).unwrap(), 0.5)
             .is_err()
     );
     let sample = sequence.dropout(&x, 0.5).unwrap();

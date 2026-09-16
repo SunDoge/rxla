@@ -27,8 +27,8 @@ F32 host values and `Program::run_buffers` handles resident F32/I32/BF16 buffers
 while `Program::run_tensors` accepts stored Tensor inputs and returns Tensor
 outputs owning PJRT storage and copied physical-layout metadata. Those result
 Tensors can continue participating in lazy expressions. Application code does not
-call `compile_outputs`. `Graph` and `Compiler`
-remain exported temporarily as low-level compatibility APIs for existing code.
+manually own the private mutable graph. `Tracer` is the explicit construction API;
+`Compiler` accepts tracers or immutable lowered snapshots.
 
 Concrete host values do not require a public Graph or Tracer:
 
@@ -93,7 +93,7 @@ Logical sharding constraints are attached before lowering and retained by each
 dimensions to them; neither embeds PJRT clients, device pointers, or worker
 types in Tensor math. Pliron is the sole semantic IR and planner boundary.
 
-`Tracer` and explicit `Graph` construction emit operations directly into a real
+`Tracer` construction emits operations directly into a real
 Pliron `builtin.module` region/block. Programs derive parameter identities,
 output roots, value count and
 sharding constraints from Pliron SSA. SPMD planning transforms the already

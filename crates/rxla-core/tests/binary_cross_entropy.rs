@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn binary_cross_entropy_requires_exact_shape_and_graph() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let logits = g.input(&[2, 3]).unwrap();
     assert!(
         logits
@@ -11,7 +11,7 @@ fn binary_cross_entropy_requires_exact_shape_and_graph() {
     );
     assert!(
         logits
-            .binary_cross_entropy_with_logits(&Graph::default().input(&[2, 3]).unwrap())
+            .binary_cross_entropy_with_logits(&Tracer::default().input(&[2, 3]).unwrap())
             .is_err()
     );
 }
@@ -20,7 +20,7 @@ fn binary_cross_entropy_requires_exact_shape_and_graph() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_binary_cross_entropy_loss_both_gradients_and_curvature() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 6]).unwrap();
     let y = g.input(&[2, 6]).unwrap();
     let seed = g.input(&[2, 6]).unwrap();
@@ -78,7 +78,7 @@ fn real_binary_cross_entropy_loss_both_gradients_and_curvature() {
 fn real_binary_cross_entropy_scalar_empty_and_detached_targets() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for shape in [vec![], vec![0, 3]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let y = g.input(&shape).unwrap();
         let loss = x

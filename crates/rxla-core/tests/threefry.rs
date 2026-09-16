@@ -1,12 +1,12 @@
 use rxla_core::random::threefry2x32_blocks;
-use rxla_core::{CacheLimits, Client, Compiler, Graph, StateGraph, random::threefry2x32};
+use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer, random::threefry2x32};
 
 #[test]
 fn batch_blocks_validate_scalar_words_and_sizes() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let scalar = graph.input_i32_scalar().unwrap();
     let vector = graph.input_i32(&[1]).unwrap();
-    let foreign = Graph::default().input_i32_scalar().unwrap();
+    let foreign = Tracer::default().input_i32_scalar().unwrap();
     for shape in [vec![-1], vec![i64::MAX, 2], vec![i32::MAX as i64 + 1]] {
         assert!(threefry2x32_blocks([&scalar; 2], [&scalar; 2], &shape).is_err());
     }
@@ -133,10 +133,10 @@ fn host_reference(key: [u32; 2], counter: [u32; 2]) -> [u32; 2] {
 
 #[test]
 fn validates_all_key_and_counter_words_before_building() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let good = graph.input_i32(&[3]).unwrap();
     let scalar = graph.input_i32_scalar().unwrap();
-    let foreign = Graph::default().input_i32(&[3]).unwrap();
+    let foreign = Tracer::default().input_i32(&[3]).unwrap();
     for bad in [&scalar, &foreign] {
         assert!(threefry2x32([&good, bad], [&good, &good]).is_err());
         assert!(threefry2x32([&good, &good], [bad, &good]).is_err());
@@ -166,14 +166,14 @@ fn real_threefry_matches_random123_known_answers() {
     // Scalar invocations change the entire key/counter without recompilation.
     // Vector mode executes all three KATs elementwise, not one shared key.
     for shape in [vec![], vec![3], vec![0, 2]] {
-        let graph = Graph::default();
+        let graph = Tracer::default();
         let k0 = graph.input_i32(&shape).unwrap();
         let k1 = graph.input_i32(&shape).unwrap();
         let c0 = graph.input_i32(&shape).unwrap();
         let c1 = graph.input_i32(&shape).unwrap();
         let result = threefry2x32([&k0, &k1], [&c0, &c1]).unwrap();
         let executable = compiler
-            .compile_outputs(&graph, &result.map(Into::into))
+            .compile_many(&graph, &result.map(Into::into))
             .unwrap();
         for offset in 0..3 {
             let count = if shape.is_empty() {

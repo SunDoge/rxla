@@ -1,12 +1,12 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn selection_validates_every_operand() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let mask = g.input(&[2]).unwrap();
     let value = g.input(&[2]).unwrap();
     let wrong_shape = g.input(&[]).unwrap();
-    let foreign = Graph::default().input(&[2]).unwrap();
+    let foreign = Tracer::default().input(&[2]).unwrap();
     for invalid in [wrong_shape, foreign] {
         assert!(mask.select(&invalid, &value).is_err());
         assert!(mask.select(&value, &invalid).is_err());
@@ -18,7 +18,7 @@ fn selection_validates_every_operand() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_selection_nonfinite_values_and_dynamic_masks() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let mask = g.input(&[8]).unwrap();
     let a = g.input(&[8]).unwrap();
     let b = g.input(&[8]).unwrap();
@@ -74,7 +74,7 @@ fn real_selection_nonfinite_values_and_dynamic_masks() {
         }
     }
     for dims in [vec![], vec![0, 2]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let mask = g.input(&dims).unwrap();
         let yes = g.constant(&[], &[3.]).unwrap().broadcast_to(&dims).unwrap();
         let no = g.constant(&[], &[7.]).unwrap().broadcast_to(&dims).unwrap();

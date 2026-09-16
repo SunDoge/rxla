@@ -1,10 +1,10 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph, StateGraph};
+use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_index_conversion_rounding_and_nondifferentiable_origin() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let ids = graph.input_i32(&[7]).unwrap();
     let exe = graph.compile(&client, &ids.to_f32().unwrap()).unwrap();
     let values = [
@@ -21,7 +21,7 @@ fn real_index_conversion_rounding_and_nondifferentiable_origin() {
         exe.execute(&[&input]).unwrap()[0].to_vec::<f32>().unwrap(),
         values.map(|v| v as f32)
     );
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[3]).unwrap();
     let converted = x.argmax(0, false).unwrap().to_f32().unwrap();
     let gradient = converted.grad(std::slice::from_ref(&x)).unwrap().remove(0);
@@ -30,7 +30,7 @@ fn real_index_conversion_rounding_and_nondifferentiable_origin() {
         exe.run_many(&[&[1., 3., 2.]]).unwrap(),
         [vec![1.], vec![0.; 3]]
     );
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let empty = graph.input_i32(&[0, 2]).unwrap().to_f32().unwrap();
     let exe = graph.compile(&client, &empty).unwrap();
     assert!(

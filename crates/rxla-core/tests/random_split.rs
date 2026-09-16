@@ -1,4 +1,4 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph, StateGraph, random::ThreefryState};
+use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer, random::ThreefryState};
 
 fn reference(key: [u32; 2], counter: u64) -> [u32; 2] {
     let k = [key[0], key[1], key[0] ^ key[1] ^ 0x1bd11bda];
@@ -29,14 +29,14 @@ fn reset_validation_preserves_versions_and_success_invalidates_sequences() {
     let seq = rng.begin(&g).unwrap();
     for bad in [
         g.input_i32(&[1]).unwrap(),
-        Graph::default().input_i32_scalar().unwrap(),
+        Tracer::default().input_i32_scalar().unwrap(),
     ] {
         assert!(rng.reset_key_if(&mut g, [&key, &bad], &one).is_err());
         assert!(rng.reset_key_if(&mut g, [&bad, &key], &one).is_err());
     }
     for bad in [
         g.constant(&[1], &[1.]).unwrap(),
-        Graph::default().constant(&[], &[1.]).unwrap(),
+        Tracer::default().constant(&[], &[1.]).unwrap(),
     ] {
         assert!(rng.reset_key_if(&mut g, [&key; 2], &bad).is_err());
     }

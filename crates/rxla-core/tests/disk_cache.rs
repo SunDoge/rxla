@@ -1,5 +1,5 @@
 #![cfg(feature = "disk-cache")]
-use rxla_core::{CacheLimits, Client, Compiler, DiskCache, Graph, Runtime, StateGraph, Tracer};
+use rxla_core::{CacheLimits, Client, Compiler, DiskCache, Runtime, StateGraph, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -44,7 +44,7 @@ fn real_lowered_program_restores_ordinary_disk_entry() {
     let mut first = compiler(&client, directory.path(), "prepared", 1024 * 1024);
     run(&mut first, 3.);
     drop(first);
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2]).unwrap();
     let prepared = g.prepare(&x.add_scalar(3.).unwrap()).unwrap();
     let mut restored = compiler(&client, directory.path(), "prepared", 1024 * 1024);
@@ -693,7 +693,7 @@ fn compiler(client: &Client, path: &std::path::Path, namespace: &str, limit: usi
     Compiler::new(client.clone(), CacheLimits::default()).with_disk_cache(disk)
 }
 fn run(compiler: &mut Compiler, offset: f32) {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[2]).unwrap();
     let y = x.add_scalar(offset).unwrap();
     let result = compiler
@@ -783,7 +783,7 @@ fn real_corruption_and_size_limits_fall_back_without_overwriting() {
     assert_eq!(second.stats().misses, 1);
     assert_eq!(std::fs::read(&path).unwrap(), [0xff]);
     // Recovery is explicit and scoped to this exact lowered HLO/configuration.
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let input = graph.input(&[2]).unwrap();
     let output = input.add_scalar(3.).unwrap();
     let program = graph.prepare(&output).unwrap();

@@ -1,11 +1,11 @@
-use rxla_core::{Client, Graph, Tensor};
+use rxla_core::{Client, Tensor, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_unequal_integer_fragments_with_empty_part() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for axis in 0..3 {
-        let g = Graph::default();
+        let g = Tracer::default();
         let mut shapes = Vec::new();
         let mut inputs = Vec::new();
         let mut host = Vec::new();
@@ -27,7 +27,7 @@ fn real_unequal_integer_fragments_with_empty_part() {
         assert_eq!(joined.shape(), expected_shape);
         let mut outputs = vec![joined];
         outputs.extend(inputs.iter().cloned());
-        let exe = g.compile_outputs(&client, &outputs).unwrap();
+        let exe = g.compile_many(&client, &outputs).unwrap();
         let buffers: Vec<_> = shapes
             .iter()
             .zip(&host)
@@ -52,7 +52,7 @@ fn real_unequal_integer_fragments_with_empty_part() {
 
 #[test]
 fn integer_join_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let a = g.input_i32(&[2, 3]).unwrap();
     assert!(Tensor::stack(&[], 0).is_err());
     assert!(Tensor::concatenate(&[], 0).is_err());
@@ -61,7 +61,7 @@ fn integer_join_validation() {
     for b in [
         g.input_i32(&[2, 4]).unwrap(),
         g.input_i32(&[2]).unwrap(),
-        Graph::default().input_i32(&[2, 3]).unwrap(),
+        Tracer::default().input_i32(&[2, 3]).unwrap(),
     ] {
         assert!(Tensor::stack(&[a.clone(), b.clone()], 0).is_err());
         assert!(Tensor::concatenate(&[a.clone(), b], 0).is_err());
@@ -84,7 +84,7 @@ fn real_integer_stack_and_concatenate_preserve_bits() {
             .collect();
         let b: Vec<_> = a.iter().map(|v| !v).collect();
         for axis in 0..=shape.len() {
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input_i32(&shape).unwrap();
             let y = g.input_i32(&shape).unwrap();
             let stack = Tensor::stack(&[x.clone(), y.clone()], axis).unwrap();
@@ -95,7 +95,7 @@ fn real_integer_stack_and_concatenate_preserve_bits() {
                 outputs.push(Tensor::concatenate(&[x.clone(), y], axis).unwrap());
                 outputs.push(Tensor::concatenate(&[x], axis).unwrap());
             }
-            let exe = g.compile_outputs(&client, &outputs).unwrap();
+            let exe = g.compile_many(&client, &outputs).unwrap();
             let x = client.buffer(&shape, &a).unwrap();
             let y = client.buffer(&shape, &b).unwrap();
             let actual = exe.execute(&[&x, &y]).unwrap();

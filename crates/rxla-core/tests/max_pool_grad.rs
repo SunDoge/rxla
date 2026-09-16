@@ -1,4 +1,4 @@
-use rxla_core::{Client, Graph, Pool2dOptions};
+use rxla_core::{Client, Pool2dOptions, Tracer};
 
 fn client() -> Client {
     unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap()
@@ -42,7 +42,7 @@ fn real_max_pool_unique_winners_overlap_padding_and_stride() {
             },
         ),
     ] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let y = x.max_pool2d(options).unwrap();
         let output_shape = y.shape().to_vec();
@@ -104,7 +104,7 @@ fn real_max_pool_unique_winners_overlap_padding_and_stride() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_max_pool_ties_choose_one_winner_and_empty_gradients() {
     let client = client();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 2, 2, 1]).unwrap();
     let y = x.max_pool2d(Pool2dOptions::default()).unwrap();
     let seed = g.constant(y.shape(), &[6.]).unwrap();
@@ -116,7 +116,7 @@ fn real_max_pool_ties_choose_one_winner_and_empty_gradients() {
         assert_eq!(actual[0].iter().filter(|&&v| v == 0.).count(), 3);
     }
     for shape in [[0, 3, 4, 2], [2, 0, 3, 2], [1, 3, 4, 0], [1, 1, 1, 2]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let loss = x
             .max_pool2d(Pool2dOptions::default())
@@ -135,7 +135,7 @@ fn real_max_pool_ties_choose_one_winner_and_empty_gradients() {
 
 #[test]
 fn max_pool_higher_order_fails_explicitly() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 3, 3, 1]).unwrap();
     let loss = x
         .max_pool2d(Pool2dOptions::default())

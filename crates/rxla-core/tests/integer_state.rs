@@ -1,4 +1,4 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph, Output, StateGraph};
+use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tensor, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -57,10 +57,10 @@ fn mixed_output_graph_ownership_and_slot_types() {
     assert!(g.write(&f, &g.scalar_i32(3).unwrap()).is_err());
     assert!(g.write(&i, &g.constant(&[], &[3.]).unwrap()).is_err());
     assert!(g.write(&i, &g.constant_i32(&[1], &[3]).unwrap()).is_err());
-    let graph = Graph::default();
-    let foreign: Output = Graph::default().scalar_i32(1).unwrap();
-    assert!(graph.stablehlo_outputs(&[foreign]).is_err());
-    assert!(graph.stablehlo_outputs(&[]).is_err());
+    let graph = Tracer::default();
+    let foreign: Tensor = Tracer::default().scalar_i32(1).unwrap();
+    assert!(graph.stablehlo_many(&[foreign]).is_err());
+    assert!(graph.stablehlo_many(&[]).is_err());
 }
 
 #[test]
@@ -140,15 +140,15 @@ fn real_mixed_state_position_updates_and_replacement_are_atomic() {
 fn real_mixed_outputs_survive_executable_restoration() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let g = Graph::default();
+    let g = Tracer::default();
     let indices = g.input_i32(&[2]).unwrap();
     let x = g.input(&[2]).unwrap();
     let outputs = [
-        Output::from(indices.wrapping_add_scalar(1).unwrap()),
+        indices.wrapping_add_scalar(1).unwrap(),
         x.add_scalar(2.).unwrap(),
     ];
-    let exe = compiler.compile_outputs(&g, &outputs).unwrap();
-    compiler.compile_outputs(&g, &outputs).unwrap();
+    let exe = compiler.compile_many(&g, &outputs).unwrap();
+    compiler.compile_many(&g, &outputs).unwrap();
     let bytes = exe.serialize_with_metadata().unwrap();
     let restored =
         unsafe { rxla_core::Executable::deserialize_with_metadata(&client, &bytes) }.unwrap();

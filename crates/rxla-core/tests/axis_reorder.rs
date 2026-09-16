@@ -1,4 +1,4 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn attention_head_layout_helpers_preserve_exact_hlo() {
@@ -7,7 +7,7 @@ fn attention_head_layout_helpers_preserve_exact_hlo() {
     for chunk in [1, 8] {
         for heads in [4, 32] {
             let build = |helpers: bool| {
-                let g = Graph::default();
+                let g = Tracer::default();
                 let x = g.input(&[chunk, heads * 64]).unwrap();
                 let split = if helpers {
                     x.unflatten(1, &[heads, 64])
@@ -38,7 +38,7 @@ fn attention_head_layout_helpers_preserve_exact_hlo() {
 
 #[test]
 fn axis_reorder_validates_axes_and_preserves_other_dimensions() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3, 4, 5]).unwrap();
     assert_eq!(x.move_axis(1, 3).unwrap().shape(), [2, 4, 5, 3]);
     assert_eq!(x.move_axis(3, 1).unwrap().shape(), [2, 5, 3, 4]);
@@ -70,7 +70,7 @@ fn real_axis_reorder_values_and_nonuniform_vjp() {
         for a in 0..shape.len() {
             for b in 0..shape.len() {
                 for swap in [false, true] {
-                    let g = Graph::default();
+                    let g = Tracer::default();
                     let x = g.input(&shape).unwrap();
                     let ids = g.input_i32(&shape).unwrap();
                     let y = if swap {
@@ -139,7 +139,7 @@ fn real_axis_reorder_values_and_nonuniform_vjp() {
                         expected_ids[output] = integers[input];
                         expected_grad[input] = weights[output];
                     }
-                    let exe = g.compile_outputs(&client, &[y.clone(), iy, grad]).unwrap();
+                    let exe = g.compile_many(&client, &[y.clone(), iy, grad]).unwrap();
                     let input = client.buffer(&shape, &values).unwrap();
                     let ids = client.buffer(&shape, &integers).unwrap();
                     let outputs = exe.execute(&[&input, &ids]).unwrap();

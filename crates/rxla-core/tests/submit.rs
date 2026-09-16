@@ -1,14 +1,14 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_device_pipeline_with_shared_intermediate_outputs() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2]).unwrap();
     let i = g.input_i32(&[2]).unwrap();
     let exe = g
-        .compile_outputs(
+        .compile_many(
             &client,
             &[x.add_scalar(1.).unwrap(), i.wrapping_add_scalar(1).unwrap()],
         )
@@ -58,7 +58,7 @@ fn real_device_pipeline_with_shared_intermediate_outputs() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_completion_queries_preserve_outputs_and_owners() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2]).unwrap();
     let exe = g.compile(&client, &x.add_scalar(2.).unwrap()).unwrap();
     let input = client.buffer(&[2], &[3., -7.]).unwrap();
@@ -87,7 +87,7 @@ fn real_completion_queries_preserve_outputs_and_owners() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_submit_without_inputs_retains_constant_executable() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let value = g.constant(&[2], &[3., -7.]).unwrap();
     let exe = g.compile(&client, &value).unwrap();
     let pending = exe.submit(&[]).unwrap();
@@ -104,11 +104,11 @@ fn real_submit_without_inputs_retains_constant_executable() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_submissions_own_inputs_and_executable_until_wait() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 2]).unwrap();
     let i = g.input_i32(&[2]).unwrap();
     let exe = g
-        .compile_outputs(
+        .compile_many(
             &client,
             &[x.matmul(&x).unwrap(), i.wrapping_add_scalar(1).unwrap()],
         )
@@ -138,7 +138,7 @@ fn real_submissions_own_inputs_and_executable_until_wait() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_submit_validates_signatures_and_drop_does_not_cancel() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2]).unwrap();
     let exe = g.compile(&client, &x.add_scalar(1.).unwrap()).unwrap();
     let good = client.buffer(&[2], &[1., 2.]).unwrap();

@@ -1,12 +1,12 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn normal_density_requires_explicit_broadcast_and_same_graph() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     for bad in [
         g.input(&[3]).unwrap(),
-        Graph::default().input(&[2, 3]).unwrap(),
+        Tracer::default().input(&[2, 3]).unwrap(),
     ] {
         assert!(x.normal_log_prob(&bad, &x).is_err());
         assert!(x.normal_log_prob(&x, &bad).is_err());
@@ -17,7 +17,7 @@ fn normal_density_requires_explicit_broadcast_and_same_graph() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_detaching_actions_selects_score_instead_of_pathwise_derivative() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let mean = g.input(&[3]).unwrap();
     let log_std = g.input(&[3]).unwrap();
     let eps = g.constant(&[3], &[-1.5, 0., 2.]).unwrap();
@@ -75,7 +75,7 @@ fn real_normal_density_and_two_derivatives_match_f64() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for shape in [vec![], vec![2, 3], vec![0, 3]] {
         let n = shape.iter().product::<i64>() as usize;
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let mean = g.input(&shape).unwrap();
         let log_std = g.input(&shape).unwrap();

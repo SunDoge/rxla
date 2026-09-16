@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn unflatten_validates_selected_axis_even_when_total_size_is_zero() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[0, 6]).unwrap();
     let ids = g.input_i32(&[0, 6]).unwrap();
     assert_eq!(x.unflatten(1, &[2, 3]).unwrap().shape(), [0, 2, 3]);
@@ -34,7 +34,7 @@ fn real_unflatten_preserves_typed_values_and_gradient() {
         (vec![1], 0, vec![1, 1]),
         (vec![2, 0, 4], 1, vec![3, 0]),
     ] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let index = g.input_i32(&shape).unwrap();
         let y = x.unflatten(axis, &sizes).unwrap();
@@ -54,7 +54,7 @@ fn real_unflatten_preserves_typed_values_and_gradient() {
             .map(|i| [i32::MIN, i32::MAX, -1][i % 3])
             .collect();
         let exe = g
-            .compile_outputs(&client, &[y.clone(), ids, grad, restored])
+            .compile_many(&client, &[y.clone(), ids, grad, restored])
             .unwrap();
         let x = client.buffer(&shape, &values).unwrap();
         let ids = client.buffer(&shape, &integers).unwrap();

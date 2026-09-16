@@ -1,4 +1,4 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 fn client() -> Client {
     unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap()
@@ -6,7 +6,7 @@ fn client() -> Client {
 
 #[test]
 fn reduction_axes_are_validated() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     for axes in [vec![2], vec![0, 0]] {
         assert!(x.logsumexp(&axes, false).is_err());
@@ -20,7 +20,7 @@ fn real_logsumexp_values_and_vjp_against_f64() {
     let client = client();
     for axes in [vec![], vec![0], vec![1], vec![1, 0]] {
         for keepdims in [false, true] {
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input(&[2, 3]).unwrap();
             let y = x.logsumexp(&axes, keepdims).unwrap();
             let seed = g.input(y.shape()).unwrap();
@@ -72,7 +72,7 @@ fn real_logsumexp_values_and_vjp_against_f64() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_logsumexp_nonfinite_empty_and_second_derivative() {
     let client = client();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[4, 3]).unwrap();
     let y = x.logsumexp(&[1], false).unwrap();
     let gradient = y.sum(&[0], false).unwrap().grad(&[x]).unwrap().remove(0);
@@ -100,7 +100,7 @@ fn real_logsumexp_nonfinite_empty_and_second_derivative() {
     assert_eq!(actual[1][..3], [0.5, 0., 0.5]);
 
     for shape in [vec![2, 0], vec![0, 3]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let y = x.logsumexp(&[1], false).unwrap();
         let gradient = y.sum(&[0], false).unwrap().grad(&[x]).unwrap().remove(0);
@@ -109,7 +109,7 @@ fn real_logsumexp_nonfinite_empty_and_second_derivative() {
         assert_eq!(actual[0], vec![f32::NEG_INFINITY; shape[0] as usize]);
         assert!(actual[1].is_empty());
     }
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[3]).unwrap();
     let seed = g.constant(&[3], &[1., -2., 3.]).unwrap();
     let first = x
@@ -138,7 +138,7 @@ fn real_logsumexp_nonfinite_empty_and_second_derivative() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_min_reduction_ties_and_empty() {
     let client = client();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     let y = x.min(&[1], true).unwrap();
     let gradient = y.sum(&[0, 1], false).unwrap().grad(&[x]).unwrap().remove(0);
@@ -147,7 +147,7 @@ fn real_min_reduction_ties_and_empty() {
         exe.run_many(&[&[1., -2., -2., 0., -0., 3.]]).unwrap(),
         [vec![-2., 0.], vec![0., 0.5, 0.5, 0.5, 0.5, 0.]]
     );
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 0]).unwrap();
     let y = x.min(&[1], false).unwrap();
     let gradient = y.sum(&[0], false).unwrap().grad(&[x]).unwrap().remove(0);

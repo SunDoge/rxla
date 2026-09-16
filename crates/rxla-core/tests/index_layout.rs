@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn index_layout_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let ids = g.input_i32(&[2, 3]).unwrap();
     assert_eq!(ids.reshape(&[6]).unwrap().shape(), [6]);
     assert_eq!(ids.transpose(&[1, 0]).unwrap().shape(), [3, 2]);
@@ -25,10 +25,10 @@ fn index_layout_validation() {
 
 #[test]
 fn index_singleton_axes_validate_before_recording_nodes() {
-    let g = Graph::default();
+    let g = Tracer::default();
     for shape in [vec![], vec![1], vec![2, 1, 3], vec![2, 0, 1]] {
         let ids = g.input_i32(&shape).unwrap();
-        let before = g.stablehlo_outputs(std::slice::from_ref(&ids)).unwrap();
+        let before = g.stablehlo_many(std::slice::from_ref(&ids)).unwrap();
         for axis in [shape.len() + 1, usize::MAX] {
             assert!(ids.unsqueeze(axis).is_err());
         }
@@ -40,7 +40,7 @@ fn index_singleton_axes_validate_before_recording_nodes() {
         assert!(ids.squeeze(usize::MAX).is_err());
         assert_eq!(
             before,
-            g.stablehlo_outputs(std::slice::from_ref(&ids)).unwrap()
+            g.stablehlo_many(std::slice::from_ref(&ids)).unwrap()
         );
         for axis in 0..=shape.len() {
             let expanded = ids.unsqueeze(axis).unwrap();
@@ -57,7 +57,7 @@ fn index_singleton_axes_validate_before_recording_nodes() {
 fn real_index_singleton_axes_preserve_integer_bits() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for shape in [vec![], vec![1], vec![2, 1, 3], vec![2, 0, 1]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let ids = g.input_i32(&shape).unwrap();
         let values: Vec<_> = (0..ids.numel())
             .map(|i| [i32::MIN, i32::MAX, -1, 0, 16_777_217, 42][i % 6])
@@ -69,7 +69,7 @@ fn real_index_singleton_axes_preserve_integer_bits() {
             outputs.push(expanded.clone());
             outputs.push(expanded.squeeze(axis).unwrap());
         }
-        let exe = g.compile_outputs(&client, &outputs).unwrap();
+        let exe = g.compile_many(&client, &outputs).unwrap();
         for output in exe.execute(&[&input]).unwrap() {
             assert_eq!(output.to_vec::<i32>().unwrap(), values);
         }
@@ -80,7 +80,7 @@ fn real_index_singleton_axes_preserve_integer_bits() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_index_layouts_feed_batched_log_prob_selection() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let logits = g.input(&[2, 3, 4]).unwrap();
     // Sequence-major IDs supplied by the host; normalize layout inside the graph.
     let ids = g.input_i32(&[3, 2]).unwrap();
@@ -109,7 +109,7 @@ fn real_index_layouts_feed_batched_log_prob_selection() {
         }
     }
     // Constant scalar reshape and empty index layouts remain valid gather inputs.
-    let g = Graph::default();
+    let g = Tracer::default();
     let table = g.constant(&[3], &[10., 20., 30.]).unwrap();
     let scalar = g.scalar_i32(1).unwrap().reshape(&[1, 1]).unwrap();
     let empty = g

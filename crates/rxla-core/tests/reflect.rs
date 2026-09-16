@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn reverse_and_reflect_validate_axes_and_widths() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     assert!(x.flip(&[0, 0]).is_err());
     assert!(x.flip(&[2]).is_err());
@@ -24,7 +24,7 @@ fn reverse_and_reflect_validate_axes_and_widths() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_flip_values_weighted_gradient_and_involution() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     let y = x.flip(&[1, 0]).unwrap();
     let weights = g.constant(&[2, 3], &[1., 2., 3., 4., 5., 6.]).unwrap();
@@ -48,7 +48,7 @@ fn real_reflection_values_and_first_second_derivatives() {
         (vec![1, 3, 2], vec![[0, 0], [1, 2], [1, 1]]),
         (vec![0, 3], vec![[0, 0], [1, 2]]),
     ] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let y = x.pad_reflect(&padding).unwrap();
         let axes: Vec<_> = (0..shape.len()).collect();

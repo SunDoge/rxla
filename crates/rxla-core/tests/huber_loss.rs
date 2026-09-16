@@ -1,15 +1,15 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn huber_validates_delta_shape_and_graph() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2]).unwrap();
     for delta in [0., -1., f32::INFINITY, f32::NAN] {
         assert!(x.huber_loss(&x, delta).is_err());
     }
     assert!(x.huber_loss(&g.input(&[]).unwrap(), 1.).is_err());
     assert!(
-        x.huber_loss(&Graph::default().input(&[2]).unwrap(), 1.)
+        x.huber_loss(&Tracer::default().input(&[2]).unwrap(), 1.)
             .is_err()
     );
 }
@@ -33,7 +33,7 @@ fn real_huber_values_gradients_curvature_and_extreme_residuals() {
             1e30,
             f32::MAX,
         ];
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&[values.len() as i64]).unwrap();
         let target = g.input(x.shape()).unwrap();
         let loss = x.huber_loss(&target, delta).unwrap();
@@ -86,7 +86,7 @@ fn real_huber_values_gradients_curvature_and_extreme_residuals() {
         }
     }
     for shape in [vec![], vec![0, 2]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let target = g
             .constant(&[], &[0.])

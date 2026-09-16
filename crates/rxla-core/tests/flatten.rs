@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn flatten_checks_ranges_and_dimension_overflow_without_plugin() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3, 4]).unwrap();
     let ids = g.input_i32(&[2, 3, 4]).unwrap();
     assert_eq!(x.flatten(1, 2).unwrap().shape(), [2, 12]);
@@ -31,7 +31,7 @@ fn real_flatten_preserves_values_integer_bits_and_gradients() {
             .collect();
         for start in 0..shape.len().max(1) {
             for end in start..shape.len().max(1) {
-                let g = Graph::default();
+                let g = Tracer::default();
                 let x = g.input(&shape).unwrap();
                 let ids = g.input_i32(&shape).unwrap();
                 let y = x.flatten(start, end).unwrap();
@@ -46,7 +46,7 @@ fn real_flatten_preserves_values_integer_bits_and_gradients() {
                     .unwrap()
                     .remove(0);
                 let exe = g
-                    .compile_outputs(&client, &[y.clone(), integer, grad])
+                    .compile_many(&client, &[y.clone(), integer, grad])
                     .unwrap();
                 let x = client.buffer(&shape, &values).unwrap();
                 let ids = client.buffer(&shape, &integers).unwrap();

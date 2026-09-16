@@ -98,7 +98,7 @@ impl Graph {
     /// Unlike pruned compilation, unused parameters remain in the input ABI.
     /// The snapshot can be reused with different Compiler instances; each keeps
     /// its own device placement, options and memory/disk cache policy.
-    pub fn prepare_outputs(&self, outputs: &[Output]) -> Result<LoweredProgram> {
+    pub fn prepare_outputs(&self, outputs: &[Tensor]) -> Result<LoweredProgram> {
         if outputs.is_empty() {
             return Err(err("program requires at least one output"));
         }
@@ -114,7 +114,7 @@ impl Graph {
     /// and slot mappings must not be silently omitted when preparing stateful work.
     pub fn prepare_outputs_pruned(
         &self,
-        outputs: &[Output],
+        outputs: &[Tensor],
     ) -> Result<(LoweredProgram, Vec<usize>)> {
         if outputs.is_empty() {
             return Err(err("program requires at least one output"));
@@ -277,8 +277,8 @@ impl Compiler {
         self.stats.key_bytes = 0;
     }
 
-    pub fn compile(&mut self, graph: &Graph, output: &Tensor) -> Result<Rc<Executable>> {
-        self.compile_many(graph, std::slice::from_ref(output))
+    pub fn compile(&mut self, tracer: &Tracer, output: &Tensor) -> Result<Rc<Executable>> {
+        self.compile_many(tracer, std::slice::from_ref(output))
     }
 
     /// Use a lowered snapshot without repeating graph lowering or program encoding.
@@ -316,18 +316,23 @@ impl Compiler {
         )
     }
 
-    pub fn compile_many(&mut self, graph: &Graph, outputs: &[Tensor]) -> Result<Rc<Executable>> {
-        self.compile_outputs(graph, outputs)
+    pub fn compile_many(&mut self, tracer: &Tracer, outputs: &[Tensor]) -> Result<Rc<Executable>> {
+        self.compile_graph_outputs(&tracer.graph, outputs)
     }
-    pub fn compile_outputs(&mut self, graph: &Graph, outputs: &[Output]) -> Result<Rc<Executable>> {
+
+    pub(crate) fn compile_graph_outputs(
+        &mut self,
+        graph: &Graph,
+        outputs: &[Tensor],
+    ) -> Result<Rc<Executable>> {
         let lowered = graph.direct_lowered_for(outputs, true, self.lowering_target()?)?;
         self.compile_lowered(&lowered)
     }
 
-    pub(crate) fn compile_outputs_pruned(
+    pub(crate) fn compile_graph_outputs_pruned(
         &mut self,
         graph: &Graph,
-        outputs: &[Output],
+        outputs: &[Tensor],
     ) -> Result<(Rc<Executable>, Vec<usize>)> {
         let (lowered, parameters) = graph.prepare_outputs_pruned(outputs)?;
         Ok((self.compile_lowered(&lowered)?, parameters))

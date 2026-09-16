@@ -1,10 +1,10 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_optimized_hlo_is_owned_and_executable_survives_inspection() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[4]).unwrap();
     // XLA should remove the addition by zero (the frontend does not).
     let y = x.add_scalar(0.).unwrap().mul_scalar(2.).unwrap();

@@ -1,8 +1,8 @@
-use rxla_core::{Client, ConvTranspose2dOptions as Options, Graph};
+use rxla_core::{Client, ConvTranspose2dOptions as Options, Tracer};
 
 #[test]
 fn transposed_convolution_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 3, 4, 2]).unwrap();
     let k = g.input(&[2, 2, 5, 2]).unwrap();
     assert_eq!(
@@ -55,7 +55,7 @@ fn transposed_convolution_validation() {
     );
     assert!(
         x.conv_transpose2d(
-            &Graph::default().input(&[2, 2, 5, 2]).unwrap(),
+            &Tracer::default().input(&[2, 2, 5, 2]).unwrap(),
             Options::default()
         )
         .is_err()
@@ -100,7 +100,7 @@ fn real_transposed_convolution_matches_scatter_reference() {
             ..Default::default()
         },
     ] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&xs).unwrap();
         let k = g.input(&ks).unwrap();
         let y = x.conv_transpose2d(&k, options).unwrap();

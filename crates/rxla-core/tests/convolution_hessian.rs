@@ -1,10 +1,10 @@
-use rxla_core::{Client, Conv2dOptions, Graph};
+use rxla_core::{Client, Conv2dOptions, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_convolution_mixed_derivatives_through_fourth_order() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 1, 1, 1]).unwrap();
     let w = g.input(&[1, 1, 1, 1]).unwrap();
     let mut current = x
@@ -43,7 +43,7 @@ fn real_convolution_mixed_derivatives_through_fourth_order() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_grouped_convolution_joint_hessian_vector_matches_analytic_reference() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 2, 2, 2]).unwrap();
     let w = g.input(&[1, 1, 1, 4]).unwrap();
     let vx = g.input(x.shape()).unwrap();

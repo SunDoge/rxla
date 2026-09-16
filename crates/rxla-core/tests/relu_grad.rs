@@ -1,10 +1,10 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_relu_forward_and_zero_point_gradient() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[6]).unwrap();
     let weights = g.input(&[6]).unwrap();
     let y = x.relu().unwrap();
@@ -25,7 +25,7 @@ fn real_relu_forward_and_zero_point_gradient() {
             vec![0., 0., 0., 4., 5., 6.]
         ]
     );
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[3]).unwrap();
     let exe = g.compile(&client, &x.relu().unwrap()).unwrap();
     let values = exe
@@ -34,7 +34,7 @@ fn real_relu_forward_and_zero_point_gradient() {
     assert_eq!(values[..2], [0., f32::INFINITY]);
     assert!(values[2].is_nan());
     for shape in [vec![], vec![0, 2]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let y = x.relu().unwrap();
         let axes: Vec<_> = (0..shape.len()).collect();

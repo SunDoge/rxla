@@ -1,6 +1,6 @@
 //! Same-client synthetic comparison: fused graph, split synchronous calls, and
 //! split submissions. Includes final host download; excludes upload/compilation.
-use rxla_core::{Buffer, Client, Executable, Graph};
+use rxla_core::{Buffer, Client, Executable, Tracer};
 use std::time::Instant;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -70,7 +70,7 @@ fn main() -> Result<()> {
         client.info()?,
         cfg!(debug_assertions)
     );
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[BATCH as i64, WIDTH as i64])?;
     let w = g.input(&[WIDTH as i64, WIDTH as i64])?;
     let first = x.matmul(&w)?;

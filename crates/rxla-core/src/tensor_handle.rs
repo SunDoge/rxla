@@ -964,7 +964,8 @@ impl Compiler {
             .iter()
             .map(|input| input.to_buffer(&self.client))
             .collect::<Result<Vec<_>>>()?;
-        let executable = self.compile(output.graph(), output)?;
+        let executable =
+            self.compile_graph_outputs(output.graph(), std::slice::from_ref(output))?;
         executable.execute(&buffers.iter().map(|b| b.as_ref()).collect::<Vec<_>>())
     }
 }

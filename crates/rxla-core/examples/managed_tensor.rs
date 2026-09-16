@@ -1,5 +1,5 @@
 //! Explicit managed input -> resident input -> repeated compiled execution.
-use rxla_core::{CacheLimits, Client, Compiler, DType, Graph, Storage};
+use rxla_core::{CacheLimits, Client, Compiler, DType, Storage, Tracer};
 use rxla_pjrt::{ByteStrides, Shape, StridedLayout};
 use std::{cell::Cell, rc::Rc};
 
@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let buffer = storage.upload(&StridedLayout::row_major(Shape::new(&[3])?, 2)?, &client)?;
     assert_eq!(buffer.dtype()?, DType::BF16);
     assert_eq!(buffer.to_vec_bf16_bits()?, bits);
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[3, 2])?;
     let y = x.mul(&x)?;
     let dropped = Rc::new(Cell::new(false));

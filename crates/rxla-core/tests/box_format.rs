@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn box_formats_validate_coordinate_axis() {
-    let g = Graph::default();
+    let g = Tracer::default();
     for shape in [vec![], vec![3], vec![4, 1]] {
         let x = g.input(&shape).unwrap();
         assert!(x.box_cxcywh_to_xyxy().is_err());
@@ -23,7 +23,7 @@ fn real_box_formats_match_linear_values_and_vjps() {
         let n = shape.iter().product::<i64>() as usize;
         let values: Vec<_> = (0..n).map(|i| (i as f32 - 10.) * 0.25).collect();
         for forward in [true, false] {
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input(&shape).unwrap();
             let y = if forward {
                 x.box_cxcywh_to_xyxy()

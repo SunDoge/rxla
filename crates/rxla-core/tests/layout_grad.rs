@@ -1,11 +1,11 @@
-use rxla_core::{Client, Graph, RotaryLayout, Tensor};
+use rxla_core::{Client, RotaryLayout, Tensor, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_rotary_composite_gradients_match_independent_formula() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for layout in [RotaryLayout::SplitHalf, RotaryLayout::Interleaved] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&[2, 4]).unwrap();
         let cos = g.input(&[2]).unwrap();
         let sin = g.input(&[2]).unwrap();
@@ -56,7 +56,7 @@ fn real_strided_slice_gradient_inserts_zeros() {
         ([2, 3], [2, 6], [1, 2]),
         ([4, 5], [5, 6], [99, 99]),
     ] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&[5, 6]).unwrap();
         let sliced = x.slice(&starts, &limits, &strides).unwrap();
         let weights = g.input(sliced.shape()).unwrap();
@@ -82,7 +82,7 @@ fn real_strided_slice_gradient_inserts_zeros() {
 fn real_concat_pad_split_gradients_accumulate_shared_inputs() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for axis in [0, 1] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&[2, 3]).unwrap();
         let parts = x
             .split(axis, if axis == 0 { &[1, 0, 1] } else { &[1, 0, 2] })
@@ -99,7 +99,7 @@ fn real_concat_pad_split_gradients_accumulate_shared_inputs() {
         );
     }
     for shape in [vec![], vec![0, 3]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let padded = x.pad(&vec![[1, 2]; shape.len()], 2.).unwrap();
         let axes: Vec<_> = (0..shape.len()).collect();

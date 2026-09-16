@@ -1,8 +1,8 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph, StateGraph};
+use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 
 #[test]
 fn rejects_invalid_integer_dynamic_regions() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input_i32(&[3, 4]).unwrap();
     let s = g.input_i32_scalar().unwrap();
     for sizes in [vec![1], vec![-1, 2], vec![4, 1], vec![1, 5]] {
@@ -11,7 +11,7 @@ fn rejects_invalid_integer_dynamic_regions() {
     assert!(x.dynamic_slice(&[], &[1, 1]).is_err());
     for bad in [
         g.input_i32(&[1]).unwrap(),
-        Graph::default().input_i32_scalar().unwrap(),
+        Tracer::default().input_i32_scalar().unwrap(),
     ] {
         assert!(x.dynamic_slice(&[bad.clone(), s.clone()], &[1, 1]).is_err());
         assert!(x.dynamic_update_slice(&x, &[s.clone(), bad]).is_err());
@@ -19,7 +19,7 @@ fn rejects_invalid_integer_dynamic_regions() {
     for update in [
         g.input_i32(&[1]).unwrap(),
         g.input_i32(&[4, 1]).unwrap(),
-        Graph::default().input_i32(&[1, 1]).unwrap(),
+        Tracer::default().input_i32(&[1, 1]).unwrap(),
     ] {
         assert!(
             x.dynamic_update_slice(&update, &[s.clone(), s.clone()])
@@ -32,13 +32,13 @@ fn rejects_invalid_integer_dynamic_regions() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_integer_runtime_regions_clamp_and_preserve_source() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input_i32(&[3, 4]).unwrap();
     let patch = g.input_i32(&[2, 2]).unwrap();
     let starts = [g.input_i32_scalar().unwrap(), g.input_i32_scalar().unwrap()];
     let read = x.dynamic_slice(&starts, &[2, 2]).unwrap();
     let updated = x.dynamic_update_slice(&patch, &starts).unwrap();
-    let exe = g.compile_outputs(&client, &[read, updated]).unwrap();
+    let exe = g.compile_many(&client, &[read, updated]).unwrap();
     let data = [
         i32::MIN,
         i32::MAX,
@@ -74,14 +74,14 @@ fn real_integer_runtime_regions_clamp_and_preserve_source() {
         assert_eq!(input.to_vec::<i32>().unwrap(), data);
     }
     for shape in [vec![], vec![0, 2]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input_i32(&shape).unwrap();
         let p = g.input_i32(&shape).unwrap();
         let starts: Vec<_> = (0..shape.len())
             .map(|_| g.scalar_i32(i32::MAX).unwrap())
             .collect();
         let exe = g
-            .compile_outputs(
+            .compile_many(
                 &client,
                 &[
                     x.dynamic_slice(&starts, &shape).unwrap(),

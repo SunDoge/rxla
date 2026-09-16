@@ -1,8 +1,8 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph, KvCache, StateGraph};
+use rxla_core::{CacheLimits, Client, Compiler, KvCache, StateGraph, Tracer};
 
 #[test]
 fn mask_shape_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input_i32(&[2, 1]).unwrap();
     assert_eq!(x.broadcast_to(&[2, 3]).unwrap().shape(), [2, 3]);
     assert!(x.broadcast_to(&[3]).is_err());
@@ -10,7 +10,7 @@ fn mask_shape_validation() {
     assert!(x.broadcast_to(&[-1, 3]).is_err());
     assert!(x.le_mask(&g.input_i32_scalar().unwrap()).is_err());
     assert!(
-        x.le_mask(&Graph::default().input_i32(&[2, 1]).unwrap())
+        x.le_mask(&Tracer::default().input_i32(&[2, 1]).unwrap())
             .is_err()
     );
 }
@@ -19,7 +19,7 @@ fn mask_shape_validation() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_signed_masks_and_integer_broadcast() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let values = g.constant_i32(&[4], &[i32::MIN, -1, 0, i32::MAX]).unwrap();
     let threshold = g.input_i32_scalar().unwrap();
     let mask = values
@@ -31,7 +31,7 @@ fn real_signed_masks_and_integer_broadcast() {
     for output in exe.execute(&[&index]).unwrap() {
         assert_eq!(output.to_vec::<f32>().unwrap(), [1., 1., 0., 0.]);
     }
-    let h = Graph::default();
+    let h = Tracer::default();
     let x = h
         .constant_i32(&[2, 1], &[1, 4])
         .unwrap()

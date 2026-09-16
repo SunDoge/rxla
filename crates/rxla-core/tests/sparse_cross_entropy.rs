@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn sparse_targets_require_exact_nonclass_shape_and_owner() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     let labels = g.input_i32(&[2]).unwrap();
     assert_eq!(
@@ -16,7 +16,7 @@ fn sparse_targets_require_exact_nonclass_shape_and_owner() {
             .is_err()
     );
     assert!(
-        x.cross_entropy_with_indices(&Graph::default().input_i32(&[2]).unwrap(), 1)
+        x.cross_entropy_with_indices(&Tracer::default().input_i32(&[2]).unwrap(), 1)
             .is_err()
     );
     assert!(
@@ -32,7 +32,7 @@ fn sparse_targets_require_exact_nonclass_shape_and_owner() {
 fn real_sparse_loss_gradient_and_invalid_labels() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for axis in [0, 1] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&[2, 3]).unwrap();
         let groups = if axis == 0 { 3 } else { 2 };
         let classes = if axis == 0 { 2 } else { 3 };
@@ -85,7 +85,7 @@ fn real_sparse_loss_gradient_and_invalid_labels() {
         }
     }
     for shape in [vec![3], vec![0, 3]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let ids = g.input_i32(&shape[..shape.len() - 1]).unwrap();
         let loss = x.cross_entropy_with_indices(&ids, shape.len() - 1).unwrap();
@@ -112,7 +112,7 @@ fn real_sparse_loss_gradient_and_invalid_labels() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_select_routes_data_gradients_but_not_mask_gradients() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let mask = g.input(&[4]).unwrap();
     let a = g.input(&[4]).unwrap();
     let b = g.input(&[4]).unwrap();

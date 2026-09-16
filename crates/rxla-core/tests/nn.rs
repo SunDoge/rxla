@@ -1,4 +1,4 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 fn close(actual: &[f32], expected: &[f32]) {
     assert_eq!(actual.len(), expected.len());
     for (a, b) in actual.iter().zip(expected) {
@@ -11,7 +11,7 @@ fn close(actual: &[f32], expected: &[f32]) {
 
 #[test]
 fn shape_errors() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     assert!(x.transpose(&[0, 0]).is_err());
     assert!(x.sum(&[2], false).is_err());
@@ -26,7 +26,7 @@ fn shape_errors() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_nn_ops() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     let values: &[f32] = &[1., 2., 3., 4., 5., 6.];
     let sum = x.sum(&[1], false).unwrap();

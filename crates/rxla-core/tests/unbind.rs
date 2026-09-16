@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph, Tensor};
+use rxla_core::{Client, Tensor, Tracer};
 
 #[test]
 fn unbind_validates_axes_and_empty_shapes() {
-    let g = Graph::default();
+    let g = Tracer::default();
     for shape in [vec![], vec![0], vec![2, 0, 3], vec![1, 2]] {
         let x = g.input(&shape).unwrap();
         let i = g.input_i32(&shape).unwrap();
@@ -38,7 +38,7 @@ fn real_unbind_values_and_exact_indices() {
             if shape[axis] == 0 {
                 continue;
             } // no executable outputs to check
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input(&shape).unwrap();
             let i = g.input_i32(&shape).unwrap();
             let xs = x.unbind(axis).unwrap();
@@ -46,7 +46,7 @@ fn real_unbind_values_and_exact_indices() {
             let mut outputs: Vec<_> = xs.to_vec();
             outputs.extend(indices.iter().cloned());
             outputs.push(Tensor::stack(&xs, axis).unwrap());
-            let exe = g.compile_outputs(&client, &outputs).unwrap();
+            let exe = g.compile_many(&client, &outputs).unwrap();
             let x = client.buffer(&shape, &values).unwrap();
             let i = client.buffer(&shape, &words).unwrap();
             let actual = exe.execute(&[&x, &i]).unwrap();
@@ -74,7 +74,7 @@ fn real_unbind_values_and_exact_indices() {
 fn real_unbind_gradient_and_second_derivative() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for axis in 0..2 {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&[2, 3]).unwrap();
         let parts = x.unbind(axis).unwrap();
         // Use only one slice, twice, so reverse mode must both accumulate its

@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn dense_cross_entropy_validates_shapes_axis_and_owner() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     let y = g.input(&[2, 3]).unwrap();
     assert_eq!(x.cross_entropy_with_probs(&y, 1).unwrap().shape(), [2]);
@@ -13,7 +13,7 @@ fn dense_cross_entropy_validates_shapes_axis_and_owner() {
             .is_err()
     );
     assert!(
-        x.cross_entropy_with_probs(&Graph::default().input(&[2, 3]).unwrap(), 1)
+        x.cross_entropy_with_probs(&Tracer::default().input(&[2, 3]).unwrap(), 1)
             .is_err()
     );
     let empty = g.input(&[2, 0]).unwrap();
@@ -25,7 +25,7 @@ fn dense_cross_entropy_validates_shapes_axis_and_owner() {
 fn real_dense_cross_entropy_and_both_gradients_match_f64() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for axis in [0, 1] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&[2, 3]).unwrap();
         let targets = g.input(&[2, 3]).unwrap();
         let per_group = x.cross_entropy_with_probs(&targets, axis).unwrap();
@@ -75,7 +75,7 @@ fn real_dense_cross_entropy_and_both_gradients_match_f64() {
             }
         }
     }
-    let g = Graph::default();
+    let g = Tracer::default();
     let empty = g.input(&[0, 3]).unwrap();
     let loss = empty.cross_entropy_with_probs(&empty, 1).unwrap();
     assert!(

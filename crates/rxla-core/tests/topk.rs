@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn argsort_validates_axis_and_empty_shapes() {
-    let g = Graph::default();
+    let g = Tracer::default();
     assert!(g.input(&[]).unwrap().argsort(0, false).is_err());
     assert!(g.input(&[2]).unwrap().argsort(1, true).is_err());
     for descending in [false, true] {
@@ -20,7 +20,7 @@ fn real_argsort_both_directions_reorder_payloads_and_empty_axes() {
         [2., f32::NAN, 2., f32::INFINITY, -3.],
     ];
     for (shape, axis) in [([2, 5], 1), ([5, 2], 0), ([2, 0], 1)] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let asc = x.argsort(axis, false).unwrap();
         let desc = x.argsort(axis, true).unwrap();
@@ -30,7 +30,7 @@ fn real_argsort_both_directions_reorder_payloads_and_empty_axes() {
             outputs.push(x.topk(1, axis).unwrap().1);
             outputs.push(x.argmax(axis, false).unwrap());
         }
-        let exe = g.compile_outputs(&client, &outputs).unwrap();
+        let exe = g.compile_many(&client, &outputs).unwrap();
         let offset = |row, col| {
             if axis == 1 {
                 row * 5 + col
@@ -92,7 +92,7 @@ fn real_argsort_both_directions_reorder_payloads_and_empty_axes() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_argsort_gather_gradient_tracks_original_entries() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[5]).unwrap();
     let indices = x.argsort(0, false).unwrap();
     let values = x.take_along_axis(&indices, 0).unwrap();
@@ -111,7 +111,7 @@ fn real_argsort_gather_gradient_tracks_original_entries() {
 
 #[test]
 fn validates_topk_and_keeps_ir_size_independent_of_k() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 64]).unwrap();
     for (k, axis) in [(0, 2), (65, 1), (1, 2), (usize::MAX, 0)] {
         assert!(x.topk(k, axis).is_err());
@@ -126,10 +126,10 @@ fn validates_topk_and_keeps_ir_size_independent_of_k() {
     let counts: Vec<_> = [1, 32, 64]
         .into_iter()
         .map(|k| {
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input(&[2, 64]).unwrap();
             let (values, indices) = x.topk(k, 1).unwrap();
-            let stablehlo = g.stablehlo_outputs(&[values, indices]).unwrap();
+            let stablehlo = g.stablehlo_many(&[values, indices]).unwrap();
             assert_eq!(stablehlo.matches("stablehlo.sort").count(), 1);
             stablehlo.lines().count()
         })
@@ -143,7 +143,7 @@ fn real_zero_topk_has_empty_outputs_and_zero_derivatives_without_sorting() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for shape in [[2, 3], [0, 3], [2, 0]] {
         for axis in 0..2 {
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input(&shape).unwrap();
             let (values, indices) = x.topk(0, axis).unwrap();
             let loss = values.mul(&values).unwrap().sum(&[0, 1], false).unwrap();
@@ -156,11 +156,11 @@ fn real_zero_topk_has_empty_outputs_and_zero_derivatives_without_sorting() {
                 .remove(0);
             let outputs = [values, indices, loss, dx, ddx];
             assert!(
-                !g.stablehlo_outputs(&outputs)
+                !g.stablehlo_many(&outputs)
                     .unwrap()
                     .contains("stablehlo.sort")
             );
-            let exe = g.compile_outputs(&client, &outputs).unwrap();
+            let exe = g.compile_many(&client, &outputs).unwrap();
             let count = shape.iter().product::<i64>() as usize;
             let data: Vec<_> = (0..count)
                 .map(|i| [f32::NAN, f32::INFINITY, -1.][i % 3])
@@ -210,10 +210,10 @@ fn real_topk_stable_nonfinite_axes_and_empty_batches() {
             }
         }
         for k in [1, 4, 7] {
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input(&shape).unwrap();
             let (values, indices) = x.topk(k, axis).unwrap();
-            let exe = g.compile_outputs(&client, &[values, indices]).unwrap();
+            let exe = g.compile_many(&client, &[values, indices]).unwrap();
             let input = client.buffer(&shape, &data).unwrap();
             let out = exe.execute(&[&input]).unwrap();
             let actual = out[0].to_vec::<f32>().unwrap();
@@ -248,7 +248,7 @@ fn real_topk_stable_nonfinite_axes_and_empty_batches() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_topk_selected_gradients_and_second_derivatives() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[5]).unwrap();
     let (values, _) = x.topk(2, 0).unwrap();
     let loss = values.mul(&values).unwrap().sum(&[0], false).unwrap();

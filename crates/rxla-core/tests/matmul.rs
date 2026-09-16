@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn f32_matmul_requests_highest_operand_precision() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let a = graph.input(&[2, 3]).unwrap();
     let b = graph.input(&[3, 4]).unwrap();
     let output = a.matmul(&b).unwrap();
@@ -13,7 +13,7 @@ fn f32_matmul_requests_highest_operand_precision() {
 
 #[test]
 fn matmul_shapes_and_output_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     for (lhs, rhs, expected) in [
         (vec![3], vec![3], vec![]),
         (vec![3], vec![2, 3, 4], vec![2, 4]),
@@ -38,7 +38,7 @@ fn matmul_shapes_and_output_validation() {
         );
     }
     assert!(g.stablehlo_many(&[]).is_err());
-    let foreign = Graph::default().input(&[3]).unwrap();
+    let foreign = Tracer::default().input(&[3]).unwrap();
     assert!(g.stablehlo_many(&[foreign]).is_err());
 }
 
@@ -46,7 +46,7 @@ fn matmul_shapes_and_output_validation() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_broadcast_matmul_and_multiple_outputs() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let a = g.input(&[2, 1, 2, 3]).unwrap();
     let b = g.input(&[3, 3, 2]).unwrap();
     let y = a.matmul(&b).unwrap();
@@ -96,7 +96,7 @@ fn real_broadcast_matmul_and_multiple_outputs() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_vector_matmul() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let v = g.input(&[3]).unwrap();
     let m = g.constant(&[2, 3], &[1., 2., 3., 4., 5., 6.]).unwrap();
     let dot = v.matmul(&v).unwrap();

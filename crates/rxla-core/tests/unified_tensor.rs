@@ -1,9 +1,9 @@
-use rxla_core::{CacheLimits, Client, Compiler, DType, Graph, Storage, Tensor};
+use rxla_core::{CacheLimits, Client, Compiler, DType, Storage, Tensor, Tracer};
 use rxla_pjrt::{ByteStrides, Shape, StridedLayout};
 
 #[test]
 fn unified_dtype_validation_and_shape_operations() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let integer: Tensor = g.input_i32(&[2, 3]).unwrap();
     let compatibility: Tensor = integer.clone();
     assert_eq!(std::mem::size_of::<Tensor>(), std::mem::size_of::<usize>());
@@ -48,7 +48,7 @@ fn unified_dtype_validation_and_shape_operations() {
 fn real_managed_integer_and_bf16_graphs() -> Result<(), Box<dyn std::error::Error>> {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?) }?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let g = Graph::default();
+    let g = Tracer::default();
     let ints = [i32::MIN, 16_777_217, i32::MAX];
     let x = g
         .input_dtype(&[3], DType::I32)?
@@ -72,7 +72,7 @@ fn real_managed_integer_and_bf16_graphs() -> Result<(), Box<dyn std::error::Erro
         compiler.execute_bound(&mask, &[&x])?[0].to_vec::<f32>()?,
         [0., 1., 1.]
     );
-    let g = Graph::default();
+    let g = Tracer::default();
     let bits = [0x8000u16, 0x3f80, 0xc000];
     let b = g
         .input_dtype(&[3], DType::BF16)?

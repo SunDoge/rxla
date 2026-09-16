@@ -1,10 +1,10 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_sigmoid_scalar_empty_and_nonfinite() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[]).unwrap();
     let y = x.sigmoid().unwrap();
     let dx = y.grad(&[x]).unwrap().remove(0);
@@ -23,7 +23,7 @@ fn real_sigmoid_scalar_empty_and_nonfinite() {
             .iter()
             .all(|v| v[0].is_nan())
     );
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[0, 2]).unwrap();
     let y = x.sigmoid().unwrap();
     let dx = y.sum(&[0, 1], false).unwrap().grad(&[x]).unwrap().remove(0);
@@ -35,7 +35,7 @@ fn real_sigmoid_scalar_empty_and_nonfinite() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_sigmoid_silu_softplus_finite_extremes_and_higher_derivatives() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let values = [
         -1000., -100., -80., -20., -3., -0., 0., 3., 20., 80., 100., 1000.,
     ];

@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn validates_axes() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3, 4]).unwrap();
     let w = g.input(&[4, 2, 5]).unwrap();
     assert_eq!(
@@ -19,7 +19,7 @@ fn validates_axes() {
         assert!(x.dot_general(&w, &lc, &rc, &lb, &rb).is_err());
     }
     assert!(
-        x.tensordot(&Graph::default().input(&[4]).unwrap(), &[2], &[0])
+        x.tensordot(&Tracer::default().input(&[4]).unwrap(), &[2], &[0])
             .is_err()
     );
 }
@@ -38,7 +38,7 @@ fn close(a: &[f32], b: &[f64]) {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_batched_contraction_derivatives() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3, 4]).unwrap();
     let w = g.input(&[4, 2, 5]).unwrap();
     let y = x.dot_general(&w, &[2], &[0], &[0], &[1]).unwrap();
@@ -87,7 +87,7 @@ fn real_batched_contraction_derivatives() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_outer_scalar_multiple_axes_and_empty() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let s = g.constant(&[], &[2.]).unwrap();
     let v = g.constant(&[2], &[3., 4.]).unwrap();
     let outer = v.tensordot(&v, &[], &[]).unwrap();

@@ -1,21 +1,16 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph, StateGraph};
+use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_rectangular_surrogate_routes_dense_vjp_and_cross_derivatives() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let forward = g.input(&[2, 2]).unwrap();
     let x = g.input(&[2, 3]).unwrap();
     let w = g.input(&[3, 2]).unwrap();
     let seed = g.input(&[2, 2]).unwrap();
     let y = forward.with_gradient_of(&x.matmul(&w).unwrap()).unwrap();
-    assert_eq!(
-        g.prepare_outputs_pruned(std::slice::from_ref(&y))
-            .unwrap()
-            .1,
-        [0]
-    );
+    assert_eq!(g.prepare_pruned(std::slice::from_ref(&y)).unwrap().1, [0]);
     let gradients = y.vjp(&[forward.clone(), x, w.clone()], &seed).unwrap();
     assert_eq!(gradients[1].shape(), [2, 3]);
     assert_eq!(gradients[2].shape(), [3, 2]);
@@ -60,7 +55,7 @@ fn real_rectangular_surrogate_routes_dense_vjp_and_cross_derivatives() {
 fn real_partial_rules_share_forward_cache_but_separate_backward_cache() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[4]).unwrap();
     let one = graph.constant(&[4], &[1.; 4]).unwrap();
     let two = graph.constant(&[4], &[2.; 4]).unwrap();
@@ -119,14 +114,14 @@ fn real_partial_rules_share_forward_cache_but_separate_backward_cache() {
 
 #[test]
 fn multi_input_partials_validate_all_pairs_and_prune_forward_edges() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let f = graph.input(&[3]).unwrap();
     let x = graph.input(&[3]).unwrap();
     let z = graph.input(&[3]).unwrap();
     assert!(f.with_elementwise_derivatives(&[]).is_err());
     for bad in [
         graph.input(&[]).unwrap(),
-        Graph::default().input(&[3]).unwrap(),
+        Tracer::default().input(&[3]).unwrap(),
     ] {
         assert!(
             f.with_elementwise_derivatives(&[(&x, &z), (&bad, &x)])
@@ -140,14 +135,14 @@ fn multi_input_partials_validate_all_pairs_and_prune_forward_edges() {
     let y = f
         .with_elementwise_derivatives(&[(&x, &z), (&z, &x)])
         .unwrap();
-    assert_eq!(graph.prepare_outputs_pruned(&[y]).unwrap().1, [0]);
+    assert_eq!(graph.prepare_pruned(&[y]).unwrap().1, [0]);
 }
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_multi_input_partials_cross_derivatives_and_alias_accumulation() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let f = graph.input(&[3]).unwrap();
     let x = graph.input(&[3]).unwrap();
     let z = graph.input(&[3]).unwrap();
@@ -225,13 +220,13 @@ fn real_multi_input_partials_cross_derivatives_and_alias_accumulation() {
 
 #[test]
 fn explicit_elementwise_derivative_validates_and_prunes_forward_only_edges() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let forward = graph.input(&[3]).unwrap();
     let x = graph.input(&[3]).unwrap();
     let derivative = x.mul(&x).unwrap().mul_scalar(3.).unwrap();
     for bad in [
         graph.input(&[]).unwrap(),
-        Graph::default().input(&[3]).unwrap(),
+        Tracer::default().input(&[3]).unwrap(),
     ] {
         assert!(
             forward
@@ -245,7 +240,7 @@ fn explicit_elementwise_derivative_validates_and_prunes_forward_only_edges() {
         .unwrap();
     assert_eq!(
         graph
-            .prepare_outputs_pruned(std::slice::from_ref(&output))
+            .prepare_pruned(std::slice::from_ref(&output))
             .unwrap()
             .1,
         [0]
@@ -256,15 +251,15 @@ fn explicit_elementwise_derivative_validates_and_prunes_forward_only_edges() {
         .grad(&[x])
         .unwrap()
         .remove(0);
-    assert_eq!(graph.prepare_outputs_pruned(&[gradient]).unwrap().1, [1]);
-    assert_eq!(graph.prepare_outputs_pruned(&[output]).unwrap().1, [0]);
+    assert_eq!(graph.prepare_pruned(&[gradient]).unwrap().1, [1]);
+    assert_eq!(graph.prepare_pruned(&[output]).unwrap().1, [0]);
 }
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_explicit_elementwise_derivative_vjp_and_higher_order() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let forward = graph.input(&[3]).unwrap();
     let x = graph.input(&[3]).unwrap();
     let seed = graph.input(&[3]).unwrap();
@@ -322,19 +317,22 @@ fn real_explicit_elementwise_derivative_vjp_and_higher_order() {
 
 #[test]
 fn validates_contract_and_prunes_only_forward_dependencies() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[3]).unwrap();
     let s = g.input(&[3]).unwrap();
-    for bad in [g.input(&[]).unwrap(), Graph::default().input(&[3]).unwrap()] {
+    for bad in [
+        g.input(&[]).unwrap(),
+        Tracer::default().input(&[3]).unwrap(),
+    ] {
         assert!(x.with_gradient_of(&bad).is_err());
     }
     let y = x.with_gradient_of(&s.exp().unwrap()).unwrap();
-    let (_, mapping) = g.prepare_outputs_pruned(std::slice::from_ref(&y)).unwrap();
+    let (_, mapping) = g.prepare_pruned(std::slice::from_ref(&y)).unwrap();
     assert_eq!(mapping, [0]);
     let ds = y.sum(&[0], false).unwrap().grad(&[s]).unwrap().remove(0);
-    assert_eq!(g.prepare_outputs_pruned(&[ds]).unwrap().1, [1]);
+    assert_eq!(g.prepare_pruned(&[ds]).unwrap().1, [1]);
     // Inspecting/compiling snapshots must not erase the original AD edge.
-    assert_eq!(g.prepare_outputs_pruned(&[y]).unwrap().1, [0]);
+    assert_eq!(g.prepare_pruned(&[y]).unwrap().1, [0]);
     let unsupported = x.gt_mask(&x).unwrap();
     assert!(
         x.with_gradient_of(&unsupported)
@@ -350,7 +348,7 @@ fn validates_contract_and_prunes_only_forward_dependencies() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_surrogate_vjp_and_higher_derivatives_follow_backward_graph() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[3]).unwrap();
     let s = g.input(&[3]).unwrap();
     let seed = g.input(&[3]).unwrap();

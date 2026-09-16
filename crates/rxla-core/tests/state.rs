@@ -1,4 +1,4 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph, StateGraph};
+use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -46,7 +46,7 @@ fn symbolic_state_validation() {
     assert_eq!(value.shape(), [2]);
     assert!(
         graph
-            .write(&slot, &Graph::default().input(&[2]).unwrap())
+            .write(&slot, &Tracer::default().input(&[2]).unwrap())
             .is_err()
     );
     let wrong_shape = graph.constant(&[1], &[1.]).unwrap();

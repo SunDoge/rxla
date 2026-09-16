@@ -1,8 +1,8 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph, StateGraph};
+use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 
 #[test]
 fn iota_validates_axis_and_coordinate_range() {
-    let g = Graph::default();
+    let g = Tracer::default();
     for (shape, axis) in [
         (vec![], 0),
         (vec![2], 1),
@@ -20,9 +20,9 @@ fn real_iota_coordinates_on_each_axis_and_empty_arrays() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for dims in [[2, 3, 4], [2, 0, 4]] {
         for axis in 0..3 {
-            let g = Graph::default();
+            let g = Tracer::default();
             let indices = g.iota_i32(&dims, axis).unwrap();
-            let exe = g.compile_outputs(&client, &[indices]).unwrap();
+            let exe = g.compile_many(&client, &[indices]).unwrap();
             let actual = exe.execute(&[]).unwrap()[0].to_vec::<i32>().unwrap();
             let inner: i64 = dims[axis + 1..].iter().product();
             let expected: Vec<_> = (0..dims.iter().product::<i64>())

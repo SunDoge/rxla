@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn replication_padding_preflight_and_empty_axis_rules() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 0]).unwrap();
     assert_eq!(x.pad_replicate(&[[1, 3], [0, 0]]).unwrap().shape(), [6, 0]);
     assert!(x.pad_replicate(&[[0, 0], [0, 1]]).is_err());
@@ -25,7 +25,7 @@ fn real_replication_values_and_edge_gradient_multiplicities() {
         (vec![1, 2, 1], vec![[2, 3], [1, 0], [0, 2]]),
         (vec![2, 0], vec![[1, 2], [0, 0]]),
     ] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let input = g.input(&shape).unwrap();
         let output = input.pad_replicate(&padding).unwrap();
         let loss = output

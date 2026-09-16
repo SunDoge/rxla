@@ -95,7 +95,7 @@ fn err(message: impl Into<String>) -> Error {
 }
 
 #[derive(Clone)]
-pub struct Graph(Arc<Mutex<rxla_ir::ProgramIr>>);
+pub(crate) struct Graph(Arc<Mutex<rxla_ir::ProgramIr>>);
 
 impl Default for Graph {
     fn default() -> Self {
@@ -119,10 +119,6 @@ impl Default for Graph {
 pub struct Tensor {
     descriptor: std::rc::Rc<TensorDescriptor>,
 }
-
-/// Compatibility name for APIs that accept tensors of any runtime dtype.
-/// There is no separate output representation.
-pub type Output = Tensor;
 
 fn elements(dims: &[i64]) -> Result<usize> {
     dims.iter()
@@ -214,7 +210,7 @@ impl Graph {
 
     fn direct_program(
         &self,
-        outputs: &[Output],
+        outputs: &[Tensor],
         preserve_all_inputs: bool,
     ) -> Result<(
         LoweredProgram,
@@ -241,7 +237,7 @@ impl Graph {
 
     fn direct_lowered(
         &self,
-        outputs: &[Output],
+        outputs: &[Tensor],
         preserve_all_inputs: bool,
     ) -> Result<LoweredProgram> {
         self.direct_lowered_for(
@@ -253,7 +249,7 @@ impl Graph {
 
     fn direct_lowered_for(
         &self,
-        outputs: &[Output],
+        outputs: &[Tensor],
         preserve_all_inputs: bool,
         target: rxla_ir::LoweringTarget,
     ) -> Result<LoweredProgram> {
@@ -274,7 +270,7 @@ impl Graph {
         ))
     }
 
-    fn direct_lowered_pruned(&self, outputs: &[Output]) -> Result<(LoweredProgram, Vec<usize>)> {
+    fn direct_lowered_pruned(&self, outputs: &[Tensor]) -> Result<(LoweredProgram, Vec<usize>)> {
         if outputs
             .iter()
             .any(|output| !Arc::ptr_eq(&self.0, &output.graph().0))
@@ -300,10 +296,6 @@ impl Graph {
     }
     /// Export multiple F32 tensor results as textual StableHLO MLIR.
     pub fn stablehlo_many(&self, outputs: &[Tensor]) -> Result<String> {
-        self.stablehlo_outputs(outputs)
-    }
-    /// Export mixed tensor/index results from the native Pliron path.
-    pub fn stablehlo_outputs(&self, outputs: &[Output]) -> Result<String> {
         if outputs.is_empty() {
             return Err(err("at least one output is required"));
         }
@@ -321,9 +313,6 @@ impl Graph {
     }
 
     pub fn compile_many(&self, client: &Client, outputs: &[Tensor]) -> Result<Executable> {
-        self.compile_outputs(client, outputs)
-    }
-    pub fn compile_outputs(&self, client: &Client, outputs: &[Output]) -> Result<Executable> {
         let lowered = self.prepare_outputs(outputs)?;
         lowered.compile_uncached(client)
     }

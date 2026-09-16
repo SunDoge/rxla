@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn vjp_requires_matching_shape_owner_and_leaf_targets() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2]).unwrap();
     let y = x.exp().unwrap();
     assert!(
@@ -12,19 +12,22 @@ fn vjp_requires_matching_shape_owner_and_leaf_targets() {
     assert!(
         y.vjp(
             std::slice::from_ref(&x),
-            &Graph::default().input(&[2]).unwrap()
+            &Tracer::default().input(&[2]).unwrap()
         )
         .is_err()
     );
     assert!(y.vjp(std::slice::from_ref(&y), &x).is_err());
-    assert!(y.vjp(&[Graph::default().input(&[2]).unwrap()], &x).is_err());
+    assert!(
+        y.vjp(&[Tracer::default().input(&[2]).unwrap()], &x)
+            .is_err()
+    );
 }
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_vjp_runtime_cotangents_and_non_scalar_outputs() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     let w = g.input(&[3, 2]).unwrap();
     let seed = g.input(&[2, 2]).unwrap();
@@ -54,7 +57,7 @@ fn real_vjp_runtime_cotangents_and_non_scalar_outputs() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_vjp_does_not_differentiate_seed_as_an_extra_loss_factor() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2]).unwrap();
     let y = x.mul(&x).unwrap();
     let gradient = y.vjp(std::slice::from_ref(&x), &x).unwrap().remove(0);
@@ -91,7 +94,7 @@ fn real_vjp_does_not_differentiate_seed_as_an_extra_loss_factor() {
         [vec![8., 18.], vec![4., 6.]]
     );
     for shape in [vec![], vec![0, 2]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let seed = g.input(&shape).unwrap();
         let grads = x.neg().unwrap().vjp(&[x], &seed).unwrap();

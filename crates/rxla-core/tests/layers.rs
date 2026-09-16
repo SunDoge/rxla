@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn layer_shape_and_ownership_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3, 4]).unwrap();
     let w = g.input(&[5, 4]).unwrap();
     let b = g.input(&[5]).unwrap();
@@ -15,7 +15,7 @@ fn layer_shape_and_ownership_validation() {
     assert!(x.linear(&g.input(&[4, 5]).unwrap(), None).is_err());
     assert!(x.linear(&g.input(&[1, 5, 4]).unwrap(), None).is_err());
     assert!(x.linear(&w, Some(&g.input(&[1, 5]).unwrap())).is_err());
-    let foreign = Graph::default();
+    let foreign = Tracer::default();
     assert!(x.linear(&foreign.input(&[5, 4]).unwrap(), None).is_err());
     assert!(x.linear(&w, Some(&foreign.input(&[5]).unwrap())).is_err());
     for shape in [vec![], vec![3], vec![2, 4], vec![1, 2, 3, 4], vec![0]] {
@@ -59,7 +59,7 @@ fn close(actual: &[f32], expected: &[f64]) {
 fn real_linear_rank_and_bias() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for shape in [vec![3], vec![2, 3], vec![2, 2, 3]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let rows = shape.iter().product::<i64>() as usize / 3;
         let values: Vec<f32> = (0..rows * 3).map(|i| i as f32 - 2.).collect();
         let x = g.input(&shape).unwrap();
@@ -111,7 +111,7 @@ fn real_layer_norm_matches_centered_f64_reference() {
         (vec![3], vec![3], vec![2., 2., 2.]),
         (vec![2, 1], vec![1], vec![5., -7.]),
     ] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let count = normalized.iter().product::<i64>() as usize;
         let weights: Vec<f32> = (0..count).map(|i| 0.5 + i as f32).collect();

@@ -67,10 +67,10 @@ preserved by loading, flattening and eventual derive macros.
 
 ## Functionalization boundary
 
-`state_i32` registers an integer slot; `read_index`/`write_index` keep its values
-as Index tensors. `write_outputs` atomically records mixed typed updates through
-`Output::{Tensor, Index}`. Existing F32 methods remain available but reject I32
-slots. Plan metadata tracks dtype as well as shape for initial/replacement state
+`state_i32` registers an integer slot; reads and writes use ordinary I32
+`Tensor` values. `write_many` atomically records mixed-dtype updates without a
+parallel output representation. Existing F32 methods remain available but reject
+I32 slots. Plan metadata tracks dtype as well as shape for initial/replacement state
 and all result buffers. Session commits only after every typed result validates.
 The stateful_cache example records data writes and position increments together;
 callers pass only new data. Counter overflow is explicit wrapping I32 arithmetic,

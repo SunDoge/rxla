@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn rounding_stops_unsupported_reverse_paths() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[3]).unwrap();
     let mask = x.gt_mask(&x).unwrap();
     for y in [
@@ -46,7 +46,7 @@ fn real_rounding_matches_rust_and_explicit_zero_derivatives() {
     ];
     for shape in [vec![], vec![3, 6], vec![0, 6]] {
         let n = shape.iter().product::<i64>() as usize;
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let axes: Vec<_> = (0..shape.len()).collect();
         let rounded = [
@@ -105,7 +105,7 @@ fn real_rounding_matches_rust_and_explicit_zero_derivatives() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_fake_quantization_uses_explicit_clipped_surrogate() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[9]).unwrap();
     let clipped = x.clamp(-1., 1.).unwrap();
     let forward = clipped

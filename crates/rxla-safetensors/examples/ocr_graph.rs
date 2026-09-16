@@ -1,5 +1,5 @@
 //! Restricted exported OCR graph runner. Not a general ONNX importer.
-use rxla_core::{Client, Conv2dOptions, ConvTranspose2dOptions, Graph, Pool2dOptions, Tensor};
+use rxla_core::{Client, Conv2dOptions, ConvTranspose2dOptions, Pool2dOptions, Tensor, Tracer};
 use rxla_safetensors::SafeTensors;
 use serde::Deserialize;
 use serde_json::Value;
@@ -282,7 +282,7 @@ fn main() -> Result<()> {
         return Err("CPU or CUDA validation only".into());
     }
     let mut checkpoint = SafeTensors::open(directory.join("tensors.safetensors"))?;
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let mut values = HashMap::from([(bundle.input_name, graph.input(&bundle.input_shape)?)]);
     let mut weights = Vec::new();
     for name in &bundle.weights {

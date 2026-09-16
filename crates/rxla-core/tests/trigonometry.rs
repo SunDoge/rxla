@@ -1,11 +1,11 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_sine_cosine_values_and_four_derivatives() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for cosine in [false, true] {
-        let graph = Graph::default();
+        let graph = Tracer::default();
         let x = graph.input(&[9]).unwrap();
         let mut y = if cosine { x.cos() } else { x.sin() }.unwrap();
         let mut roots = vec![y.clone()];
@@ -50,7 +50,7 @@ fn real_sine_cosine_values_and_four_derivatives() {
         }
     }
     for shape in [vec![], vec![0, 3]] {
-        let graph = Graph::default();
+        let graph = Tracer::default();
         let x = graph.input(&shape).unwrap();
         let exe = graph
             .compile_many(&client, &[x.sin().unwrap(), x.cos().unwrap()])
@@ -71,7 +71,7 @@ fn real_sine_cosine_values_and_four_derivatives() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_runtime_positions_and_learnable_frequencies() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let positions = graph.input(&[3, 1]).unwrap();
     let frequencies = graph.input(&[1, 2]).unwrap();
     let angles = positions

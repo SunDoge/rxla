@@ -1,4 +1,4 @@
-use rxla_core::{Client, ConvTranspose2dOptions, Graph};
+use rxla_core::{Client, ConvTranspose2dOptions, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -35,7 +35,7 @@ fn real_transposed_convolution_gradients_match_scalar_scatter() {
             ConvTranspose2dOptions::default(),
         ),
     ] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let w = g.input(&kernel_shape).unwrap();
         let y = x.conv_transpose2d(&w, options).unwrap();
@@ -110,7 +110,7 @@ fn real_transposed_convolution_gradients_match_scalar_scatter() {
 
 #[test]
 fn transposed_kernel_gradient_is_outside_the_supported_training_surface() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 2, 2, 1]).unwrap();
     let w = g.input(&[2, 2, 1, 1]).unwrap();
     let loss = x

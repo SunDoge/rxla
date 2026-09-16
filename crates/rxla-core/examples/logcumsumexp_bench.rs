@@ -1,5 +1,5 @@
 //! Synthetic prefix benchmark: resident inputs, synchronous execute + download.
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 use std::time::Instant;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -31,7 +31,7 @@ fn main() -> Result<()> {
     );
     println!("length,mode,compile_ms,median_ms,p90_ms,max_abs_error");
     for length in [64, 256, 1024, 4096] {
-        let graph = Graph::default();
+        let graph = Tracer::default();
         let x = graph.input(&[4, length as i64])?;
         let scan = x.logcumsumexp_tree(1)?;
         let doubling = x.logcumsumexp(1)?;

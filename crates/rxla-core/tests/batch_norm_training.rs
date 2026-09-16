@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn training_batch_norm_validates_parameters_and_observation_count() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3, 2]).unwrap();
     let affine = g.input(&[2]).unwrap();
     for epsilon in [0., -1., f32::NAN, f32::INFINITY] {
@@ -10,7 +10,7 @@ fn training_batch_norm_validates_parameters_and_observation_count() {
     }
     assert!(x.batch_norm_training(3, &affine, &affine, 0.1).is_err());
     assert!(x.batch_norm_training(1, &affine, &affine, 0.1).is_err());
-    let foreign = Graph::default().input(&[2]).unwrap();
+    let foreign = Tracer::default().input(&[2]).unwrap();
     assert!(x.batch_norm_training(2, &foreign, &affine, 0.1).is_err());
     assert!(
         g.input(&[0, 2])
@@ -25,7 +25,7 @@ fn training_batch_norm_validates_parameters_and_observation_count() {
 fn real_training_batch_norm_statistics_and_all_gradients_match_f64() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for axis in 0..3 {
-        let g = Graph::default();
+        let g = Tracer::default();
         let shape = [2, 3, 2];
         let channels = shape[axis] as usize;
         let x = g.input(&shape).unwrap();
@@ -103,7 +103,7 @@ fn real_training_batch_norm_statistics_and_all_gradients_match_f64() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_training_batch_norm_single_observation() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2]).unwrap();
     let gamma = g.input(&[2]).unwrap();
     let beta = g.input(&[2]).unwrap();

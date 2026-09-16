@@ -1,12 +1,12 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph, StateGraph};
+use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 
 #[test]
 fn index_selection_validates_operands() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let mask = g.input(&[2]).unwrap();
     let value = g.input_i32(&[2]).unwrap();
     let wrong = g.scalar_i32(1).unwrap();
-    let foreign = Graph::default().input_i32(&[2]).unwrap();
+    let foreign = Tracer::default().input_i32(&[2]).unwrap();
     for invalid in [wrong, foreign] {
         assert!(mask.select(&invalid, &value).is_err());
         assert!(mask.select(&value, &invalid).is_err());
@@ -19,12 +19,12 @@ fn index_selection_validates_operands() {
 fn real_integer_selection_preserves_exact_values() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for shape in [vec![6], vec![], vec![0, 2]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let mask = g.input(&shape).unwrap();
         let a = g.input_i32(&shape).unwrap();
         let b = g.input_i32(&shape).unwrap();
         let selected = mask.select(&a, &b).unwrap();
-        let exe = g.compile_outputs(&client, &[selected]).unwrap();
+        let exe = g.compile_many(&client, &[selected]).unwrap();
         let len = if shape.is_empty() {
             1
         } else {

@@ -1,12 +1,12 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn validates_axis_and_lowers_multiplication_work() {
-    let g = Graph::default();
+    let g = Tracer::default();
     assert!(g.input(&[]).unwrap().cumprod(0).is_err());
     assert!(g.input(&[2]).unwrap().cumprod(1).is_err());
     for length in [8, 4096] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let y = g.input(&[length]).unwrap().cumprod(0).unwrap();
         let stablehlo = g.stablehlo(&y).unwrap();
         assert!(stablehlo.contains("stablehlo.multiply"));
@@ -54,7 +54,7 @@ fn real_products_zero_safe_vjp_and_hessian_match_polynomials() {
                     }
                 }
             }
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input(&shape).unwrap();
             let seed = g.input(&shape).unwrap();
             let vector = g.input(&shape).unwrap();

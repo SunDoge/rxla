@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph, RotaryLayout};
+use rxla_core::{Client, RotaryLayout, Tracer};
 
 #[test]
 fn rotary_shape_and_ownership_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let c = g.input(&[2]).unwrap();
     for shape in [&[][..], &[0], &[3]] {
         assert!(
@@ -18,7 +18,7 @@ fn rotary_shape_and_ownership_validation() {
         x.rotary_embedding(&full, &c, RotaryLayout::SplitHalf)
             .is_err()
     );
-    let foreign = Graph::default().input(&[2]).unwrap();
+    let foreign = Tracer::default().input(&[2]).unwrap();
     assert!(
         x.rotary_embedding(&c, &foreign, RotaryLayout::SplitHalf)
             .is_err()
@@ -40,7 +40,7 @@ fn rotary_shape_and_ownership_validation() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_rotary_layouts_match_f64_with_runtime_angles() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3, 4]).unwrap();
     let cos = g.input(&[3, 2]).unwrap();
     let sin = g.input(&[3, 2]).unwrap();

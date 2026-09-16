@@ -1,4 +1,4 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 // Independent F64 integration of the Gaussian PDF, not a backend erf call.
 fn exact_reference(x: f64) -> f64 {
@@ -14,7 +14,7 @@ fn exact_reference(x: f64) -> f64 {
 
 #[test]
 fn gelu_preserves_shapes_and_explicit_formula_choice() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     for shape in [vec![], vec![2, 3], vec![0, 4]] {
         let x = graph.input(&shape).unwrap();
         for (output, expected_op, absent_op) in [
@@ -34,7 +34,7 @@ fn gelu_preserves_shapes_and_explicit_formula_choice() {
 fn real_gelu_variants_match_independent_references() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let values: Vec<f32> = (-200..=200).map(|i| i as f32 / 20.).collect();
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[values.len() as i64]).unwrap();
     let outputs = graph
         .compile_many(&client, &[x.gelu().unwrap(), x.gelu_tanh().unwrap()])
@@ -69,7 +69,7 @@ fn real_gelu_variants_match_independent_references() {
         "GELU max absolute errors: erf={}, tanh={}",
         max_errors[0], max_errors[1]
     );
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[]).unwrap();
     assert_eq!(
         graph
@@ -79,7 +79,7 @@ fn real_gelu_variants_match_independent_references() {
             .unwrap(),
         [0.]
     );
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[0, 2]).unwrap();
     assert!(
         graph

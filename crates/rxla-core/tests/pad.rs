@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn padding_shape_validation_and_noop() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2, 3]).unwrap();
     assert_eq!(x.pad(&[[1, 2], [3, 4]], 0.).unwrap().shape(), [5, 10]);
     assert!(x.pad(&[[1, 2]], 0.).is_err());
@@ -25,7 +25,7 @@ fn real_padding_matches_row_major_reference() {
         (vec![0, 2], vec![[1, 2], [1, 1]]),
         (vec![0, 2], vec![[0, 0], [1, 1]]),
     ] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let output = x.pad(&padding, -7.5).unwrap();
         let dims = output.shape().to_vec();
@@ -57,7 +57,7 @@ fn real_padding_matches_row_major_reference() {
             assert_eq!(actual, expected);
         }
     }
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1]).unwrap();
     let nan_pad = x.pad(&[[1, 1]], f32::NAN).unwrap();
     let inf_pad = x.pad(&[[1, 1]], f32::NEG_INFINITY).unwrap();

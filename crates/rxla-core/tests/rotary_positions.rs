@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph, RotaryLayout};
+use rxla_core::{Client, RotaryLayout, Tracer};
 
 #[test]
 fn angles_require_matching_graph_and_half_width_broadcast() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[2, 3, 4]).unwrap();
     assert!(
         x.rotary_embedding_angles(&graph.input(&[3, 4]).unwrap(), RotaryLayout::SplitHalf)
@@ -10,7 +10,7 @@ fn angles_require_matching_graph_and_half_width_broadcast() {
     );
     assert!(
         x.rotary_embedding_angles(
-            &Graph::default().input(&[3, 2]).unwrap(),
+            &Tracer::default().input(&[3, 2]).unwrap(),
             RotaryLayout::SplitHalf
         )
         .is_err()
@@ -28,7 +28,7 @@ fn angles_require_matching_graph_and_half_width_broadcast() {
 fn real_rope_runtime_positions_and_frequency_gradients_for_both_layouts() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for layout in [RotaryLayout::SplitHalf, RotaryLayout::Interleaved] {
-        let graph = Graph::default();
+        let graph = Tracer::default();
         let x = graph.input(&[2, 3, 4]).unwrap();
         let positions = graph.input(&[3, 1]).unwrap();
         let frequencies = graph.input(&[2]).unwrap();

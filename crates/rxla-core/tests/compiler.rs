@@ -1,8 +1,8 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph, Tensor};
+use rxla_core::{CacheLimits, Client, Compiler, Tensor, Tracer};
 use std::rc::Rc;
 
-fn graph(value: f32) -> (Graph, Tensor) {
-    let g = Graph::default();
+fn graph(value: f32) -> (Tracer, Tensor) {
+    let g = Tracer::default();
     let x = g.input(&[2]).unwrap();
     let y = x.add_scalar(value).unwrap();
     (g, y)
@@ -18,20 +18,20 @@ fn lowered_program_needs_no_plugin_and_rejects_invalid_outputs() {
     send_sync::<rxla_core::LoweredProgram>();
     let (g, y) = graph(1.);
     g.prepare(&y).unwrap();
-    assert!(g.prepare_outputs(&[]).is_err());
-    assert!(Graph::default().prepare(&y).is_err());
-    assert!(g.prepare_outputs_pruned(&[]).is_err());
-    assert!(Graph::default().prepare_outputs_pruned(&[y]).is_err());
+    assert!(g.prepare_many(&[]).is_err());
+    assert!(Tracer::default().prepare(&y).is_err());
+    assert!(g.prepare_pruned(&[]).is_err());
+    assert!(Tracer::default().prepare_pruned(&[y]).is_err());
 }
 
 #[test]
 fn prepared_signature_reports_storage_types_and_compact_parameter_order() {
     use rxla_core::{DType, InputSpec};
-    let g = Graph::default();
+    let g = Tracer::default();
     let empty = g.input(&[2, 0]).unwrap();
     let index = g.input_i32_scalar().unwrap();
     let bf16 = g.input_bf16_as_f32(&[3]).unwrap();
-    let full = g.prepare_outputs(&[empty, index, bf16.clone()]).unwrap();
+    let full = g.prepare_many(&[empty, index, bf16.clone()]).unwrap();
     assert_eq!(full.input_count(), 3);
     assert_eq!(full.output_count(), 3);
     for (i, (shape, dtype)) in [
@@ -64,13 +64,13 @@ fn prepared_signature_reports_storage_types_and_compact_parameter_order() {
     }
     assert!(full.input_spec(3).is_none());
     assert!(full.input_spec(usize::MAX).is_none());
-    let (pruned, mapping) = g.prepare_outputs_pruned(&[bf16.clone(), bf16]).unwrap();
+    let (pruned, mapping) = g.prepare_pruned(&[bf16.clone(), bf16]).unwrap();
     assert_eq!(mapping, [2]);
     assert_eq!(pruned.input_count(), 1);
     assert_eq!(pruned.output_count(), 2);
     assert_eq!(pruned.input_spec(0), full.input_spec(2));
     let constant = g.constant(&[], &[1.]).unwrap();
-    let (constant, _) = g.prepare_outputs_pruned(&[constant]).unwrap();
+    let (constant, _) = g.prepare_pruned(&[constant]).unwrap();
     assert_eq!(constant.input_count(), 0);
     assert!(constant.input_spec(0).is_none());
     g.input(&[10]).unwrap();
@@ -84,7 +84,7 @@ fn prepared_signature_reports_storage_types_and_compact_parameter_order() {
 fn real_prepared_pruned_inputs_preserve_output_order_and_source_graph() {
     let client = client();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let g = Graph::default();
+    let g = Tracer::default();
     g.input(&[100]).unwrap(); // unused prefix
     let x = g.input(&[2]).unwrap();
     g.input_i32(&[]).unwrap(); // unused middle
@@ -92,10 +92,10 @@ fn real_prepared_pruned_inputs_preserve_output_order_and_source_graph() {
     let surrogate = g.input(&[2]).unwrap(); // backward-only input
     let y = x.with_gradient_of(&surrogate).unwrap();
     let outputs = [ids, y.clone(), y.clone()];
-    let before = g.stablehlo_outputs(&outputs).unwrap();
-    let (prepared, mapping) = g.prepare_outputs_pruned(&outputs).unwrap();
+    let before = g.stablehlo_many(&outputs).unwrap();
+    let (prepared, mapping) = g.prepare_pruned(&outputs).unwrap();
     assert_eq!(mapping, [1, 3]);
-    assert_eq!(g.stablehlo_outputs(&outputs).unwrap(), before);
+    assert_eq!(g.stablehlo_many(&outputs).unwrap(), before);
     let exe = compiler.compile_lowered(&prepared).unwrap();
     assert_eq!(exe.input_count(), 2);
     let input = client.buffer(&[2], &[3., -2.]).unwrap();
@@ -107,7 +107,7 @@ fn real_prepared_pruned_inputs_preserve_output_order_and_source_graph() {
     // Preparing a forward-only snapshot must not destroy the surrogate AD path.
     let loss = y.mul(&y).unwrap().sum(&[0], false).unwrap();
     let grad = loss.grad(&[surrogate]).unwrap().remove(0);
-    let (backward, mapping) = g.prepare_outputs_pruned(&[grad]).unwrap();
+    let (backward, mapping) = g.prepare_pruned(&[grad]).unwrap();
     assert_eq!(mapping, [1]);
     assert_eq!(
         compiler
@@ -118,7 +118,7 @@ fn real_prepared_pruned_inputs_preserve_output_order_and_source_graph() {
         [6., -4.]
     );
     let constant = g.constant(&[], &[7.]).unwrap();
-    let (constant, mapping) = g.prepare_outputs_pruned(&[constant]).unwrap();
+    let (constant, mapping) = g.prepare_pruned(&[constant]).unwrap();
     assert!(mapping.is_empty());
     assert_eq!(
         compiler
@@ -139,8 +139,8 @@ fn real_prepared_snapshot_shares_keys_and_freezes_typed_input_abi() {
         let (g, y) = graph(1.);
         let ids = g.input_i32(&[2]).unwrap();
         let outputs = [ids, y];
-        let prepared = g.prepare_outputs(&outputs).unwrap();
-        let ordinary = compiler.compile_outputs(&g, &outputs).unwrap();
+        let prepared = g.prepare_many(&outputs).unwrap();
+        let ordinary = compiler.compile_many(&g, &outputs).unwrap();
         let before = compiler.stats().compile_time;
         let cached = compiler.compile_lowered(&prepared).unwrap();
         assert!(Rc::ptr_eq(&ordinary, &cached));
@@ -149,10 +149,7 @@ fn real_prepared_snapshot_shares_keys_and_freezes_typed_input_abi() {
         // Snapshot must not acquire parameters added to the source graph later.
         g.input(&[]).unwrap();
         assert_eq!(
-            compiler
-                .compile_outputs(&g, &outputs)
-                .unwrap()
-                .input_count(),
+            compiler.compile_many(&g, &outputs).unwrap().input_count(),
             3
         );
         assert_eq!(
@@ -277,7 +274,7 @@ fn real_cache_byte_limits_and_disable() {
 fn real_cache_output_order_shape_and_client_isolation() {
     let client = client();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[2]).unwrap();
     let y = x.add_scalar(1.).unwrap();
     let xy = compiler.compile_many(&g, &[x.clone(), y.clone()]).unwrap();
@@ -295,7 +292,7 @@ fn real_cache_output_order_shape_and_client_isolation() {
     let original = compiler.compile(&a, &ya).unwrap();
     let mut other = Compiler::new(client, CacheLimits::default());
     assert!(!Rc::ptr_eq(&original, &other.compile(&a, &ya).unwrap()));
-    let differently_shaped = Graph::default();
+    let differently_shaped = Tracer::default();
     let z = differently_shaped
         .input(&[1, 2])
         .unwrap()
@@ -339,7 +336,7 @@ fn real_dead_branch_pruning_preserves_cache_and_input_abi() {
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_selective_invalidation_preserves_executables_and_lru() {
-    use rxla_core::{CacheLimits, Client, Compiler, Graph};
+    use rxla_core::{CacheLimits, Client, Compiler, Tracer};
     use std::rc::Rc;
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(
@@ -349,7 +346,7 @@ fn real_selective_invalidation_preserves_executables_and_lru() {
             max_key_bytes: 1024 * 1024,
         },
     );
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[1]).unwrap();
     let a = x.add_scalar(1.).unwrap();
     let b = x.add_scalar(2.).unwrap();

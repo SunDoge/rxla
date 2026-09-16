@@ -1,11 +1,11 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph, StateGraph};
+use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 
 #[test]
 fn validates_bitwise_shapes_owners_and_shift_counts() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input_i32(&[2]).unwrap();
     let short = graph.input_i32(&[1]).unwrap();
-    let foreign = Graph::default().input_i32(&[2]).unwrap();
+    let foreign = Tracer::default().input_i32(&[2]).unwrap();
     for rhs in [&short, &foreign] {
         assert!(x.bitwise_and(rhs).is_err());
         assert!(x.bitwise_or(rhs).is_err());
@@ -24,7 +24,7 @@ fn real_integer_bits_match_rust_bit_patterns() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     for shape in [vec![8], vec![], vec![0, 3]] {
-        let graph = Graph::default();
+        let graph = Tracer::default();
         let x = graph.input_i32(&shape).unwrap();
         let y = graph.input_i32(&shape).unwrap();
         let mut roots = vec![
@@ -40,7 +40,7 @@ fn real_integer_bits_match_rust_bit_patterns() {
                 x.shift_right_arithmetic(bits).unwrap(),
             ]);
         }
-        let executable = compiler.compile_outputs(&graph, &roots).unwrap();
+        let executable = compiler.compile_many(&graph, &roots).unwrap();
         let count = if shape.is_empty() {
             1
         } else {
@@ -121,7 +121,7 @@ fn real_resident_bitwise_transition_and_nondifferentiable_float_selection() {
         );
     }
     assert_eq!(compiler.stats().misses, 1);
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[3]).unwrap();
     let selected = x
         .argmax(0, false)

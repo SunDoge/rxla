@@ -1,15 +1,15 @@
-use rxla_core::{CacheLimits, Client, Compiler, Graph};
+use rxla_core::{CacheLimits, Client, Compiler, Tracer};
 
 #[test]
 fn explicit_positions_validate_rank_and_graph() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let q = g.input_i32(&[2]).unwrap();
     assert!(
         q.causal_attention_mask(&g.input_i32_scalar().unwrap())
             .is_err()
     );
     assert!(
-        q.causal_attention_mask(&Graph::default().input_i32(&[3]).unwrap())
+        q.causal_attention_mask(&Tracer::default().input_i32(&[3]).unwrap())
             .is_err()
     );
     assert_eq!(
@@ -25,7 +25,7 @@ fn explicit_positions_validate_rank_and_graph() {
 fn real_runtime_positions_reuse_executable_and_preserve_gradients() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let g = Graph::default();
+    let g = Tracer::default();
     let positions = g.input_i32(&[2]).unwrap();
     let keys = g.input_i32(&[4]).unwrap();
     let value = g.input(&[4, 1]).unwrap();
@@ -71,7 +71,7 @@ fn real_runtime_positions_reuse_executable_and_preserve_gradients() {
 
 #[test]
 fn mask_positions_are_checked() {
-    let g = Graph::default();
+    let g = Tracer::default();
     for (q, k, o) in [
         (-1, 2, 0),
         (2, -1, 0),
@@ -94,7 +94,7 @@ fn mask_positions_are_checked() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_full_and_chunked_causal_attention() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let q = g.input(&[5, 2]).unwrap();
     let k = g.input(&[7, 2]).unwrap();
     let v = g.input(&[7, 2]).unwrap();

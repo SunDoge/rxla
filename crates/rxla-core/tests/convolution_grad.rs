@@ -1,4 +1,4 @@
-use rxla_core::{Client, Conv2dOptions, Graph};
+use rxla_core::{Client, Conv2dOptions, Tracer};
 
 fn client() -> Client {
     unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap()
@@ -41,7 +41,7 @@ fn real_convolution_both_gradients_match_independent_scalar_loops() {
         ),
     ];
     for (shape, kernel_shape, options) in cases {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let w = g.input(&kernel_shape).unwrap();
         let y = x.conv2d(&w, options).unwrap();
@@ -134,7 +134,7 @@ fn real_convolution_empty_inputs_and_outputs_have_zero_gradients() {
         ),
         ([1, 1, 1, 2], [3, 3, 2, 3], Conv2dOptions::default()),
     ] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let w = g.input(&kernel_shape).unwrap();
         let loss = x
@@ -155,7 +155,7 @@ fn real_convolution_empty_inputs_and_outputs_have_zero_gradients() {
 
 #[test]
 fn convolution_training_is_outside_the_supported_pliron_scope() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 3, 3, 1]).unwrap();
     let w = g.input(&[2, 2, 1, 1]).unwrap();
     let loss = x

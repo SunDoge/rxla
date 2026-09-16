@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 /// One apply trace plus its immutable Pliron program builder.
 pub struct AppliedModel {
-    graph: Graph,
+    graph: Tracer,
     outputs: Vec<Tensor>,
     parameters: Vec<Tensor>,
     schema: ParamSchema,
@@ -46,7 +46,7 @@ impl<'model, 'parameters> BoundParameters<'model, 'parameters> {
 
 impl AppliedModel {
     pub(crate) fn new(
-        graph: Graph,
+        graph: Tracer,
         outputs: Vec<Tensor>,
         parameters: Vec<Tensor>,
         schema: ParamSchema,
@@ -92,17 +92,17 @@ impl AppliedModel {
 
     /// Lower model outputs while preserving the frozen schema ABI exactly.
     pub fn prepare(&self) -> Result<LoweredProgram> {
-        Ok(self.graph.prepare_outputs(&self.outputs)?)
+        Ok(self.graph.prepare_many(&self.outputs)?)
     }
 
     /// Compile this immutable model snapshot through the caller's cache-aware compiler.
     pub fn compile(&self, compiler: &mut Compiler) -> Result<Rc<Executable>> {
-        Ok(compiler.compile_outputs(&self.graph, &self.outputs)?)
+        Ok(compiler.compile_many(&self.graph, &self.outputs)?)
     }
 
     /// Lower graph-local outputs produced by a model transformation.
     pub fn prepare_tensors(&self, outputs: &[Tensor]) -> Result<LoweredProgram> {
-        Ok(self.graph.prepare_outputs(outputs)?)
+        Ok(self.graph.prepare_many(outputs)?)
     }
 
     /// Compile graph-local outputs produced by a model transformation.
@@ -111,7 +111,7 @@ impl AppliedModel {
         compiler: &mut Compiler,
         outputs: &[Tensor],
     ) -> Result<Rc<Executable>> {
-        Ok(compiler.compile_outputs(&self.graph, outputs)?)
+        Ok(compiler.compile_many(&self.graph, outputs)?)
     }
 
     /// Assemble positional inputs and path-addressed parameters into the model ABI.
@@ -209,7 +209,7 @@ impl AppliedModel {
         Ok(ModelArguments { values })
     }
 
-    pub fn into_parts(self) -> (Graph, Vec<Tensor>) {
+    pub fn into_parts(self) -> (Tracer, Vec<Tensor>) {
         (self.graph, self.outputs)
     }
 }

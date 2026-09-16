@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph, Tensor};
+use rxla_core::{Client, Tensor, Tracer};
 
 #[test]
 fn indexing_validation() {
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[3, 5]).unwrap();
     for (starts, limits, strides) in [
         (vec![0], vec![3], vec![1]),
@@ -25,7 +25,7 @@ fn indexing_validation() {
     assert!(Tensor::concatenate(std::slice::from_ref(&x), 2).is_err());
     assert!(Tensor::concatenate(&[x.clone(), g.input(&[2, 5]).unwrap()], 1).is_err());
     assert!(
-        Tensor::concatenate(&[x.clone(), Graph::default().input(&[3, 5]).unwrap()], 1).is_err()
+        Tensor::concatenate(&[x.clone(), Tracer::default().input(&[3, 5]).unwrap()], 1).is_err()
     );
     assert_eq!(x.slice(&[0, 0], &[3, 5], &[2, 3]).unwrap().shape(), [2, 2]);
     assert_eq!(x.narrow(1, 5, 0).unwrap().shape(), [3, 0]);
@@ -35,7 +35,7 @@ fn indexing_validation() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_slices_and_concatenation() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[3, 5]).unwrap();
     let pieces = x.split(1, &[2, 0, 3]).unwrap();
     let joined = Tensor::concatenate(&pieces, 1).unwrap();
@@ -63,7 +63,7 @@ fn real_slices_and_concatenation() {
 fn real_rotary_half_rotation() {
     // The rotate-half component of RoPE, shared by many Llama-style models.
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[1, 2, 4]).unwrap();
     let cos = g.input(&[1, 2, 4]).unwrap();
     let sin = g.input(&[1, 2, 4]).unwrap();

@@ -1,10 +1,10 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_embedding_nonlinear_loss_accumulates_repeated_rows() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let table = g.input(&[4, 2]).unwrap();
     let ids = g.input_i32(&[3]).unwrap();
     let embeddings = table.take(&ids, 0).unwrap();
@@ -31,7 +31,7 @@ fn real_embedding_nonlinear_loss_accumulates_repeated_rows() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_indexed_log_probability_loss_gradient() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let g = Graph::default();
+    let g = Tracer::default();
     let logits = g.input(&[2, 3]).unwrap();
     let labels = g.input_i32(&[2, 1]).unwrap();
     let loss = logits
@@ -73,7 +73,7 @@ fn real_take_grad_all_axes_multidimensional_repeated_and_clamped_indices() {
     let shape = [2, 3, 4];
     for axis in 0..3 {
         for index_shape in [vec![], vec![2, 2], vec![0]] {
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input(&shape).unwrap();
             let ids = g.input_i32(&index_shape).unwrap();
             let selected = x.take(&ids, axis).unwrap();
@@ -121,7 +121,7 @@ fn real_take_along_axis_grad_all_axes_and_empty_batches() {
         let shape = [2, 3, 4];
         let mut index_shape = shape;
         index_shape[axis] = 5;
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let ids = g.input_i32(&index_shape).unwrap();
         let weights = g.input(&index_shape).unwrap();
@@ -159,7 +159,7 @@ fn real_take_along_axis_grad_all_axes_and_empty_batches() {
             expected
         );
     }
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[0, 3]).unwrap();
     let ids = g.input_i32(&[0, 2]).unwrap();
     let grad = x

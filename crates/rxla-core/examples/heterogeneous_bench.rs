@@ -1,6 +1,6 @@
 //! Host-to-host latency: identical work on CPU, GPU, or CPU -> GPU -> CPU.
 //! Resident weights, synchronous stages, no model/performance portability claim.
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 use std::time::Instant;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     for (batch, width) in [(1usize, 64usize), (8, 256), (32, 512)] {
         let shape = [batch as i64, width as i64];
         let wshape = [width as i64, width as i64];
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape)?;
         let w = g.input(&wshape)?;
         let output = x
@@ -38,14 +38,14 @@ fn main() -> Result<()> {
             .sum(&[1], false)?;
         let whole_cpu = g.compile(&cpu, &output)?;
         let whole_gpu = g.compile(&gpu, &output)?;
-        let pre_g = Graph::default();
+        let pre_g = Tracer::default();
         let x = pre_g.input(&shape)?;
         let pre = pre_g.compile(&cpu, &x.mul_scalar(0.5)?.add_scalar(1.)?)?;
-        let infer_g = Graph::default();
+        let infer_g = Tracer::default();
         let x = infer_g.input(&shape)?;
         let w = infer_g.input(&wshape)?;
         let infer = infer_g.compile(&gpu, &x.matmul(&w)?)?;
-        let post_g = Graph::default();
+        let post_g = Tracer::default();
         let x = post_g.input(&shape)?;
         let post = post_g.compile(&cpu, &x.sum(&[1], false)?)?;
         let input: Vec<_> = (0..batch * width)

@@ -1,4 +1,4 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 fn client() -> Client {
     unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap()
@@ -10,7 +10,7 @@ fn real_max_grad_axes_keepdims_and_equal_winner_sharing() {
     let client = client();
     for axes in [vec![], vec![0], vec![1], vec![2], vec![2, 0], vec![0, 1, 2]] {
         for keepdims in [false, true] {
-            let g = Graph::default();
+            let g = Tracer::default();
             let x = g.input(&[2, 3, 2]).unwrap();
             let y = x.max(&axes, keepdims).unwrap();
             let seed = g.input(y.shape()).unwrap();
@@ -72,7 +72,7 @@ fn real_max_grad_axes_keepdims_and_equal_winner_sharing() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_max_grad_nonfinite_empty_and_higher_order() {
     let client = client();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[4, 3]).unwrap();
     let y = x.max(&[1], false).unwrap();
     let seed = g.constant(&[4], &[6., 6., 6., 6.]).unwrap();
@@ -104,7 +104,7 @@ fn real_max_grad_nonfinite_empty_and_higher_order() {
         (vec![2, 0, 3], vec![1]),
         (vec![0, 3], vec![1]),
     ] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let y = x.max(&axes, true).unwrap();
         let count: usize = y.shape().iter().map(|&d| d as usize).product();
@@ -119,7 +119,7 @@ fn real_max_grad_nonfinite_empty_and_higher_order() {
         }
     }
 
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[3]).unwrap();
     let loss = x.max(&[0], false).unwrap().square().unwrap();
     let first = loss.grad(std::slice::from_ref(&x)).unwrap().remove(0);

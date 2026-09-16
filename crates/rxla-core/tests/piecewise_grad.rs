@@ -1,4 +1,4 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 fn client() -> Client {
     unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap()
@@ -8,7 +8,7 @@ fn client() -> Client {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_minmax_broadcast_ties_and_shared_operands() {
     let client = client();
-    let g = Graph::default();
+    let g = Tracer::default();
     let a = g.input(&[2, 3]).unwrap();
     let b = g.input(&[3]).unwrap();
     let seed = g.input(&[2, 3]).unwrap();
@@ -59,7 +59,7 @@ fn real_minmax_broadcast_ties_and_shared_operands() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_abs_clamp_and_nonfinite_conventions() {
     let client = client();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[8]).unwrap();
     let seed = g.constant(&[8], &[2.; 8]).unwrap();
     let mut outputs = x
@@ -87,7 +87,7 @@ fn real_abs_clamp_and_nonfinite_conventions() {
     assert_eq!(actual[1], [0., 1., 2., 2., 1., 0., 0., 0.]);
     assert_eq!(actual[2], [0.; 8]);
 
-    let g = Graph::default();
+    let g = Tracer::default();
     let a = g.input(&[6]).unwrap();
     let b = g.input(&[6]).unwrap();
     let seed = g.constant(&[6], &[2.; 6]).unwrap();
@@ -128,7 +128,7 @@ fn real_abs_clamp_and_nonfinite_conventions() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_softplus_gradient_at_zero_and_smooth_second_derivative() {
     let client = client();
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[7]).unwrap();
     let y = x.softplus().unwrap();
     let gradient = y
@@ -148,7 +148,7 @@ fn real_softplus_gradient_at_zero_and_smooth_second_derivative() {
     }
     assert_eq!(&actual[1][2..4], &[0.5, 0.5]);
     for shape in [vec![], vec![0, 2]] {
-        let g = Graph::default();
+        let g = Tracer::default();
         let x = g.input(&shape).unwrap();
         let seed = g.input(&shape).unwrap();
         let roots = x.softplus().unwrap().vjp(&[x], &seed).unwrap();
@@ -160,7 +160,7 @@ fn real_softplus_gradient_at_zero_and_smooth_second_derivative() {
             [vec![1.; values.len()]]
         );
     }
-    let g = Graph::default();
+    let g = Tracer::default();
     let x = g.input(&[3]).unwrap();
     let first = x
         .softplus()

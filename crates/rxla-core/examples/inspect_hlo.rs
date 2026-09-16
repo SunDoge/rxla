@@ -1,5 +1,5 @@
 //! Print StableHLO before compilation and a compact optimized-HLO inventory.
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 use rxla_xla_proto::xla::HloModuleProto;
 
 fn print_module(label: &str, module: &HloModuleProto) {
@@ -23,7 +23,7 @@ fn print_module(label: &str, module: &HloModuleProto) {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?)? };
-    let graph = Graph::default();
+    let graph = Tracer::default();
     let x = graph.input(&[4])?;
     let output = x.add_scalar(0.)?.mul_scalar(2.)?;
     println!("Frontend StableHLO:\n{}", graph.stablehlo(&output)?);

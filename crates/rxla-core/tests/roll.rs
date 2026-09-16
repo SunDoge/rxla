@@ -1,8 +1,8 @@
-use rxla_core::{Client, Graph};
+use rxla_core::{Client, Tracer};
 
 #[test]
 fn roll_validates_axis_even_for_zero_shift() {
-    let graph = Graph::default();
+    let graph = Tracer::default();
     assert!(graph.input(&[]).unwrap().roll(0, 0).is_err());
     assert!(graph.input(&[0]).unwrap().roll(0, 1).is_err());
     assert_eq!(
@@ -23,7 +23,7 @@ fn real_roll_values_weighted_gradients_and_inverse() {
     for shape in [vec![5], vec![2, 3], vec![2, 1, 3], vec![0, 3]] {
         for axis in 0..shape.len() {
             for shift in [0, 1, -1, 6, i64::MIN, i64::MAX] {
-                let graph = Graph::default();
+                let graph = Tracer::default();
                 let x = graph.input(&shape).unwrap();
                 let y = x.roll(shift, axis).unwrap();
                 let len = shape.iter().product::<i64>() as usize;
