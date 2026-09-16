@@ -169,6 +169,13 @@ where
         trace_once(|cx| (self.apply)(cx))
     }
 
+    /// Trace once with every parameter stored as resident session state.
+    pub fn trace_resident_all(&self) -> Result<(ParameterSelection, AppliedModel)> {
+        let applied = trace_once_resident_all(|cx| (self.apply)(cx))?;
+        let selection = applied.schema().select_all();
+        Ok((selection, applied))
+    }
+
     /// Discover the schema and trace a caller-selected resident parameter set.
     ///
     /// The owned selection is returned for later transforms such as SGD or
@@ -213,6 +220,16 @@ where
         F: ModelHandler<I, Marker>,
     {
         trace_once(|cx| self.apply.invoke(cx, &self.inputs))
+    }
+
+    /// Trace typed inputs once with every parameter stored as resident state.
+    pub fn trace_resident_all<Marker>(&self) -> Result<(ParameterSelection, AppliedModel)>
+    where
+        F: ModelHandler<I, Marker>,
+    {
+        let applied = trace_once_resident_all(|cx| self.apply.invoke(cx, &self.inputs))?;
+        let selection = applied.schema().select_all();
+        Ok((selection, applied))
     }
 
     /// Discover typed inputs and trace a caller-selected resident parameter set.
@@ -260,6 +277,7 @@ enum ParamMode {
     Init {
         schema: ParamSchema,
         values: BTreeMap<String, Tensor>,
+        resident_all: bool,
     },
     Apply {
         schema: ParamSchema,
@@ -343,6 +361,14 @@ pub struct Rng<'a> {
 
 impl Cx {
     fn init() -> Self {
+        Self::init_with_residency(false)
+    }
+
+    fn init_resident_all() -> Self {
+        Self::init_with_residency(true)
+    }
+
+    fn init_with_residency(resident_all: bool) -> Self {
         Self {
             graph: StateGraph::default(),
             scope: Vec::new(),
@@ -351,6 +377,7 @@ impl Cx {
             mode: ParamMode::Init {
                 schema: ParamSchema::default(),
                 values: BTreeMap::new(),
+                resident_all,
             },
             states: BTreeMap::new(),
             rngs: BTreeMap::new(),
@@ -428,7 +455,11 @@ impl Cx {
             &mut self.resident_parameters,
         );
         match mode {
-            ParamMode::Init { schema, values } => {
+            ParamMode::Init {
+                schema,
+                values,
+                resident_all,
+            } => {
                 if let Some(existing) = schema.get(&path) {
                     ensure!(existing == &requested, IncompatibleParameterSnafu { path });
                     return Ok(values
@@ -436,7 +467,13 @@ impl Cx {
                         .expect("schema and parameter value are inserted together")
                         .clone());
                 }
-                let value = parameter_tensor(graph, shape, dtype)?;
+                let value = if *resident_all {
+                    let (value, slot) = resident_parameter_tensor(graph, &path, shape, dtype)?;
+                    resident_parameters.insert(path.clone(), slot);
+                    value
+                } else {
+                    parameter_tensor(graph, shape, dtype)?
+                };
                 schema.push_parameter(requested);
                 self.effect_index += 1;
                 values.insert(path, value.clone());
@@ -468,13 +505,7 @@ impl Cx {
                     }
                 );
                 let value = if resident.contains(&ParameterId::from_index(parameter_index)) {
-                    let slot = graph.state_named(&format!("__parameter.{path}"), shape, dtype)?;
-                    let stored = graph.read(&slot)?;
-                    let value = match dtype {
-                        DType::BF16 => stored.cast(DType::F32)?,
-                        DType::F32 | DType::U8 => stored,
-                        _ => return UnsupportedParameterDTypeSnafu { dtype }.fail(),
-                    };
+                    let (value, slot) = resident_parameter_tensor(graph, &path, shape, dtype)?;
                     resident_parameters.insert(path.clone(), slot);
                     value
                 } else {
@@ -734,7 +765,7 @@ impl Cx {
 
     fn parameter_tensors(&self) -> Vec<Tensor> {
         let (schema, values) = match &self.mode {
-            ParamMode::Init { schema, values } | ParamMode::Apply { schema, values, .. } => {
+            ParamMode::Init { schema, values, .. } | ParamMode::Apply { schema, values, .. } => {
                 (schema, values)
             }
         };
@@ -873,6 +904,22 @@ fn parameter_tensor(graph: &mut StateGraph, shape: &[i64], dtype: DType) -> Resu
     }
 }
 
+fn resident_parameter_tensor(
+    graph: &mut StateGraph,
+    path: &str,
+    shape: &[i64],
+    dtype: DType,
+) -> Result<(Tensor, StateSlot)> {
+    let slot = graph.state_named(&format!("__parameter.{path}"), shape, dtype)?;
+    let stored = graph.read(&slot)?;
+    let value = match dtype {
+        DType::BF16 => stored.cast(DType::F32)?,
+        DType::F32 | DType::U8 => stored,
+        _ => return UnsupportedParameterDTypeSnafu { dtype }.fail(),
+    };
+    Ok((value, slot))
+}
+
 fn validate_name(name: &str) -> Result<()> {
     ensure!(
         !name.is_empty() && !name.contains('.'),
@@ -890,7 +937,19 @@ fn init<T>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ParamSchema, T)> 
 }
 
 fn trace_once<T: ModelOutputs>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<AppliedModel> {
-    let mut cx = Cx::init();
+    trace_once_with(Cx::init(), body)
+}
+
+fn trace_once_resident_all<T: ModelOutputs>(
+    body: impl FnOnce(&mut Cx) -> Result<T>,
+) -> Result<AppliedModel> {
+    trace_once_with(Cx::init_resident_all(), body)
+}
+
+fn trace_once_with<T: ModelOutputs>(
+    mut cx: Cx,
+    body: impl FnOnce(&mut Cx) -> Result<T>,
+) -> Result<AppliedModel> {
     let outputs = body(&mut cx)?.into_tensors();
     cx.finish_rngs()?;
     let schema = match &cx.mode {
@@ -899,7 +958,7 @@ fn trace_once<T: ModelOutputs>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Resul
     };
     let parameters = cx.parameter_tensors();
     let states = cx.state_slots(&schema);
-    let resident_parameters = vec![None; schema.parameters().len()];
+    let resident_parameters = cx.resident_parameter_slots(&schema);
     Ok(AppliedModel::new(
         cx.graph,
         states,
@@ -1000,6 +1059,22 @@ mod tests {
         assert_eq!(applied.schema().parameters().len(), 2);
         assert_eq!(applied.outputs()[0].shape(), [2, 3]);
         assert_eq!(applied.prepare().unwrap().input_count(), 3);
+    }
+
+    #[test]
+    fn all_resident_trace_invokes_the_apply_body_once() {
+        let calls = Cell::new(0);
+        let definition = Model::new(|cx: &mut Cx, input: Tensor| {
+            calls.set(calls.get() + 1);
+            cx.layer("head")?.linear(3).apply(&input)
+        })
+        .inputs(ModelInput::new([2, 4]));
+
+        let (selection, applied) = definition.trace_resident_all().unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(selection.len(), 2);
+        assert_eq!(applied.resident_parameters().count(), 2);
+        assert_eq!(applied.prepare_stateful().unwrap().input_indices(), [0]);
     }
 
     #[test]
@@ -1303,10 +1378,8 @@ mod tests {
             cx.layer("head")?.linear(2).bias(false).apply(&input)
         })
         .inputs(ModelInput::new([1, 3]));
-        let schema = definition.init().unwrap();
-        let applied = definition
-            .apply_resident(&schema, &schema.select_all())
-            .unwrap();
+        let (_, applied) = definition.trace_resident_all().unwrap();
+        let schema = applied.schema().clone();
         let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
         let program = applied.compile_stateful(&mut compiler).unwrap();
         assert!(matches!(

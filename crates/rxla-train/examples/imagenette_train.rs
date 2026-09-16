@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use rxla_core::{
     CacheLimits, Client, Compiler, Conv2dOptions, DType, PendingHostUpload, Pool2dOptions, Tensor,
 };
-use rxla_nn::{AppliedModel, Cx, Model, ModelInput, ParamSchema, Result as NnResult};
+use rxla_nn::{AppliedModel, Cx, Model, ModelInput, Result as NnResult};
 use rxla_train::{BoundedPipeline, DataRng, PipelineResult, apply_model_sgd};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -419,7 +419,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gpu = unsafe { Client::load(&args.gpu_plugin) }?;
     let batch_size = args.batch_size;
     let definition = Model::new(resnet18_train).inputs(resnet18_inputs(batch_size));
-    let (trainable, mut model) = definition.trace_resident(ParamSchema::select_all)?;
+    let (trainable, mut model) = definition.trace_resident_all()?;
     let schema = model.schema().clone();
     let metrics = Tensor::stack(&[model.outputs()[0].clone(), model.outputs()[2].clone()], 0)?;
     let loss = model.outputs()[0].clone();

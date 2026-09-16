@@ -31,9 +31,7 @@ fn safetensors_initializes_and_exports_a_resident_model_session() {
         unsafe { Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path")) }
             .unwrap();
     let definition = Model::new(linear).inputs(ModelInput::new([1, 3]));
-    let (_, model) = definition
-        .trace_resident(|schema| schema.select_all())
-        .unwrap();
+    let (_, model) = definition.trace_resident_all().unwrap();
     let schema = model.schema().clone();
     let weights = checkpoint.load_parameter_schema(&client, &schema).unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());

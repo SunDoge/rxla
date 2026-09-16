@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use rxla_core::{
     Buffer, CacheLimits, Client, Compiler, Conv2dOptions, DType, PendingHostUpload, Runtime, Tensor,
 };
-use rxla_nn::{Cx, Model, ModelInput, ParamSchema, Result as NnResult};
+use rxla_nn::{Cx, Model, ModelInput, Result as NnResult};
 use rxla_train::{DataRng, apply_model_sgd};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -282,7 +282,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batch_size = args.batch_size;
     let (trainable, mut model) = Model::new(classifier)
         .inputs(classifier_inputs(batch_size))
-        .trace_resident(ParamSchema::select_all)?;
+        .trace_resident_all()?;
     let loss = model.outputs()[0].clone();
     apply_model_sgd(&mut model, &trainable, &loss, args.learning_rate)?;
     let mut compiler = Compiler::new(gpu.clone(), CacheLimits::default());

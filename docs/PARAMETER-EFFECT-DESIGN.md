@@ -205,6 +205,12 @@ rxla_train::apply_model_sgd(&mut model, &trainable, &loss, 0.01)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+When every parameter is resident, `trace_resident_all()` avoids both the
+selection closure and the schema-discovery replay. It declares resident slots
+during the single model-body invocation and returns the all-parameter selection
+with the applied model. Arbitrary schema-dependent selections continue to use
+`trace_resident` and its explicit two-phase interpretation.
+
 The selected `ParameterSelection` is interpreted as session-owned state.
 Those parameters disappear from the visible execution ABI and must be
 initialized once, by canonical schema path, through `ModelSessionBuilder`.
