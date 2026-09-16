@@ -9,9 +9,10 @@ fn apply(cx: &mut Cx, input: Tensor) -> Result<Tensor> {
 }
 
 fn main() -> Result<()> {
-    let (schema, model) = Model::new(apply)
+    let model = Model::new(apply)
         .inputs(ModelInput::new([32, 784]))
         .trace()?;
+    let schema = model.schema();
 
     println!("parameters: {}", schema.parameters().len());
     println!("StableHLO inputs: {}", model.prepare()?.input_count());

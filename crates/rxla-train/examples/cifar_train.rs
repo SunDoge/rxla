@@ -280,7 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gpu = unsafe { Client::load(&args.gpu_plugin) }?;
     let mut augmentation_runtime = Runtime::new(cpu)?;
     let batch_size = args.batch_size;
-    let (_schema, trainable, mut model) = Model::new(classifier)
+    let (trainable, mut model) = Model::new(classifier)
         .inputs(classifier_inputs(batch_size))
         .trace_resident(ParamSchema::select_all)?;
     let loss = model.outputs()[0].clone();
@@ -371,10 +371,11 @@ mod tests {
 
     #[test]
     fn resnet20_has_expected_depth_and_state_schema() {
-        let (schema, model) = Model::new(classifier)
+        let model = Model::new(classifier)
             .inputs(classifier_inputs(4))
             .trace()
             .unwrap();
+        let schema = model.schema();
         let convolution_weights = schema
             .parameters()
             .iter()

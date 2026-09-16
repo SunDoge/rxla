@@ -275,7 +275,8 @@ mod tests {
         let definition =
             Model::new(|cx: &mut Cx, input: Tensor| cx.layer("head")?.linear(2).apply(&input))
                 .inputs(crate::ModelInput::new([1, 3]));
-        let (schema, model) = definition.trace().unwrap();
+        let model = definition.trace().unwrap();
+        let schema = model.schema();
         let first = schema.initialize(&client, 42).unwrap();
         let second = schema.initialize(&client, 42).unwrap();
         assert_eq!(first.len(), 2);
@@ -305,13 +306,14 @@ mod tests {
         let definition =
             Model::new(|cx: &mut Cx, input: Tensor| cx.layer("norm")?.batch_norm().apply(&input))
                 .inputs(crate::ModelInput::new([1, 2, 2, 3]));
-        let (schema, _, model) = definition
+        let (_, model) = definition
             .trace_resident(|schema| {
                 schema
                     .select_all()
                     .matching(|_, parameter| parameter.path() == "norm.weight")
             })
             .unwrap();
+        let schema = model.schema();
         assert_eq!(model.resident_parameters().count(), 1);
         assert_eq!(
             schema.get("norm.weight").unwrap().initializer(),

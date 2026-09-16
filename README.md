@@ -61,14 +61,14 @@ fn apply(cx: &mut Cx, image: Tensor, label: Tensor) -> Result<(Tensor, Tensor)> 
     Ok((loss, logits))
 }
 
-let (schema, model) = Model::new(apply)
+let model = Model::new(apply)
     .inputs((
         ModelInput::new([32, 768]),
         ModelInput::new([32]).with_dtype(DType::I32),
     ))
     .trace()?;
 
-assert_eq!(schema.parameters()[0].shape(), [10, 768]);
+assert_eq!(model.schema().parameters()[0].shape(), [10, 768]);
 assert_eq!(model.outputs().len(), 2);
 ```
 

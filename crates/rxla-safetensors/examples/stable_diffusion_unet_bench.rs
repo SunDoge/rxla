@@ -77,7 +77,8 @@ fn run(args: Args) -> Result<()> {
         ModelInput::new([1, 32]),
         ModelInput::new([1, 77, 32]),
     ));
-    let (schema, applied) = model.trace()?;
+    let applied = model.trace()?;
+    let schema = applied.schema();
 
     let mut checkpoint = SafeTensors::open(&args.weights)?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());

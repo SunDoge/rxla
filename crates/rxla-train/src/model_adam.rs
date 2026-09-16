@@ -354,7 +354,8 @@ mod tests {
 
     #[test]
     fn adam_lowers_parameter_and_moment_updates_together() {
-        let (schema, mut model) = Model::new(linear_loss).trace().unwrap();
+        let mut model = Model::new(linear_loss).trace().unwrap();
+        let schema = model.schema().clone();
         let selection = schema.select_under("linear");
         let loss = model.outputs()[0].clone();
         let step =
@@ -410,7 +411,8 @@ mod tests {
 
     #[test]
     fn adam_rejects_invalid_options() {
-        let (schema, mut model) = Model::new(linear_loss).trace().unwrap();
+        let mut model = Model::new(linear_loss).trace().unwrap();
+        let schema = model.schema().clone();
         let options = AdamOptions {
             beta2: 1.0,
             ..AdamOptions::default()
@@ -425,7 +427,7 @@ mod tests {
     #[test]
     fn resident_adam_hides_parameter_replacements_from_the_result_abi() {
         let definition = Model::new(linear_loss);
-        let (_, selection, mut model) = definition
+        let (selection, mut model) = definition
             .trace_resident(|schema| schema.select_under("linear"))
             .unwrap();
         let loss = model.outputs()[0].clone();
@@ -454,7 +456,8 @@ mod tests {
             Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
         }
         .unwrap();
-        let (schema, mut model) = Model::new(regression_loss).trace().unwrap();
+        let mut model = Model::new(regression_loss).trace().unwrap();
+        let schema = model.schema().clone();
         let selection = schema.select_under("linear");
         let loss = model.outputs()[0].clone();
         let step = prepare_model_adam(
@@ -515,9 +518,10 @@ mod tests {
         }
         .unwrap();
         let definition = Model::new(regression_loss);
-        let (schema, selection, mut model) = definition
+        let (selection, mut model) = definition
             .trace_resident(|schema| schema.select_under("linear"))
             .unwrap();
+        let schema = model.schema().clone();
         let loss = model.outputs()[0].clone();
         apply_model_adam(
             &mut model,

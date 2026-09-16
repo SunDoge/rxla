@@ -288,7 +288,8 @@ mod tests {
 
     #[test]
     fn linear_sgd_selects_differentiates_and_lowers_one_weight() {
-        let (schema, model) = Model::new(linear_loss).trace().unwrap();
+        let model = Model::new(linear_loss).trace().unwrap();
+        let schema = model.schema().clone();
         let selection = schema.select_under("linear");
         let step = prepare_model_sgd(&model, &selection, &model.outputs()[0], 0.1).unwrap();
 
@@ -304,7 +305,8 @@ mod tests {
 
     #[test]
     fn linear_sgd_rejects_empty_selection_and_bad_rate() {
-        let (schema, model) = Model::new(linear_loss).trace().unwrap();
+        let model = Model::new(linear_loss).trace().unwrap();
+        let schema = model.schema().clone();
         let empty = schema.select_under("missing");
         assert!(matches!(
             prepare_model_sgd(&model, &empty, &model.outputs()[0], 0.1),
@@ -348,7 +350,8 @@ mod tests {
             Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
         }
 
-        let (schema, model) = Model::new(stateful_loss).trace().unwrap();
+        let model = Model::new(stateful_loss).trace().unwrap();
+        let schema = model.schema().clone();
         let step =
             prepare_model_sgd(&model, &schema.select_all(), &model.outputs()[0], 0.1).unwrap();
 
@@ -362,7 +365,7 @@ mod tests {
     #[test]
     fn resident_sgd_hides_parameter_replacements_from_the_result_abi() {
         let definition = Model::new(linear_loss);
-        let (_, selection, mut model) = definition
+        let (selection, mut model) = definition
             .trace_resident(|schema| schema.select_under("linear"))
             .unwrap();
         let loss = model.outputs()[0].clone();
@@ -378,7 +381,8 @@ mod tests {
 
     #[test]
     fn resident_sgd_rejects_an_input_backed_selection() {
-        let (schema, mut model) = Model::new(linear_loss).trace().unwrap();
+        let mut model = Model::new(linear_loss).trace().unwrap();
+        let schema = model.schema().clone();
         let selection = schema.select_all();
         let loss = model.outputs()[0].clone();
         assert!(matches!(
@@ -404,7 +408,8 @@ mod tests {
             Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
         }
         .expect("load CPU plugin");
-        let (schema, model) = Model::new(stateful_loss).trace().unwrap();
+        let model = Model::new(stateful_loss).trace().unwrap();
+        let schema = model.schema().clone();
         let step =
             prepare_model_sgd(&model, &schema.select_all(), &model.outputs()[0], 0.1).unwrap();
         let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
@@ -440,7 +445,8 @@ mod tests {
             Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
         }
         .expect("load CPU plugin");
-        let (schema, model) = Model::new(regression_loss).trace().unwrap();
+        let model = Model::new(regression_loss).trace().unwrap();
+        let schema = model.schema().clone();
         let selection = schema.select_under("linear");
         let step = prepare_model_sgd(&model, &selection, &model.outputs()[0], 0.1).unwrap();
         let output_plan = step.outputs_with(&[]);
@@ -511,9 +517,10 @@ mod tests {
         }
         .expect("load CPU plugin");
         let definition = Model::new(regression_loss);
-        let (schema, selection, mut model) = definition
+        let (selection, mut model) = definition
             .trace_resident(|schema| schema.select_under("linear"))
             .unwrap();
+        let schema = model.schema().clone();
         let slot = model.resident_parameters().next().unwrap().2.clone();
         assert_eq!(
             model.prepare_stateful().unwrap().state_type(&slot).unwrap(),

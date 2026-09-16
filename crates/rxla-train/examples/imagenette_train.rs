@@ -419,7 +419,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gpu = unsafe { Client::load(&args.gpu_plugin) }?;
     let batch_size = args.batch_size;
     let definition = Model::new(resnet18_train).inputs(resnet18_inputs(batch_size));
-    let (schema, trainable, mut model) = definition.trace_resident(ParamSchema::select_all)?;
+    let (trainable, mut model) = definition.trace_resident(ParamSchema::select_all)?;
+    let schema = model.schema().clone();
     let metrics = Tensor::stack(&[model.outputs()[0].clone(), model.outputs()[2].clone()], 0)?;
     let loss = model.outputs()[0].clone();
     apply_model_sgd(&mut model, &trainable, &loss, args.learning_rate)?;
@@ -521,10 +522,11 @@ mod tests {
 
     #[test]
     fn resnet18_schema_has_eighteen_convolutions_and_stateful_norms() {
-        let (schema, model) = Model::new(resnet18_train)
+        let model = Model::new(resnet18_train)
             .inputs(resnet18_inputs(2))
             .trace()
             .unwrap();
+        let schema = model.schema();
         let convolution_count = schema
             .parameters()
             .iter()

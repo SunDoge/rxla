@@ -37,6 +37,9 @@ Instead, an explicit interpreter chooses the meaning of the same effect:
 Conceptually, callers capture a model body in `Model` once. `Model::trace`
 interprets it once to discover the schema while retaining that same applied IR;
 ordinary tracing does not rebuild a large model body in a second pass. The
+result is the `AppliedModel` itself, and its frozen declarations remain
+available through `model.schema()` instead of being returned as a duplicate
+tuple element. The
 lower-level `init` and `apply` methods remain available when checkpoint tooling
 needs to inspect or restore a schema between those phases. This is an API
 boundary, not a second model implementation: users never write a separate init
@@ -61,10 +64,10 @@ fn apply(cx: &mut Cx, x: Tensor) -> Result<Tensor> {
     cx.layer("head")?.linear(3).apply(&x)
 }
 
-let (schema, applied) = Model::new(apply)
+let applied = Model::new(apply)
     .inputs(ModelInput::new([2, 4]))
     .trace()?;
-assert_eq!(schema.parameters()[0].path(), "hidden.weight");
+assert_eq!(applied.schema().parameters()[0].path(), "hidden.weight");
 assert_eq!(applied.outputs()[0].shape(), [2, 3]);
 # Ok::<(), rxla::nn::Error>(())
 ```
@@ -88,7 +91,7 @@ let model = Model::new(apply).inputs((
     ModelInput::new([4, 32]),
     ModelInput::new([4, 32]),
 ));
-let (_, applied) = model.trace()?;
+let applied = model.trace()?;
 assert_eq!(applied.schema().inputs().len(), 2);
 # Ok::<(), rxla::nn::Error>(())
 ```
@@ -165,8 +168,8 @@ The deliberately small initial training surface provides fused SGD and Adam:
 #     let y = cx.layer("linear")?.linear(1).bias(false).apply(&x)?;
 #     Ok(y.mul(&y)?.sum(&[0, 1], false)?)
 # }
-let (schema, model) = Model::new(linear_loss).trace()?;
-let trainable = schema.select_under("linear");
+let model = Model::new(linear_loss).trace()?;
+let trainable = model.schema().select_under("linear");
 let step = prepare_model_sgd(&model, &trainable, &model.outputs()[0], 0.01)?;
 let stablehlo = step.prepare(&model)?;
 assert_eq!(stablehlo.output_count(), trainable.len());
@@ -195,7 +198,7 @@ discovers the schema, selects storage and traces the model in one operation:
 #     let x = cx.input(&[2, 3])?;
 #     Ok(cx.layer("linear")?.linear(1).bias(false).apply(&x)?.sum(&[0, 1], false)?)
 # }
-let (_schema, trainable, mut model) = Model::new(loss)
+let (trainable, mut model) = Model::new(loss)
     .trace_resident(|schema| schema.select_under("linear"))?;
 let loss = model.outputs()[0].clone();
 rxla_train::apply_model_sgd(&mut model, &trainable, &loss, 0.01)?;

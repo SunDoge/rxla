@@ -13,13 +13,13 @@
 //!     Ok((loss, logits))
 //! }
 //!
-//! let (schema, applied) = Model::new(apply)
+//! let applied = Model::new(apply)
 //!     .inputs((
 //!         ModelInput::new([4, 32]),
 //!         ModelInput::new([4]).with_dtype(DType::I32),
 //!     ))
 //!     .trace()?;
-//! assert_eq!(schema.inputs().len(), 2);
+//! assert_eq!(applied.schema().inputs().len(), 2);
 //! assert_eq!(applied.outputs().len(), 2);
 //! # Ok::<(), rxla_nn::Error>(())
 //! ```
@@ -327,19 +327,19 @@ mod tests {
         assert_eq!(input.shape(), [2, 3]);
         assert_eq!(input.dtype(), DType::F32);
         let single = Model::new(|_: &mut Cx, x: Tensor| Ok(x)).inputs(input);
-        assert_eq!(single.trace().unwrap().1.outputs()[0].shape(), [2, 3]);
+        assert_eq!(single.trace().unwrap().outputs()[0].shape(), [2, 3]);
 
         let tuple = Model::new(|_: &mut Cx, x: Tensor, y: Tensor| Ok(x.add(&y)?))
             .inputs((ModelInput::new(vec![2]), ModelInput::new(vec![2])));
-        assert_eq!(tuple.trace().unwrap().0.inputs().len(), 2);
+        assert_eq!(tuple.trace().unwrap().schema().inputs().len(), 2);
 
         let array = Model::new(|_: &mut Cx, [x, y]: [Tensor; 2]| Ok(x.add(&y)?))
             .inputs([ModelInput::new(vec![2]), ModelInput::new(vec![2])]);
-        assert_eq!(array.trace().unwrap().0.inputs().len(), 2);
+        assert_eq!(array.trace().unwrap().schema().inputs().len(), 2);
 
         let vector = Model::new(|_: &mut Cx, xs: Vec<Tensor>| Ok(xs[0].add(&xs[1])?))
             .inputs(vec![ModelInput::new(vec![2]), ModelInput::new(vec![2])]);
-        assert_eq!(vector.trace().unwrap().0.inputs().len(), 2);
+        assert_eq!(vector.trace().unwrap().schema().inputs().len(), 2);
 
         let custom = Model::new(|_: &mut Cx, batch: BatchTensors| {
             Ok(Predictions {
@@ -351,12 +351,12 @@ mod tests {
             images: ModelInput::new(vec![2]),
             labels: ModelInput::new(vec![2]),
         });
-        let (schema, applied) = custom.trace().unwrap();
-        assert_eq!(schema.inputs().len(), 2);
+        let applied = custom.trace().unwrap();
+        assert_eq!(applied.schema().inputs().len(), 2);
         assert_eq!(applied.outputs().len(), 2);
 
         let nested = Model::new(|_: &mut Cx, x: Tensor| Ok((x.clone(), [x.clone(), x])))
             .inputs(ModelInput::new(vec![2]));
-        assert_eq!(nested.trace().unwrap().1.outputs().len(), 3);
+        assert_eq!(nested.trace().unwrap().outputs().len(), 3);
     }
 }

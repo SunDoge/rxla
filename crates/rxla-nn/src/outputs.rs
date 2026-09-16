@@ -129,14 +129,14 @@ mod tests {
 
     #[test]
     fn applied_models_validate_and_decode_output_structure() {
-        let (_, empty) = Model::new(|_: &mut Cx| Ok::<_, Error>(())).trace().unwrap();
+        let empty = Model::new(|_: &mut Cx| Ok::<_, Error>(())).trace().unwrap();
         let _: EmptyResult = empty.decode_outputs(Vec::new()).unwrap();
         assert!(matches!(
             empty.decode_outputs::<Buffer>(Vec::new()),
             Err(Error::OutputStructure)
         ));
 
-        let (_, one) = Model::new(|cx: &mut Cx| -> Result<Tensor> { cx.constant(&[], &[1.0]) })
+        let one = Model::new(|cx: &mut Cx| -> Result<Tensor> { cx.constant(&[], &[1.0]) })
             .trace()
             .unwrap();
         assert!(matches!(
@@ -155,7 +155,7 @@ mod tests {
             Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
         }
         .unwrap();
-        let (_, applied) = Model::new(|cx: &mut Cx| {
+        let applied = Model::new(|cx: &mut Cx| {
             Ok::<_, Error>((cx.constant(&[], &[3.0])?, cx.constant(&[2], &[4.0, 5.0])?))
         })
         .trace()

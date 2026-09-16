@@ -159,25 +159,28 @@ where
 {
     /// Discover parameter effects and produce the executable model trace.
     ///
+    /// The frozen declarations are available through [`AppliedModel::schema`];
+    /// they are not returned as a duplicate top-level value.
+    ///
     /// This is the ordinary one-call path. [`Self::init`] and [`Self::apply`]
     /// remain available when callers need to inspect or restore a schema
     /// between the two interpretations.
-    pub fn trace(&self) -> Result<(ParamSchema, AppliedModel)> {
+    pub fn trace(&self) -> Result<AppliedModel> {
         trace_once(|cx| (self.apply)(cx))
     }
 
     /// Discover the schema and trace a caller-selected resident parameter set.
     ///
     /// The owned selection is returned for later transforms such as SGD or
-    /// Adam; it retains schema identity without borrowing the returned schema.
+    /// Adam; it retains schema identity without borrowing the model's schema.
     pub fn trace_resident(
         &self,
         select: impl FnOnce(&ParamSchema) -> ParameterSelection,
-    ) -> Result<(ParamSchema, ParameterSelection, AppliedModel)> {
+    ) -> Result<(ParameterSelection, AppliedModel)> {
         let schema = self.init()?;
         let selection = select(&schema);
         let applied = self.apply_resident(&schema, &selection)?;
-        Ok((schema, selection, applied))
+        Ok((selection, applied))
     }
 
     /// Discover the input/parameter effect schema from this model body.
@@ -205,7 +208,7 @@ where
     I: ModelInputs,
 {
     /// Discover the schema and trace `apply` with structured lazy inputs.
-    pub fn trace<Marker>(&self) -> Result<(ParamSchema, AppliedModel)>
+    pub fn trace<Marker>(&self) -> Result<AppliedModel>
     where
         F: ModelHandler<I, Marker>,
     {
@@ -216,14 +219,14 @@ where
     pub fn trace_resident<Marker>(
         &self,
         select: impl FnOnce(&ParamSchema) -> ParameterSelection,
-    ) -> Result<(ParamSchema, ParameterSelection, AppliedModel)>
+    ) -> Result<(ParameterSelection, AppliedModel)>
     where
         F: ModelHandler<I, Marker>,
     {
         let schema = self.init()?;
         let selection = select(&schema);
         let applied = self.apply_resident(&schema, &selection)?;
-        Ok((schema, selection, applied))
+        Ok((selection, applied))
     }
 
     pub fn init<Marker>(&self) -> Result<ParamSchema>
@@ -885,9 +888,7 @@ pub fn init<T>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ParamSchema, 
     Ok((cx.into_schema(), result))
 }
 
-fn trace_once<T: ModelOutputs>(
-    body: impl FnOnce(&mut Cx) -> Result<T>,
-) -> Result<(ParamSchema, AppliedModel)> {
+fn trace_once<T: ModelOutputs>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<AppliedModel> {
     let mut cx = Cx::init();
     let outputs = body(&mut cx)?.into_tensors();
     cx.finish_rngs()?;
@@ -898,15 +899,14 @@ fn trace_once<T: ModelOutputs>(
     let parameters = cx.parameter_tensors();
     let states = cx.state_slots(&schema);
     let resident_parameters = vec![None; schema.parameters().len()];
-    let applied = AppliedModel::new(
+    Ok(AppliedModel::new(
         cx.graph,
         states,
         outputs,
         parameters,
         resident_parameters,
-        schema.clone(),
-    );
-    Ok((schema, applied))
+        schema,
+    ))
 }
 
 /// Interpret parameter effects as reads from `schema` and retain traced outputs.
@@ -994,9 +994,9 @@ mod tests {
         })
         .inputs(ModelInput::new([2, 4]));
 
-        let (schema, applied) = definition.trace().unwrap();
+        let applied = definition.trace().unwrap();
         assert_eq!(calls.get(), 1);
-        assert_eq!(schema.parameters().len(), 2);
+        assert_eq!(applied.schema().parameters().len(), 2);
         assert_eq!(applied.outputs()[0].shape(), [2, 3]);
         assert_eq!(applied.prepare().unwrap().input_count(), 3);
     }
@@ -1202,7 +1202,8 @@ mod tests {
             cx.layer("head")?.linear(3).apply(&hidden)
         });
 
-        let (schema, applied) = model.trace().unwrap();
+        let applied = model.trace().unwrap();
+        let schema = applied.schema();
 
         assert_eq!(schema.parameters()[0].path(), "hidden.weight");
         assert_eq!(schema.parameters()[0].shape(), [8, 4]);
@@ -1224,7 +1225,8 @@ mod tests {
             Ok(output.add(&noise.mul_scalar(0.0)?)?)
         });
 
-        let (schema, applied) = model.trace().unwrap();
+        let applied = model.trace().unwrap();
+        let schema = applied.schema();
         assert_eq!(schema.parameters()[0].path(), "head.weight");
         assert_eq!(schema.states()[0].path(), "steps");
         assert_eq!(schema.states()[1].path(), "sampling.key0");
@@ -1237,7 +1239,7 @@ mod tests {
 
     #[test]
     fn transforms_append_named_resident_state() {
-        let (_, mut applied) = Model::new(|cx: &mut Cx| cx.input(&[2])).trace().unwrap();
+        let mut applied = Model::new(|cx: &mut Cx| cx.input(&[2])).trace().unwrap();
         let moment = applied
             .transform_state("__transform.moment", &[2], DType::F32)
             .unwrap();
@@ -1260,9 +1262,10 @@ mod tests {
             cx.layer("head")?.linear(2).bias(false).apply(&input)
         })
         .inputs(ModelInput::new([1, 3]));
-        let (schema, selection, applied) = definition
+        let (selection, applied) = definition
             .trace_resident(|schema| schema.select_under("head"))
             .unwrap();
+        let schema = applied.schema();
 
         assert!(applied.is_stateful());
         assert_eq!(selection.len(), 1);
@@ -1355,7 +1358,7 @@ mod tests {
             let draw = cx.rng("sampling")?.uniform_f32(&[4])?;
             Ok([draw, next])
         });
-        let (_, applied) = model.trace().unwrap();
+        let applied = model.trace().unwrap();
         let client =
             unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").expect("PJRT plugin path")) }
                 .unwrap();

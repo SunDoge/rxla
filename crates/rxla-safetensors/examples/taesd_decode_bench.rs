@@ -49,7 +49,8 @@ fn run(args: Args) -> Result<()> {
     let info = client.info()?;
     let decoder = Model::new(|cx: &mut Cx, latent| taesd_decoder(cx, &latent))
         .inputs(ModelInput::new([1, args.latent, args.latent, 4]));
-    let (schema, decoder) = decoder.trace()?;
+    let decoder = decoder.trace()?;
+    let schema = decoder.schema();
 
     let checkpoint_open = Instant::now();
     let mut checkpoint = SafeTensors::open(&args.weights)?;

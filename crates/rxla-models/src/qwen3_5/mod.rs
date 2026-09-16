@@ -260,7 +260,8 @@ mod tests {
             let ids = cx.input_dtype(&[1, 3], DType::I32)?;
             qwen3_5(cx, &ids, &config)
         });
-        let (schema, applied) = model.trace().unwrap();
+        let applied = model.trace().unwrap();
+        let schema = applied.schema();
         assert_eq!(applied.outputs()[0].shape(), [1, 3, 128]);
         assert!(
             schema
@@ -292,7 +293,7 @@ mod tests {
             let ids = cx.input_dtype(&[1, 3], DType::I32)?;
             qwen3_5(cx, &ids, &config)
         });
-        let (_, applied) = model.trace().unwrap();
+        let applied = model.trace().unwrap();
         applied
             .compile(&mut Compiler::new(client, CacheLimits::default()))
             .unwrap();
