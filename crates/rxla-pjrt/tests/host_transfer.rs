@@ -59,3 +59,18 @@ fn real_host_staged_copy_preserves_scalars_empty_shapes_and_payloads() {
         assert!(copy.dtype().is_ok());
     }
 }
+
+#[test]
+#[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+fn real_owned_upload_works_without_backend_dma_mapping() {
+    let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
+    let upload = client
+        .upload_pinned(&[4], vec![1.0_f32, 2.0, 3.0, 4.0])
+        .unwrap();
+    assert_eq!(
+        upload.wait().unwrap().to_vec::<f32>().unwrap(),
+        [1.0, 2.0, 3.0, 4.0]
+    );
+    let empty = client.upload_pinned::<i32>(&[0, 2], vec![]).unwrap();
+    assert!(empty.wait().unwrap().to_vec::<i32>().unwrap().is_empty());
+}

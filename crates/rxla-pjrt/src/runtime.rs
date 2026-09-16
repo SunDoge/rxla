@@ -277,9 +277,11 @@ impl Plugin {
         false
     }
 
-    /// Whether owned host allocations can be explicitly DMA-mapped and
-    /// unmapped for asynchronous transfers.
-    pub fn supports_dma_mapping(&self) -> bool {
+    /// Whether the PJRT API table advertises both DMA map/unmap entry points.
+    ///
+    /// A backend may still return `Unimplemented`; callers normally should use
+    /// `Client::upload_pinned`, which falls back transparently in that case.
+    pub fn has_dma_mapping_api(&self) -> bool {
         let api = self.api();
         for offset in [
             std::mem::offset_of!(PJRT_Api, PJRT_Client_DmaMap),
@@ -564,8 +566,8 @@ impl Client {
         self.0.plugin.supports_collectives_extension()
     }
 
-    pub fn supports_dma_mapping(&self) -> bool {
-        self.0.plugin.supports_dma_mapping()
+    pub fn has_dma_mapping_api(&self) -> bool {
+        self.0.plugin.has_dma_mapping_api()
     }
 
     /// Load a trusted native plugin. It executes native code in this process.
@@ -764,7 +766,9 @@ impl Client {
     ///
     /// The returned handle owns both the allocation and its native DMA mapping
     /// until PJRT reports that the host bytes are no longer needed. Plugins
-    /// without `PJRT_Client_DmaMap` return an incompatible-plugin error.
+    /// DMA mapping is used when the backend implements it. Missing API slots or
+    /// an `Unimplemented` response fall back to retaining ordinary owned memory
+    /// until the host-transfer event completes.
     pub fn upload_pinned<T: Element>(
         &self,
         dims: &[i64],
@@ -810,15 +814,21 @@ impl Client {
                     message: "addressable device index out of range",
                 })?;
         let bytes = std::mem::size_of_val(data.as_slice());
-        let mapped = bytes != 0;
-        if mapped {
+        let mut mapped = false;
+        if bytes != 0 && self.has_dma_mapping_api() {
             let mut map = args!(PJRT_Client_DmaMap_Args, PJRT_Client_DmaMap_Args_STRUCT_SIZE);
             map.client = self.0.raw;
             map.data = data.as_mut_ptr().cast();
             map.size = bytes;
-            self.0
+            let result = self
+                .0
                 .plugin
-                .check(unsafe { function!(self.0.plugin.api(), PJRT_Client_DmaMap)(&mut map) })?;
+                .check(unsafe { function!(self.0.plugin.api(), PJRT_Client_DmaMap)(&mut map) });
+            match result {
+                Ok(()) => mapped = true,
+                Err(error) if error.pjrt_code() == Some(PjrtErrorCode::Unimplemented) => {}
+                Err(error) => return Err(error),
+            }
         }
         let mut upload = args!(
             PJRT_Client_BufferFromHostBuffer_Args,
@@ -2316,7 +2326,7 @@ mod lifetime_tests {
                 )),
             }))
         };
-        assert!(!plugin(&api).supports_dma_mapping());
+        assert!(!plugin(&api).has_dma_mapping_api());
         macro_rules! install {
             ($name:ident, $args:ident) => {{
                 unsafe extern "C" fn stub(_: *mut $args) -> *mut PJRT_Error {
@@ -2326,11 +2336,11 @@ mod lifetime_tests {
             }};
         }
         install!(PJRT_Client_DmaMap, PJRT_Client_DmaMap_Args);
-        assert!(!plugin(&api).supports_dma_mapping());
+        assert!(!plugin(&api).has_dma_mapping_api());
         install!(PJRT_Client_DmaUnmap, PJRT_Client_DmaUnmap_Args);
-        assert!(plugin(&api).supports_dma_mapping());
+        assert!(plugin(&api).has_dma_mapping_api());
         api.struct_size = std::mem::offset_of!(PJRT_Api, PJRT_Client_DmaUnmap);
-        assert!(!plugin(&api).supports_dma_mapping());
+        assert!(!plugin(&api).has_dma_mapping_api());
     }
 
     #[test]
