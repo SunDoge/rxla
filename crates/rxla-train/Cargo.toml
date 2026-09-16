@@ -12,4 +12,5 @@ snafu = { workspace = true }
 
 [dev-dependencies]
 clap = { workspace = true, features = ["env"] }
+image = { workspace = true, features = ["jpeg"] }
 rayon = { workspace = true }
