@@ -45,14 +45,14 @@ fn io(source: std::io::Error) -> Error {
     Error::Io { source }
 }
 
-pub struct HostTensor {
+pub struct HostF32 {
     pub shape: Vec<i64>,
     pub values: Vec<f32>,
 }
 
 /// Exact I32 tensor payload, suitable for counters and indexing state. No float
 /// conversion is performed, including for integers outside F32's exact range.
-pub struct HostIndices {
+pub struct HostI32 {
     pub shape: Vec<i64>,
     pub values: Vec<i32>,
 }
@@ -168,7 +168,7 @@ impl<R: Read + Seek> SafeTensors<R> {
 
     /// Decode little-endian F32/F16/BF16 into owned F32 host values. This does not
     /// quantize or change layouts; source axis order is retained.
-    pub fn read_f32(&mut self, name: &str) -> Result<HostTensor> {
+    pub fn read_f32(&mut self, name: &str) -> Result<HostF32> {
         let info = self
             .metadata
             .info(name)
@@ -223,7 +223,7 @@ impl<R: Read + Seek> SafeTensors<R> {
             .stats
             .decode_time
             .saturating_add(decode_start.elapsed());
-        Ok(HostTensor { shape, values })
+        Ok(HostF32 { shape, values })
     }
 
     /// Read an exact U8 tensor without integer or floating-point conversion.
@@ -260,7 +260,7 @@ impl<R: Read + Seek> SafeTensors<R> {
     /// Read only the selected I32 payload. Other integer widths and floating
     /// tensors are rejected, not cast. Shape/range metadata is validated before
     /// payload I/O. Successful stages contribute to the shared load statistics.
-    pub fn read_i32(&mut self, name: &str) -> Result<HostIndices> {
+    pub fn read_i32(&mut self, name: &str) -> Result<HostI32> {
         let info = self
             .metadata
             .info(name)
@@ -300,7 +300,7 @@ impl<R: Read + Seek> SafeTensors<R> {
             .stats
             .decode_time
             .saturating_add(decode_start.elapsed());
-        Ok(HostIndices { shape, values })
+        Ok(HostI32 { shape, values })
     }
 
     /// Read only the selected BF16 payload as raw bit patterns. Other dtypes,

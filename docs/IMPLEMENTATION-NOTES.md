@@ -1779,7 +1779,7 @@ clamping to `[0, vocabulary-1]`; there is no padding-index override, gradient
 masking, negative wrapping or bounds-error mode.
 
 For integer checkpoint payloads, `Checkpoint::read_i32(name)` returns
-`HostIndices { shape, values }` and `upload_i32(&client, name)` uploads exact I32
+`HostI32 { shape, values }` and `upload_i32(&client, name)` upload exact I32
 buffers. Both reject floating-point and other integer dtypes rather than cast.
 This preserves counters/index values such as 16,777,217 and I32 extrema without
 passing through F32. Only the selected payload is read; scalar and empty tensors
