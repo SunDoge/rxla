@@ -117,13 +117,20 @@ impl ParamSchema {
     /// Seeds are derived from `seed` and the stable parameter path, so adding
     /// an unrelated parameter does not perturb existing initial values.
     pub fn initialize(&self, client: &Client, seed: u64) -> Result<Vec<(String, Buffer)>> {
-        self.parameters()
+        let declarations = self
+            .parameters()
             .iter()
             .map(|parameter| {
                 let initializer = parameter.initializer.context(MissingInitializerSnafu {
                     path: parameter.path(),
                 })?;
-                let parameter_seed = stable_seed(seed, parameter.path());
+                initializer.validate(parameter.path(), parameter.shape(), parameter.dtype())?;
+                Ok((parameter, initializer))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        declarations
+            .into_iter()
+            .map(|(parameter, initializer)| {
                 Ok((
                     parameter.path.clone(),
                     initializer.initialize(
@@ -131,7 +138,7 @@ impl ParamSchema {
                         parameter.path(),
                         parameter.shape(),
                         parameter.dtype(),
-                        parameter_seed,
+                        stable_seed(seed, parameter.path()),
                     )?,
                 ))
             })

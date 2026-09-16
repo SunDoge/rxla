@@ -34,13 +34,7 @@ impl Initializer {
         dtype: DType,
         seed: u64,
     ) -> Result<Buffer> {
-        let count = shape.iter().try_fold(1usize, |count, &dimension| {
-            count.checked_mul(usize::try_from(dimension).ok()?)
-        });
-        let count = count.ok_or_else(|| Error::InvalidInitializer {
-            path: path.to_owned(),
-            message: "parameter element count overflows usize".into(),
-        })?;
+        let count = self.validate(path, shape, dtype)?;
         let mut random = SplitMix64(seed);
         let values = match self {
             Self::Zeros => vec![0.0; count],
@@ -48,12 +42,6 @@ impl Initializer {
             Self::Uniform { low, high } => {
                 let low = f32::from_bits(low);
                 let high = f32::from_bits(high);
-                if !low.is_finite() || !high.is_finite() || low > high {
-                    return Err(Error::InvalidInitializer {
-                        path: path.to_owned(),
-                        message: "uniform bounds must be finite and ordered".into(),
-                    });
-                }
                 (0..count)
                     .map(|_| low + (high - low) * random.unit_f32())
                     .collect()
@@ -64,26 +52,12 @@ impl Initializer {
             } => {
                 let mean = f32::from_bits(mean);
                 let standard_deviation = f32::from_bits(standard_deviation);
-                if !mean.is_finite() || !standard_deviation.is_finite() || standard_deviation < 0.0
-                {
-                    return Err(Error::InvalidInitializer {
-                        path: path.to_owned(),
-                        message: "normal parameters must be finite with nonnegative deviation"
-                            .into(),
-                    });
-                }
                 (0..count)
                     .map(|_| mean + standard_deviation * random.normal_f32())
                     .collect()
             }
             Self::KaimingUniform => {
-                let fan_in = shape.get(1..).unwrap_or_default().iter().product::<i64>();
-                if fan_in <= 0 {
-                    return Err(Error::InvalidInitializer {
-                        path: path.to_owned(),
-                        message: "Kaiming initialization requires positive fan-in".into(),
-                    });
-                }
+                let fan_in = checked_fan_in(shape).expect("initializer validated above");
                 let bound = (1.0 / fan_in as f32).sqrt();
                 (0..count)
                     .map(|_| (random.unit_f32() * 2.0 - 1.0) * bound)
@@ -116,6 +90,62 @@ impl Initializer {
             }),
         }
     }
+
+    pub(crate) fn validate(self, path: &str, shape: &[i64], dtype: DType) -> Result<usize> {
+        let invalid = |message: &str| Error::InvalidInitializer {
+            path: path.to_owned(),
+            message: message.into(),
+        };
+        let count = shape
+            .iter()
+            .try_fold(1usize, |count, &dimension| {
+                count.checked_mul(usize::try_from(dimension).ok()?)
+            })
+            .ok_or_else(|| invalid("element count overflows usize"))?;
+        match self {
+            Self::Uniform { low, high } => {
+                let (low, high) = (f32::from_bits(low), f32::from_bits(high));
+                if !low.is_finite() || !high.is_finite() || low > high {
+                    return Err(invalid("uniform bounds must be finite and ordered"));
+                }
+            }
+            Self::Normal {
+                mean,
+                standard_deviation,
+            } => {
+                let (mean, standard_deviation) =
+                    (f32::from_bits(mean), f32::from_bits(standard_deviation));
+                if !mean.is_finite() || !standard_deviation.is_finite() || standard_deviation < 0.0
+                {
+                    return Err(invalid(
+                        "normal parameters must be finite with nonnegative deviation",
+                    ));
+                }
+            }
+            Self::KaimingUniform if checked_fan_in(shape).is_none() => {
+                return Err(invalid("Kaiming initialization requires positive fan-in"));
+            }
+            _ => {}
+        }
+        match dtype {
+            DType::F32 | DType::BF16 => {}
+            DType::I32 | DType::U8 if matches!(self, Self::Zeros | Self::Ones) => {}
+            _ => {
+                return Err(invalid(&format!(
+                    "initialization does not support {dtype:?} storage"
+                )));
+            }
+        }
+        Ok(count)
+    }
+}
+
+fn checked_fan_in(shape: &[i64]) -> Option<i64> {
+    let fan_in = shape
+        .get(1..)?
+        .iter()
+        .try_fold(1i64, |value, &dimension| value.checked_mul(dimension))?;
+    (fan_in > 0).then_some(fan_in)
 }
 
 struct SplitMix64(u64);
@@ -145,6 +175,35 @@ mod tests {
     use super::*;
     use crate::{Cx, Model};
     use rxla_core::{CacheLimits, Compiler, Tensor};
+
+    #[test]
+    fn validation_rejects_invalid_declarations_without_a_client() {
+        assert!(matches!(
+            Initializer::uniform(2.0, 1.0).validate("weight", &[2, 3], DType::F32),
+            Err(Error::InvalidInitializer { path, .. }) if path == "weight"
+        ));
+        assert!(
+            Initializer::normal(0.0, -1.0)
+                .validate("weight", &[2, 3], DType::F32)
+                .is_err()
+        );
+        assert!(
+            Initializer::KaimingUniform
+                .validate("weight", &[2, 0], DType::F32)
+                .is_err()
+        );
+        assert!(
+            Initializer::normal(0.0, 1.0)
+                .validate("weight", &[2, 3], DType::I32)
+                .is_err()
+        );
+        assert_eq!(
+            Initializer::Zeros
+                .validate("state", &[2, 3], DType::I32)
+                .unwrap(),
+            6
+        );
+    }
 
     #[test]
     #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]

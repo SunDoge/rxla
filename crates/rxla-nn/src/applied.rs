@@ -892,7 +892,7 @@ impl ModelSessionBuilder<'_> {
                 .with_context(|| MissingResidentParameterInitializerSnafu { path: name })?;
             initial.push((slot.clone(), value));
         }
-        let mut ordinary = self
+        let ordinary = self
             .model
             .states
             .iter()
@@ -905,28 +905,34 @@ impl ModelSessionBuilder<'_> {
                     .find(|state| state.path() == path)
                     .map_or(Initializer::Zeros, StateSpec::initializer);
                 let (dtype, shape) = self.program.state_type(slot)?;
-                Ok((
-                    slot.clone(),
-                    initializer.initialize(
-                        self.program.client(),
-                        path,
-                        &shape,
-                        dtype,
-                        crate::schema::stable_seed(0, path),
-                    )?,
-                ))
+                initializer.validate(path, &shape, dtype)?;
+                Ok((path.clone(), slot.clone(), initializer, dtype, shape))
             })
             .collect::<Result<Vec<_>>>()?;
-        for ((name, _), (_, value)) in self.model.states.iter().zip(&mut ordinary) {
-            if let Some(override_value) = self.overrides.remove(name) {
-                *value = override_value;
-            }
+        for (path, slot, initializer, dtype, shape) in ordinary {
+            let value = if let Some(value) = self.overrides.remove(&path) {
+                value
+            } else {
+                initializer.initialize(
+                    self.program.client(),
+                    &path,
+                    &shape,
+                    dtype,
+                    crate::schema::stable_seed(0, &path),
+                )?
+            };
+            initial.push((slot, value));
         }
-        initial.extend(ordinary);
         ensure!(
             self.parameter_overrides.is_empty(),
             InvalidDefinitionSnafu {
                 message: "unused resident parameter initializers"
+            }
+        );
+        ensure!(
+            self.overrides.is_empty(),
+            InvalidDefinitionSnafu {
+                message: "unused state initializers"
             }
         );
         Ok(self.program.session(initial)?)

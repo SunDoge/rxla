@@ -128,7 +128,7 @@ pub enum Error {
     OutputStructure,
     #[snafu(display("parameter {path:?} has no initializer"))]
     MissingInitializer { path: String },
-    #[snafu(display("invalid initializer for parameter {path:?}: {message}"))]
+    #[snafu(display("invalid initializer for {path:?}: {message}"))]
     InvalidInitializer { path: String, message: String },
 }
 
