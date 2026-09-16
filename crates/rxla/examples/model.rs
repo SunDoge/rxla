@@ -1,16 +1,17 @@
 use rxla::{
     Tensor,
-    nn::{Cx, Model, Result},
+    nn::{Cx, Model, ModelInput, Result},
 };
 
-fn apply(cx: &mut Cx) -> Result<Tensor> {
-    let input = cx.input(&[32, 784])?;
+fn apply(cx: &mut Cx, input: Tensor) -> Result<Tensor> {
     let hidden = cx.named("hidden")?.linear(256).apply(&input)?.relu()?;
     cx.named("head")?.linear(10).apply(&hidden)
 }
 
 fn main() -> Result<()> {
-    let (schema, model) = Model::new(apply).trace()?;
+    let (schema, model) = Model::new(apply)
+        .inputs(ModelInput::new([32, 784]))
+        .trace()?;
 
     println!("parameters: {}", schema.parameters().len());
     println!("StableHLO inputs: {}", model.prepare()?.input_count());

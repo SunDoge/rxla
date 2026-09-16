@@ -44,15 +44,16 @@ function, repeat tracing closures, or manually plumb a parameter tree.
 The first implemented API exposes this directly:
 
 ```rust
-use rxla::{Tensor, model::{Cx, Model, Result}};
+use rxla::{Tensor, nn::{Cx, Model, ModelInput, Result}};
 
-fn apply(cx: &mut Cx) -> Result<Tensor> {
-    let x = cx.input(&[2, 4])?;
+fn apply(cx: &mut Cx, x: Tensor) -> Result<Tensor> {
     let x = cx.named("hidden")?.linear(8).apply(&x)?.relu()?;
     cx.named("head")?.linear(3).apply(&x)
 }
 
-let (schema, applied) = Model::new(apply).trace()?;
+let (schema, applied) = Model::new(apply)
+    .inputs(ModelInput::new([2, 4]))
+    .trace()?;
 assert_eq!(schema.parameters()[0].path(), "hidden.weight");
 assert_eq!(applied.outputs()[0].shape(), [2, 3]);
 # Ok::<(), rxla::nn::Error>(())
@@ -60,12 +61,44 @@ assert_eq!(applied.outputs()[0].shape(), [2, 3]);
 
 Run the facade example with `cargo run -p rxla --example model`.
 
+Input structure is described separately from the model function, so `apply`
+receives ordinary lazy tensors rather than creating placeholder-like values in
+its body. `ModelInputs` is a typed extractor and `ModelHandler` adapts ordinary
+Rust function arities: tuple specifications become separate function arguments,
+while arrays, vectors and application-defined structs remain structured values.
+
+```rust
+# use rxla::{Tensor, nn::{Cx, Model, ModelInput, Result}};
+fn apply(cx: &mut Cx, image: Tensor, timestep: Tensor) -> Result<Tensor> {
+    let features = cx.named("image")?.linear(32).apply(&image)?;
+    Ok(features.add(&timestep)?)
+}
+
+let model = Model::new(apply).inputs((
+    ModelInput::new([4, 32]),
+    ModelInput::new([4, 32]),
+));
+let (_, applied) = model.trace()?;
+assert_eq!(applied.schema().inputs().len(), 2);
+# Ok::<(), rxla::nn::Error>(())
+```
+
+Applications can implement `ModelInputs` for a domain struct such as
+`DiffusionBatch` and return a matching `DiffusionTensors` struct. The blanket
+`ModelHandler` implementation passes that value as one argument; implementations
+for two through sixteen extractors spread them across the corresponding function
+arguments. This is the same marker-trait technique used by Rust web-framework
+handlers, without their async request machinery. It keeps input naming and
+grouping in Rust's type system without arity-specific model classes or a string
+map. Calling `cx.input` inside a zero-input `Model` remains available for
+low-level or dynamically assembled definitions.
+
 Trainability belongs to a particular transformation, not permanently to a
 parameter declaration. The immutable schema provides typed parameter identities
 and deterministic, scope-based selections instead:
 
 ```rust
-# use rxla::{Tensor, model::{Cx, Result, init}};
+# use rxla::{Tensor, nn::{Cx, Result, init}};
 # fn apply(cx: &mut Cx) -> Result<Tensor> {
 #     let x = cx.input(&[2, 4])?;
 #     cx.named("head")?.linear(3).apply(&x)

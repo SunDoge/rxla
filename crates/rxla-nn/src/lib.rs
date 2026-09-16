@@ -12,6 +12,8 @@ mod applied;
 pub use applied::{
     AppliedModel, BoundParameters, ModelArguments, ModelSessionBuilder, TransformState,
 };
+mod inputs;
+pub use inputs::{ModelHandler, ModelInput, ModelInputs};
 mod layers;
 pub use layers::{
     Conv2d, Embedding, GroupNorm, LayerNorm, Linear, Named, QuantizedLinear, RmsNorm,
@@ -27,9 +29,13 @@ pub use selection::{ParameterId, ParameterSelection};
 /// around schema discovery and application. Compiled execution artifacts use
 /// [`rxla_core::Program`]; keeping the names distinct avoids import aliases in
 /// applications that construct and run models in the same module.
-pub struct Model<F> {
+pub struct Model<F, I = NoModelInputs> {
     apply: F,
+    inputs: I,
 }
+
+/// Marker used by model functions that declare any inputs themselves.
+pub struct NoModelInputs;
 
 /// Recoverable parameter-effect and model-binding failures.
 #[derive(Debug, Snafu)]
@@ -99,14 +105,25 @@ pub enum Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-impl<F> Model<F> {
+impl<F> Model<F, NoModelInputs> {
     /// Capture one model `apply` function for repeated effect interpretation.
     pub fn new(apply: F) -> Self {
-        Self { apply }
+        Self {
+            apply,
+            inputs: NoModelInputs,
+        }
+    }
+
+    /// Supply structured input declarations to an `apply(cx, inputs)` function.
+    pub fn inputs<I>(self, inputs: I) -> Model<F, I> {
+        Model {
+            apply: self.apply,
+            inputs,
+        }
     }
 }
 
-impl<F, T> Model<F>
+impl<F, T> Model<F, NoModelInputs>
 where
     F: Fn(&mut Cx) -> Result<T>,
     T: TraceOutputs,
@@ -130,6 +147,35 @@ where
     /// Trace this model body against a previously discovered schema.
     pub fn apply(&self, schema: &ParamSchema) -> Result<AppliedModel> {
         apply(schema, |cx| (self.apply)(cx))
+    }
+}
+
+impl<F, I> Model<F, I>
+where
+    I: ModelInputs,
+{
+    /// Discover the schema and trace `apply` with structured lazy inputs.
+    pub fn trace<Marker>(&self) -> Result<(ParamSchema, AppliedModel)>
+    where
+        F: ModelHandler<I, Marker>,
+    {
+        let schema = self.init()?;
+        let applied = self.apply(&schema)?;
+        Ok((schema, applied))
+    }
+
+    pub fn init<Marker>(&self) -> Result<ParamSchema>
+    where
+        F: ModelHandler<I, Marker>,
+    {
+        init(|cx| self.apply.invoke(cx, &self.inputs)).map(|(schema, _)| schema)
+    }
+
+    pub fn apply<Marker>(&self, schema: &ParamSchema) -> Result<AppliedModel>
+    where
+        F: ModelHandler<I, Marker>,
+    {
+        apply(schema, |cx| self.apply.invoke(cx, &self.inputs))
     }
 }
 
