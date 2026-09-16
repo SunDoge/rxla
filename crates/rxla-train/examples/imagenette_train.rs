@@ -8,7 +8,7 @@ use rxla_core::{
     Tensor,
 };
 use rxla_nn::{AppliedModel, Cx, Model, ModelInput, ParamSchema, Result as NnResult};
-use rxla_train::{BoundedPipeline, DataRng, PipelineResult, prepare_model_sgd};
+use rxla_train::{BoundedPipeline, DataRng, PipelineResult, apply_model_sgd};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,7 +44,6 @@ struct PhaseTimes {
     samples: usize,
     input_wait: Duration,
     upload: Duration,
-    bind: Duration,
     execute: Duration,
     metrics: Duration,
 }
@@ -55,17 +54,15 @@ impl PhaseTimes {
             return;
         }
         let milliseconds = |duration: Duration| duration.as_secs_f64() * 1_000.0;
-        let total = self.input_wait + self.upload + self.bind + self.execute + self.metrics;
+        let total = self.input_wait + self.upload + self.execute + self.metrics;
         println!(
-            "profile: {samples} samples, mean step {total:.3} ms: input-wait {input_wait:.3} ms ({input_wait_share:.1}%), upload {upload:.3} ms ({upload_share:.1}%), bind {bind:.3} ms ({bind_share:.1}%), execute {execute:.3} ms ({execute_share:.1}%), metrics {metrics:.3} ms ({metrics_share:.1}%); measured throughput {throughput:.1} images/s",
+            "profile: {samples} samples, mean step {total:.3} ms: input-wait {input_wait:.3} ms ({input_wait_share:.1}%), upload {upload:.3} ms ({upload_share:.1}%), execute {execute:.3} ms ({execute_share:.1}%), metrics {metrics:.3} ms ({metrics_share:.1}%); measured throughput {throughput:.1} images/s",
             samples = self.samples,
             total = milliseconds(total) / self.samples as f64,
             input_wait = milliseconds(self.input_wait) / self.samples as f64,
             input_wait_share = self.input_wait.as_secs_f64() * 100.0 / total.as_secs_f64(),
             upload = milliseconds(self.upload) / self.samples as f64,
             upload_share = self.upload.as_secs_f64() * 100.0 / total.as_secs_f64(),
-            bind = milliseconds(self.bind) / self.samples as f64,
-            bind_share = self.bind.as_secs_f64() * 100.0 / total.as_secs_f64(),
             execute = milliseconds(self.execute) / self.samples as f64,
             execute_share = self.execute.as_secs_f64() * 100.0 / total.as_secs_f64(),
             metrics = milliseconds(self.metrics) / self.samples as f64,
@@ -356,8 +353,8 @@ fn resnet18_inputs(batch_size: i64) -> (ModelInput, ModelInput) {
 fn initialized_parameters(
     client: &Client,
     schema: &ParamSchema,
-) -> Result<BTreeMap<String, Buffer>, Box<dyn std::error::Error>> {
-    let mut result = BTreeMap::new();
+) -> Result<Vec<(String, Buffer)>, Box<dyn std::error::Error>> {
+    let mut result = Vec::with_capacity(schema.parameters().len());
     let mut state = 0x4d59_5df4_d0f3_3173_u64;
     for spec in schema.parameters() {
         let count = spec.shape().iter().product::<i64>() as usize;
@@ -384,10 +381,10 @@ fn initialized_parameters(
                 (unit * 2.0 - 1.0) * scale
             })
             .collect::<Vec<_>>();
-        result.insert(
+        result.push((
             spec.path().to_owned(),
             client.buffer(spec.shape(), &values)?,
-        );
+        ));
     }
     Ok(result)
 }
@@ -441,8 +438,9 @@ fn initialize_session<'a>(
     schema: &ParamSchema,
     gpu: &Client,
     seed: u64,
+    parameters: Vec<(String, Buffer)>,
 ) -> Result<rxla_core::Session, Box<dyn std::error::Error>> {
-    let mut builder = model.session(program);
+    let mut builder = model.session(program).parameters(parameters)?;
     for state in schema
         .states()
         .iter()
@@ -475,19 +473,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gpu = unsafe { Client::load(&args.gpu_plugin) }?;
     let batch_size = args.batch_size;
     let definition = Model::new(resnet18_train).inputs(resnet18_inputs(batch_size));
-    let (schema, model) = definition.trace()?;
-    let training = prepare_model_sgd(
-        &model,
-        &schema.select_all(),
-        &model.outputs()[0],
-        args.learning_rate,
-    )?;
+    let (schema, trainable, mut model) = definition.trace_resident(ParamSchema::select_all)?;
     let metrics = Tensor::stack(&[model.outputs()[0].clone(), model.outputs()[2].clone()], 0)?;
-    let outputs = training.outputs_with(&[metrics]);
+    let loss = model.outputs()[0].clone();
+    apply_model_sgd(&mut model, &trainable, &loss, args.learning_rate)?;
     let mut compiler = Compiler::new(gpu.clone(), CacheLimits::default());
-    let program = outputs.compile_stateful(&model, &mut compiler)?;
-    let mut session = initialize_session(&model, &program, &schema, &gpu, args.seed)?;
-    let mut parameters = initialized_parameters(&gpu, &schema)?;
+    let program = model.compile_stateful_tensors(&mut compiler, &[metrics])?;
+    let parameters = initialized_parameters(&gpu, &schema)?;
+    let mut session = initialize_session(&model, &program, &schema, &gpu, args.seed, parameters)?;
     let rng = DataRng::new(args.seed);
     let started = Instant::now();
     let mut total_correct = 0;
@@ -505,18 +498,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (images, labels) = upload_batch(host, batch_size, &gpu)?;
         let uploaded = phase.elapsed();
         let phase = Instant::now();
-        let arguments = model.bind(
-            (images.buffer(), labels.buffer()),
-            parameters
-                .iter()
-                .map(|(name, value)| (name.as_str(), value)),
-        )?;
-        let bound = phase.elapsed();
-        let phase = Instant::now();
-        let output = session.run(arguments.as_slice())?;
+        let visible = session.run(&[images.buffer(), labels.buffer()])?;
         let executed = phase.elapsed();
         let phase = Instant::now();
-        let visible = outputs.commit(output, &mut parameters)?;
         let metrics = visible[0].to_vec::<f32>()?;
         last_loss = metrics[0];
         first_loss.get_or_insert(last_loss);
@@ -527,7 +511,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             phases.samples += 1;
             phases.input_wait += input_wait;
             phases.upload += uploaded;
-            phases.bind += bound;
             phases.execute += executed;
             phases.metrics += measured;
         }
@@ -553,7 +536,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let inference = Model::new(resnet18_infer)
         .inputs(resnet18_inputs(batch_size))
-        .apply(&schema)?;
+        .apply_resident(&schema, &trainable)?;
     let inference_metrics = Tensor::stack(
         &[
             inference.outputs()[0].clone(),
@@ -563,25 +546,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let inference_program =
         inference.compile_stateful_tensors(&mut compiler, &[inference_metrics])?;
-    let resident = session.into_state();
-    let mut inference_builder = inference.session(&inference_program);
-    for ((name, _), (_, buffer)) in model.states().zip(resident) {
-        inference_builder = inference_builder.state(name, buffer)?;
-    }
-    let mut inference_session = inference_builder.build()?;
+    let snapshot = model.take_session(session)?;
+    let mut inference_session = snapshot
+        .restore_model(inference.session(&inference_program))?
+        .build()?;
     let validation_steps = validation.samples.len() / batch_size as usize;
     let mut validation_correct = 0;
     let mut validation_loss = 0.0;
     for step in 0..validation_steps {
         let (images, labels, _, _) =
             prepare_batch(&validation, step, batch_size, rng, false, &gpu)?;
-        let arguments = inference.bind(
-            (images.buffer(), labels.buffer()),
-            parameters
-                .iter()
-                .map(|(name, value)| (name.as_str(), value)),
-        )?;
-        let output = inference_session.run(arguments.as_slice())?;
+        let output = inference_session.run(&[images.buffer(), labels.buffer()])?;
         let metrics = output[0].to_vec::<f32>()?;
         validation_loss += metrics[0];
         validation_correct += metrics[1] as usize;

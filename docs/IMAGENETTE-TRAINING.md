@@ -15,6 +15,12 @@ forward, backward, BatchNorm and RNG state transitions, and SGD all execute in
 one compiled CUDA program. A bounded capacity-four channel preserves order and
 backpressure without materializing normalized F32 images on the host.
 
+Trainable parameters are resident session state. Each step therefore submits
+only the image and label buffers; it does not rebuild a path-to-buffer map or
+return replacement parameters through the executable ABI. After training, the
+session is consumed into path-addressed device buffers and restored into a
+separately traced inference session without downloading or uploading weights.
+
 ```bash
 cargo run -p rxla-train --release --example imagenette_train -- \
   --gpu-plugin "$PJRT_CUDA_PLUGIN_PATH" \
@@ -26,6 +32,10 @@ cargo run -p rxla-train --release --example imagenette_train -- \
 ```
 
 ## RTX 5080 validation
+
+The measurements below predate the resident-parameter migration described
+above. They remain useful as historical lowering and input-pipeline baselines,
+but do not claim the current training loop has identical throughput.
 
 Validated on 2026-09-16 with 9,469 training images, 3,925 validation images,
 CUDA 13.0, cuDNN 9.24.0, seed 42, and plain SGD. Fixed shapes evaluate the
