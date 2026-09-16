@@ -20,7 +20,7 @@ mod initializer;
 pub use initializer::Initializer;
 mod layers;
 pub use layers::{
-    Conv2d, Embedding, GroupNorm, Layer, LayerNorm, Linear, QuantizedLinear, RmsNorm,
+    BatchNorm, Conv2d, Embedding, GroupNorm, Layer, LayerNorm, Linear, QuantizedLinear, RmsNorm,
 };
 mod outputs;
 pub use outputs::{ModelOutputValues, ModelOutputs};
@@ -413,6 +413,9 @@ impl Cx {
             shape.iter().all(|&dim| dim >= 0),
             NegativeParameterDimensionSnafu { path }
         );
+        if let Some(initializer) = initializer {
+            initializer.validate(&path, shape, dtype)?;
+        }
         let requested = ParameterSpec {
             path: path.clone(),
             shape: shape.to_vec(),
@@ -566,7 +569,7 @@ impl Cx {
 
     /// Declare or read named resident state at the current lexical scope.
     pub fn state(&mut self, name: &str, shape: &[i64], dtype: DType) -> Result<State> {
-        self.state_initialized(name, shape, dtype, Initializer::Zeros)
+        self.state_initialized(name, shape, dtype, Initializer::zeros())
     }
 
     /// Declare resident state with an explicit session initialization policy.
@@ -579,6 +582,7 @@ impl Cx {
     ) -> Result<State> {
         validate_name(name)?;
         let path = self.path(name);
+        initializer.validate(&path, shape, dtype)?;
         if let Some(existing) = self.states.get(&path) {
             ensure!(
                 existing.shape == shape
@@ -1136,13 +1140,13 @@ mod tests {
         assert_eq!(schema.parameters()[0].shape(), [3, 4]);
         assert_eq!(
             schema.parameters()[0].initializer(),
-            Some(Initializer::KaimingUniform)
+            Some(Initializer::kaiming_uniform())
         );
         assert_eq!(schema.parameters()[1].path(), "head.bias");
         assert_eq!(schema.parameters()[1].shape(), [3]);
         assert!(matches!(
             schema.parameters()[1].initializer(),
-            Some(Initializer::Uniform { .. })
+            Some(initializer) if initializer == Initializer::uniform(-0.5, 0.5)
         ));
     }
 

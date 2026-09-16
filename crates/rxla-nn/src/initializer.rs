@@ -2,28 +2,79 @@ use crate::{Error, Result};
 use rxla_core::{Buffer, Client, DType, bf16};
 
 /// Deterministic initialization policy recorded with a parameter declaration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Invalid distribution parameters are rejected when the parameter or state is
+/// declared, before tracing can create a partial runtime program.
+#[derive(Clone, Copy, Debug)]
 pub enum Initializer {
     Zeros,
     Ones,
-    Uniform { low: u32, high: u32 },
-    Normal { mean: u32, standard_deviation: u32 },
+    Uniform { low: f32, high: f32 },
+    Normal { mean: f32, standard_deviation: f32 },
     KaimingUniform,
 }
 
-impl Initializer {
-    pub fn uniform(low: f32, high: f32) -> Self {
-        Self::Uniform {
-            low: low.to_bits(),
-            high: high.to_bits(),
+impl PartialEq for Initializer {
+    fn eq(&self, other: &Self) -> bool {
+        match (*self, *other) {
+            (Self::Zeros, Self::Zeros)
+            | (Self::Ones, Self::Ones)
+            | (Self::KaimingUniform, Self::KaimingUniform) => true,
+            (
+                Self::Uniform {
+                    low: left_low,
+                    high: left_high,
+                },
+                Self::Uniform {
+                    low: right_low,
+                    high: right_high,
+                },
+            ) => {
+                left_low.to_bits() == right_low.to_bits()
+                    && left_high.to_bits() == right_high.to_bits()
+            }
+            (
+                Self::Normal {
+                    mean: left_mean,
+                    standard_deviation: left_deviation,
+                },
+                Self::Normal {
+                    mean: right_mean,
+                    standard_deviation: right_deviation,
+                },
+            ) => {
+                left_mean.to_bits() == right_mean.to_bits()
+                    && left_deviation.to_bits() == right_deviation.to_bits()
+            }
+            _ => false,
         }
+    }
+}
+
+impl Eq for Initializer {}
+
+impl Initializer {
+    pub const fn zeros() -> Self {
+        Self::Zeros
+    }
+
+    pub const fn ones() -> Self {
+        Self::Ones
+    }
+
+    pub fn uniform(low: f32, high: f32) -> Self {
+        Self::Uniform { low, high }
     }
 
     pub fn normal(mean: f32, standard_deviation: f32) -> Self {
         Self::Normal {
-            mean: mean.to_bits(),
-            standard_deviation: standard_deviation.to_bits(),
+            mean,
+            standard_deviation,
         }
+    }
+
+    pub const fn kaiming_uniform() -> Self {
+        Self::KaimingUniform
     }
 
     pub(crate) fn initialize(
@@ -39,23 +90,15 @@ impl Initializer {
         let values = match self {
             Self::Zeros => vec![0.0; count],
             Self::Ones => vec![1.0; count],
-            Self::Uniform { low, high } => {
-                let low = f32::from_bits(low);
-                let high = f32::from_bits(high);
-                (0..count)
-                    .map(|_| low + (high - low) * random.unit_f32())
-                    .collect()
-            }
+            Self::Uniform { low, high } => (0..count)
+                .map(|_| low + (high - low) * random.unit_f32())
+                .collect(),
             Self::Normal {
                 mean,
                 standard_deviation,
-            } => {
-                let mean = f32::from_bits(mean);
-                let standard_deviation = f32::from_bits(standard_deviation);
-                (0..count)
-                    .map(|_| mean + standard_deviation * random.normal_f32())
-                    .collect()
-            }
+            } => (0..count)
+                .map(|_| mean + standard_deviation * random.normal_f32())
+                .collect(),
             Self::KaimingUniform => {
                 let fan_in = checked_fan_in(shape).expect("initializer validated above");
                 let bound = (1.0 / fan_in as f32).sqrt();
@@ -104,7 +147,6 @@ impl Initializer {
             .ok_or_else(|| invalid("element count overflows usize"))?;
         match self {
             Self::Uniform { low, high } => {
-                let (low, high) = (f32::from_bits(low), f32::from_bits(high));
                 if !low.is_finite() || !high.is_finite() || low > high {
                     return Err(invalid("uniform bounds must be finite and ordered"));
                 }
@@ -113,8 +155,6 @@ impl Initializer {
                 mean,
                 standard_deviation,
             } => {
-                let (mean, standard_deviation) =
-                    (f32::from_bits(mean), f32::from_bits(standard_deviation));
                 if !mean.is_finite() || !standard_deviation.is_finite() || standard_deviation < 0.0
                 {
                     return Err(invalid(
@@ -188,7 +228,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            Initializer::KaimingUniform
+            Initializer::kaiming_uniform()
                 .validate("weight", &[2, 0], DType::F32)
                 .is_err()
         );
@@ -198,11 +238,31 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            Initializer::Zeros
+            Initializer::zeros()
                 .validate("state", &[2, 3], DType::I32)
                 .unwrap(),
             6
         );
+    }
+
+    #[test]
+    fn model_effects_validate_initializers_during_declaration() {
+        let error = Model::new(|cx: &mut Cx| {
+            cx.param_initialized(
+                "weight",
+                &[2, 3],
+                Initializer::Uniform {
+                    low: f32::NAN,
+                    high: 1.0,
+                },
+            )
+        })
+        .init()
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InvalidInitializer { path, .. } if path == "weight"
+        ));
     }
 
     #[test]
@@ -252,7 +312,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             schema.get("norm.weight").unwrap().initializer(),
-            Some(Initializer::Ones)
+            Some(Initializer::ones())
         );
         assert_eq!(
             schema
@@ -261,7 +321,7 @@ mod tests {
                 .find(|state| state.path() == "norm.running_variance")
                 .unwrap()
                 .initializer(),
-            Initializer::Ones
+            Initializer::ones()
         );
         let compiled = model
             .compile_stateful(&mut Compiler::new(client.clone(), CacheLimits::default()))

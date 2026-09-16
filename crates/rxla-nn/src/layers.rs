@@ -247,9 +247,9 @@ impl RmsNorm<'_> {
             "weight",
             &[width],
             if self.zero_centered {
-                Initializer::Zeros
+                Initializer::zeros()
             } else {
-                Initializer::Ones
+                Initializer::ones()
             },
         )?;
         let weight = if self.zero_centered {
@@ -392,7 +392,7 @@ fn apply_linear(cx: &mut Cx, input: &Tensor, out_features: i64, bias: bool) -> R
     let weight = cx.param_initialized(
         "weight",
         &[out_features, in_features],
-        Initializer::KaimingUniform,
+        Initializer::kaiming_uniform(),
     )?;
     let bias_bound = (1.0 / in_features as f32).sqrt();
     let bias = bias
@@ -444,7 +444,7 @@ fn apply_conv2d(
             kernel[0],
             kernel[1],
         ],
-        Initializer::KaimingUniform,
+        Initializer::kaiming_uniform(),
     )?;
     let output = input.conv2d_oihw(&weight, options)?;
     if !bias {
@@ -483,8 +483,8 @@ fn apply_group_norm_nhwc(
     );
     let (weight, bias) = if affine {
         (
-            Some(cx.param_initialized("weight", &[channels], Initializer::Ones)?),
-            Some(cx.param_initialized("bias", &[channels], Initializer::Zeros)?),
+            Some(cx.param_initialized("weight", &[channels], Initializer::ones())?),
+            Some(cx.param_initialized("bias", &[channels], Initializer::zeros())?),
         )
     } else {
         (None, None)
@@ -515,14 +515,14 @@ fn apply_batch_norm_nhwc(
         }
     );
     let channels = input.shape()[3];
-    let weight = cx.param_initialized("weight", &[channels], Initializer::Ones)?;
-    let bias = cx.param_initialized("bias", &[channels], Initializer::Zeros)?;
+    let weight = cx.param_initialized("weight", &[channels], Initializer::ones())?;
+    let bias = cx.param_initialized("bias", &[channels], Initializer::zeros())?;
     let running_mean = cx.state("running_mean", &[channels], DType::F32)?;
     let running_variance = cx.state_initialized(
         "running_variance",
         &[channels],
         DType::F32,
-        Initializer::Ones,
+        Initializer::ones(),
     )?;
     if !training {
         return Ok(input.batch_norm_inference(
@@ -571,8 +571,8 @@ fn apply_layer_norm(
     let normalized_shape = &input.shape()[input.shape().len() - normalized_rank..];
     let (weight, bias) = if affine {
         (
-            Some(cx.param_initialized("weight", normalized_shape, Initializer::Ones)?),
-            Some(cx.param_initialized("bias", normalized_shape, Initializer::Zeros)?),
+            Some(cx.param_initialized("weight", normalized_shape, Initializer::ones())?),
+            Some(cx.param_initialized("bias", normalized_shape, Initializer::zeros())?),
         )
     } else {
         (None, None)

@@ -903,7 +903,7 @@ impl ModelSessionBuilder<'_> {
                     .states()
                     .iter()
                     .find(|state| state.path() == path)
-                    .map_or(Initializer::Zeros, StateSpec::initializer);
+                    .map_or_else(Initializer::zeros, StateSpec::initializer);
                 let (dtype, shape) = self.program.state_type(slot)?;
                 initializer.validate(path, &shape, dtype)?;
                 Ok((path.clone(), slot.clone(), initializer, dtype, shape))
