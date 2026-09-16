@@ -142,6 +142,38 @@ pub struct GroupNorm<'a> {
     affine: bool,
 }
 
+/// Stateful NHWC BatchNorm with inferred channel count.
+#[must_use = "layer builders do nothing until apply is called"]
+pub struct BatchNorm<'a> {
+    cx: &'a mut Cx,
+    epsilon: f32,
+    momentum: f32,
+    training: bool,
+}
+
+impl BatchNorm<'_> {
+    pub fn epsilon(mut self, epsilon: f32) -> Self {
+        self.epsilon = epsilon;
+        self
+    }
+
+    /// Weight assigned to the current batch statistics in the running EMA.
+    pub fn momentum(mut self, momentum: f32) -> Self {
+        self.momentum = momentum;
+        self
+    }
+
+    pub fn training(mut self, training: bool) -> Self {
+        self.training = training;
+        self
+    }
+
+    pub fn apply(self, input: &Tensor) -> Result<Tensor> {
+        self.cx
+            .apply_batch_norm_nhwc(input, self.epsilon, self.momentum, self.training)
+    }
+}
+
 impl GroupNorm<'_> {
     pub fn epsilon(mut self, epsilon: f32) -> Self {
         self.epsilon = epsilon;
@@ -271,6 +303,15 @@ impl Named<'_> {
             groups,
             epsilon: 1e-5,
             affine: true,
+        }
+    }
+
+    pub fn batch_norm(&mut self) -> BatchNorm<'_> {
+        BatchNorm {
+            cx: self.cx,
+            epsilon: 1e-5,
+            momentum: 0.1,
+            training: true,
         }
     }
 
@@ -431,6 +472,56 @@ impl Cx {
             .transpose(&[0, 3, 1, 2])?
             .group_norm(groups, weight.as_ref(), bias.as_ref(), epsilon)?
             .transpose(&[0, 2, 3, 1])?)
+    }
+
+    pub(crate) fn apply_batch_norm_nhwc(
+        &mut self,
+        input: &Tensor,
+        epsilon: f32,
+        momentum: f32,
+        training: bool,
+    ) -> Result<Tensor> {
+        ensure!(
+            input.dtype() == DType::F32
+                && input.shape().len() == 4
+                && epsilon.is_finite()
+                && epsilon > 0.0
+                && momentum.is_finite()
+                && (0.0..=1.0).contains(&momentum),
+            InvalidLayerInputSnafu {
+                layer: "BatchNorm",
+                requirement: "rank-four F32 NHWC input, positive epsilon, and momentum in [0, 1]",
+            }
+        );
+        let channels = input.shape()[3];
+        let weight = self.param("weight", &[channels])?;
+        let bias = self.param("bias", &[channels])?;
+        let running_mean = self.state("running_mean", &[channels], DType::F32)?;
+        let running_variance = self.state("running_variance", &[channels], DType::F32)?;
+        if !training {
+            return Ok(input.batch_norm_inference(
+                3,
+                &running_mean.read(self)?,
+                &running_variance.read(self)?,
+                &weight,
+                &bias,
+                epsilon,
+            )?);
+        }
+
+        let batch = input.batch_norm_training(3, &weight, &bias, epsilon)?;
+        let retain = 1.0 - momentum;
+        let next_mean = running_mean
+            .read(self)?
+            .mul_scalar(retain)?
+            .add(&batch.mean.mul_scalar(momentum)?)?;
+        let next_variance = running_variance
+            .read(self)?
+            .mul_scalar(retain)?
+            .add(&batch.variance.mul_scalar(momentum)?)?;
+        running_mean.write(self, &next_mean)?;
+        running_variance.write(self, &next_variance)?;
+        Ok(batch.output)
     }
 
     /// Apply LayerNorm over the final `normalized_rank` dimensions, inferring

@@ -29,11 +29,15 @@ impl DataRng {
 }
 
 impl SampleRng {
+    pub fn word(self, stream: u64, draw: u64) -> u64 {
+        mix(self.key ^ mix(stream) ^ mix(draw))
+    }
+
     /// A reproducible value in `[0, 1)` for one transform stream and draw.
     /// Assign stable stream numbers to transforms so inserting an unrelated
     /// transform does not perturb existing augmentation decisions.
     pub fn uniform(self, stream: u64, draw: u64) -> f32 {
-        let bits = mix(self.key ^ mix(stream) ^ mix(draw));
+        let bits = self.word(stream, draw);
         ((bits >> 40) as f32) * (1.0 / (1_u32 << 24) as f32)
     }
 
