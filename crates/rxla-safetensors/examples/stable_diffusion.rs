@@ -4,19 +4,18 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
 use regex::Regex;
-use rxla_core::{Buffer, CacheLimits, CacheStats, Client, Compiler, Executable, Tensor};
+use rxla_core::{Buffer, CacheLimits, CacheStats, Client, Compiler, Tensor};
 use rxla_models::{
     AutoencoderKlDecoderConfig, ClipTextConfig, PndmSampleSource, PndmScheduler, UnetConfig,
     autoencoder_kl_decoder, clip_text_encoder, unet,
 };
-use rxla_nn::{AppliedModel, Cx, Model, ModelInput, ParamSchema};
-use rxla_safetensors::{SafeTensors, SchemaBuffers};
+use rxla_nn::{BoundModel, Cx, Model, ModelInput, ModelOutputValues, ParamSchema};
+use rxla_safetensors::SafeTensors;
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -306,16 +305,12 @@ fn diffusers_vae_mapping(schema: &ParamSchema) -> HashMap<String, String> {
 }
 
 struct Stage {
-    model: AppliedModel,
-    executable: Arc<Executable>,
-    weights: SchemaBuffers,
+    model: BoundModel,
 }
 
 impl Stage {
-    fn execute(&self, inputs: &[&Buffer]) -> rxla_nn::Result<Vec<Buffer>> {
-        let bindings = self.weights.bindings();
-        let arguments = self.model.bind(inputs, bindings)?;
-        Ok(self.executable.execute(arguments.as_slice())?)
+    fn execute<O: ModelOutputValues>(&self, inputs: &[&Buffer]) -> rxla_nn::Result<O> {
+        self.model.run(inputs)
     }
 }
 
@@ -334,11 +329,9 @@ struct Pipeline {
 impl Pipeline {
     fn evaluate(&mut self) -> Result<(Buffer, Duration, Duration, Duration)> {
         let start = Instant::now();
-        let context = Rc::new(self.clip.execute(&[&self.tokens])?.remove(0));
+        let context = Rc::new(self.clip.execute::<Buffer>(&[&self.tokens])?);
         let clip_time = start.elapsed();
 
-        let denoise_bindings = self.denoise.weights.bindings();
-        let denoise_parameters = self.denoise.model.bind_parameters(denoise_bindings)?;
         let start = Instant::now();
         let mut current = self.initial.clone();
         let initial = current.clone();
@@ -352,7 +345,7 @@ impl Pipeline {
             let history_inputs: Vec<_> = (0..4)
                 .map(|slot| history.get(slot).unwrap_or(&self.zero))
                 .collect();
-            let arguments = denoise_parameters.bind([
+            let [next, model_output] = self.denoise.model.run([
                 current.as_ref(),
                 update_sample.as_ref(),
                 self.timesteps[index].as_ref(),
@@ -363,9 +356,8 @@ impl Pipeline {
                 history_inputs[3].as_ref(),
                 self.coefficients[index].as_ref(),
             ])?;
-            let mut outputs = self.denoise.executable.execute(arguments.as_slice())?;
-            current = Rc::new(outputs.remove(0));
-            let model_output = Rc::new(outputs.remove(0));
+            current = Rc::new(next);
+            let model_output = Rc::new(model_output);
             if plan.retain_model_output {
                 history.insert(0, model_output);
                 history.truncate(4);
@@ -373,7 +365,7 @@ impl Pipeline {
         }
         let denoise_time = start.elapsed();
         let start = Instant::now();
-        let image = self.vae.execute(&[current.as_ref()])?.remove(0);
+        let image = self.vae.execute::<Buffer>(&[current.as_ref()])?;
         let vae_time = start.elapsed();
         Ok((image, clip_time, denoise_time, vae_time))
     }
@@ -417,12 +409,11 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
             .inputs(ModelInput::new([2, 77]).with_dtype(rxla_core::DType::I32));
     let (clip_schema, clip_model) = clip_model.trace()?;
     let mut clip_checkpoint = SafeTensors::open(args.model.join("text_encoder/model.safetensors"))?;
-    let clip_executable = clip_model.compile_executable(&mut compiler)?;
     let clip_weights = clip_checkpoint.load_parameter_schema(&client, &clip_schema)?;
     let clip = Stage {
-        model: clip_model,
-        executable: clip_executable,
-        weights: clip_weights,
+        model: clip_model
+            .compile(&mut compiler)?
+            .bind_parameters(clip_weights.bindings())?,
     };
 
     let unet_config = args.preset.unet();
@@ -466,12 +457,11 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
     let (denoise_schema, denoise_model) = denoise_model.trace()?;
     let mut unet_checkpoint =
         SafeTensors::open(args.model.join("unet/diffusion_pytorch_model.safetensors"))?;
-    let denoise_executable = denoise_model.compile_executable(&mut compiler)?;
     let denoise_weights = unet_checkpoint.load_parameter_schema(&client, &denoise_schema)?;
     let denoise = Stage {
-        model: denoise_model,
-        executable: denoise_executable,
-        weights: denoise_weights,
+        model: denoise_model
+            .compile(&mut compiler)?
+            .bind_parameters(denoise_weights.bindings())?,
     };
 
     let vae_config = args.preset.vae();
@@ -485,7 +475,6 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
     let (vae_schema, vae_model) = vae_model.trace()?;
     let mut vae_checkpoint =
         SafeTensors::open(args.model.join("vae/diffusion_pytorch_model.safetensors"))?;
-    let vae_executable = vae_model.compile_executable(&mut compiler)?;
     let vae_weights = match args.preset {
         ModelPreset::Tiny => vae_checkpoint.load_parameter_schema(&client, &vae_schema)?,
         ModelPreset::SdV1 => vae_checkpoint.load_parameter_schema_with_mapping(
@@ -495,9 +484,9 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
         )?,
     };
     let vae = Stage {
-        model: vae_model,
-        executable: vae_executable,
-        weights: vae_weights,
+        model: vae_model
+            .compile(&mut compiler)?
+            .bind_parameters(vae_weights.bindings())?,
     };
     let compile_time = compile_start.elapsed();
 

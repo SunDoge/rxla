@@ -103,7 +103,9 @@ understand application containers or making the model return an unlabelled
 `AppliedModel::compile` retains this metadata in a `CompiledModel`. Its `run`
 method checks the concrete buffer count and reconstructs a `ModelOutputValues`
 target; `bind_parameters` returns a reusable runner that avoids validating and
-ordering unchanged weights on every call. Built-in
+ordering unchanged weights on every call. The runner owns cheap shared PJRT
+buffer handles, so it can be moved directly into a long-lived serving stage
+without a self-referential model/checkpoint wrapper. Built-in
 targets include `Buffer`, tuples, arrays and `Vec<Buffer>`; a domain result can
 implement the trait as well. A dynamic vector consumes all remaining buffers,
 so it belongs at the top level or at the final position of a custom decoder.

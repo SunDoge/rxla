@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashSet};
 
 mod applied;
 pub use applied::{
-    AppliedModel, BoundModel, BoundParameters, CompiledModel, ModelArguments, ModelSessionBuffers,
+    AppliedModel, BoundModel, CompiledModel, ModelArguments, ModelSessionBuffers,
     ModelSessionBuilder, TransformState,
 };
 mod inputs;

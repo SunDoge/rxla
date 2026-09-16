@@ -89,6 +89,9 @@ let model = compiled.bind_parameters(weights.bindings())?;
 let output: Buffer = model.run(&input)?;
 ```
 
+The bound model owns shared device-buffer handles; `weights` and `compiled` do
+not need to be retained beside it in a serving pipeline.
+
 Inputs retain the explicit model-function order. Parameters are selected by
 their stable lexical paths, then `CompiledModel::bind_parameters` freezes their
 PJRT ABI order for repeated execution. This prevents a checkpoint from becoming

@@ -1116,6 +1116,11 @@ impl Element for half::bf16 {
     const DTYPE: DType = DType::BF16;
 }
 
+/// A shared device allocation handle.
+///
+/// Cloning is constant-time and keeps the native PJRT buffer alive; it does
+/// not copy device memory.
+#[derive(Clone)]
 pub struct Buffer {
     inner: Arc<BufferInner>,
 }

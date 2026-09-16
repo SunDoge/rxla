@@ -82,6 +82,9 @@ enum InputBinding {
 }
 
 /// Records symbolic state versions without modifying live runtime buffers.
+/// Clones share the underlying IR and state-slot identity while retaining an
+/// independent argument/slot view.
+#[derive(Clone)]
 pub struct StateGraph {
     graph: Graph,
     owner: Arc<()>,

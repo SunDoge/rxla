@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// One apply trace plus its immutable Pliron program builder.
+#[derive(Clone)]
 pub struct AppliedModel {
     graph: Tracer,
     state_graph: StateGraph,
@@ -27,23 +28,17 @@ pub struct ModelArguments<'a> {
     values: Vec<&'a Buffer>,
 }
 
-/// Path-validated parameters in schema order, reusable across executions.
-pub struct BoundParameters<'model, 'parameters> {
-    model: &'model AppliedModel,
-    values: Vec<Option<&'parameters Buffer>>,
-}
-
 /// A compiled stateless model that retains its named parameter ABI and output structure.
-pub struct CompiledModel<'model> {
-    model: &'model AppliedModel,
+pub struct CompiledModel {
+    model: AppliedModel,
     executable: Arc<Executable>,
 }
 
-/// A compiled model with its named parameters validated and ordered once.
-pub struct BoundModel<'model, 'parameters> {
-    model: &'model AppliedModel,
+/// A self-contained compiled model with owned, shared device-buffer handles.
+pub struct BoundModel {
+    model: AppliedModel,
     executable: Arc<Executable>,
-    parameters: Vec<Option<&'parameters Buffer>>,
+    parameters: Vec<Option<Buffer>>,
 }
 
 /// Named initialization for a compiled unified stateful model.
@@ -93,19 +88,7 @@ impl<'a> ModelArguments<'a> {
     }
 }
 
-impl<'model, 'parameters> BoundParameters<'model, 'parameters> {
-    /// Bind changing positional inputs without repeating parameter lookup or
-    /// parameter buffer validation.
-    pub fn bind<'inputs, I>(&self, inputs: I) -> Result<ModelArguments<'inputs>>
-    where
-        'parameters: 'inputs,
-        I: ModelInputValues<'inputs>,
-    {
-        self.model.bind_ordered(&inputs.into_values(), &self.values)
-    }
-}
-
-impl<'model> CompiledModel<'model> {
+impl CompiledModel {
     /// Access the low-level executable for profiler and backend integrations.
     pub fn executable(&self) -> &Executable {
         &self.executable
@@ -115,11 +98,17 @@ impl<'model> CompiledModel<'model> {
     pub fn bind_parameters<'parameters>(
         &self,
         parameters: impl IntoIterator<Item = (&'parameters str, &'parameters Buffer)>,
-    ) -> Result<BoundModel<'model, 'parameters>> {
+    ) -> Result<BoundModel> {
+        let parameters = self
+            .model
+            .order_parameters(parameters)?
+            .into_iter()
+            .map(|value| value.cloned())
+            .collect();
         Ok(BoundModel {
-            model: self.model,
+            model: self.model.clone(),
             executable: Arc::clone(&self.executable),
-            parameters: self.model.order_parameters(parameters)?,
+            parameters,
         })
     }
 
@@ -139,16 +128,20 @@ impl<'model> CompiledModel<'model> {
     }
 }
 
-impl<'parameters> BoundModel<'_, 'parameters> {
+impl BoundModel {
     /// Execute with changing inputs while reusing validated parameter bindings.
     pub fn run<'inputs, I, O>(&self, inputs: I) -> Result<O>
     where
-        'parameters: 'inputs,
         I: ModelInputValues<'inputs>,
         O: ModelOutputValues,
     {
         let inputs = inputs.into_values();
-        let arguments = self.model.bind_ordered(&inputs, &self.parameters)?;
+        let parameters = self
+            .parameters
+            .iter()
+            .map(Option::as_ref)
+            .collect::<Vec<_>>();
+        let arguments = self.model.bind_ordered(&inputs, &parameters)?;
         let outputs = self.executable.execute(arguments.as_slice())?;
         self.model.decode_outputs(outputs)
     }
@@ -404,9 +397,9 @@ impl AppliedModel {
     }
 
     /// Compile a stateless model while retaining its typed model ABI.
-    pub fn compile(&self, compiler: &mut Compiler) -> Result<CompiledModel<'_>> {
+    pub fn compile(&self, compiler: &mut Compiler) -> Result<CompiledModel> {
         Ok(CompiledModel {
-            model: self,
+            model: self.clone(),
             executable: self.compile_executable(compiler)?,
         })
     }
@@ -491,17 +484,6 @@ impl AppliedModel {
         self.validate_inputs(&inputs)?;
         let parameters = self.order_parameters(parameters)?;
         self.assemble(&inputs, &parameters)
-    }
-
-    /// Validate and order named parameter buffers once for repeated execution.
-    pub fn bind_parameters<'model, 'parameters>(
-        &'model self,
-        parameters: impl IntoIterator<Item = (&'parameters str, &'parameters Buffer)>,
-    ) -> Result<BoundParameters<'model, 'parameters>> {
-        Ok(BoundParameters {
-            model: self,
-            values: self.order_parameters(parameters)?,
-        })
     }
 
     fn order_parameters<'a>(
