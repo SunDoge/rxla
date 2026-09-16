@@ -659,6 +659,16 @@ impl StateProgram {
         Ok((ty.dtype, ty.dims.clone()))
     }
 
+    /// Allocate a zero-filled buffer for one state slot.
+    ///
+    /// Unlike [`Self::zero_state`], this does not require a complete state
+    /// layout. It is intended for builders that already have explicit buffers
+    /// for some slots and need defaults only for the remainder.
+    pub fn zero_state_slot(&self, slot: &StateSlot) -> Result<Buffer> {
+        let (dtype, shape) = self.state_type(slot)?;
+        self.zero_buffer(dtype, &shape)
+    }
+
     /// Allocate independent zero-filled buffers for every state slot.
     ///
     /// Slots may be in any order, but must be complete, unique and belong to
@@ -676,20 +686,22 @@ impl StateProgram {
         slots
             .iter()
             .zip(layout)
-            .map(|(slot, (dtype, shape))| {
-                let len = shape
-                    .iter()
-                    .try_fold(1usize, |n, &d| n.checked_mul(usize::try_from(d).ok()?))
-                    .ok_or_else(|| err("state element count overflow"))?;
-                let buffer = match dtype {
-                    DType::F32 => self.client().buffer(&shape, &vec![0.; len])?,
-                    DType::I32 => self.client().buffer(&shape, &vec![0; len])?,
-                    DType::BF16 => self.client().buffer_bf16_bits(&shape, &vec![0; len])?,
-                    dtype => return Err(err(format!("cannot initialize state dtype {dtype:?}"))),
-                };
-                Ok((slot.clone(), buffer))
-            })
+            .map(|(slot, (dtype, shape))| Ok((slot.clone(), self.zero_buffer(dtype, &shape)?)))
             .collect()
+    }
+
+    fn zero_buffer(&self, dtype: DType, shape: &[i64]) -> Result<Buffer> {
+        let len = shape
+            .iter()
+            .try_fold(1usize, |n, &d| n.checked_mul(usize::try_from(d).ok()?))
+            .ok_or_else(|| err("state element count overflow"))?;
+        match dtype {
+            DType::F32 => Ok(self.client().buffer(shape, &vec![0.; len])?),
+            DType::I32 => Ok(self.client().buffer(shape, &vec![0; len])?),
+            DType::BF16 => Ok(self.client().buffer_bf16_bits(shape, &vec![0; len])?),
+            DType::U8 => Ok(self.client().buffer(shape, &vec![0u8; len])?),
+            dtype => Err(err(format!("cannot initialize state dtype {dtype:?}"))),
+        }
     }
 
     /// Inspect a retained input-backed or resident parameter in this plan.

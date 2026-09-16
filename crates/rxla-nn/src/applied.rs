@@ -15,6 +15,7 @@ pub struct AppliedModel {
     states: Vec<(String, StateSlot)>,
     outputs: Vec<Tensor>,
     parameters: Vec<Tensor>,
+    resident_parameters: Vec<Option<StateSlot>>,
     schema: ParamSchema,
 }
 
@@ -29,7 +30,7 @@ pub struct ModelArguments<'a> {
 /// Path-validated parameters in schema order, reusable across executions.
 pub struct BoundParameters<'model, 'parameters> {
     model: &'model AppliedModel,
-    values: Vec<&'parameters Buffer>,
+    values: Vec<Option<&'parameters Buffer>>,
 }
 
 /// Named initialization for a compiled unified stateful model.
@@ -37,6 +38,7 @@ pub struct ModelSessionBuilder<'a> {
     model: &'a AppliedModel,
     program: &'a StateProgram,
     overrides: BTreeMap<String, Buffer>,
+    parameter_overrides: BTreeMap<String, Buffer>,
 }
 
 /// One optimizer/transform-owned resident state slot appended after model tracing.
@@ -81,6 +83,7 @@ impl AppliedModel {
         states: Vec<(String, StateSlot)>,
         outputs: Vec<Tensor>,
         parameters: Vec<Tensor>,
+        resident_parameters: Vec<Option<StateSlot>>,
         schema: ParamSchema,
     ) -> Self {
         let graph = state_graph.tracer();
@@ -90,6 +93,7 @@ impl AppliedModel {
             states,
             outputs,
             parameters,
+            resident_parameters,
             schema,
         }
     }
@@ -117,8 +121,23 @@ impl AppliedModel {
         self.states.iter().map(|(path, slot)| (path.as_str(), slot))
     }
 
+    /// Resident parameter identities in schema order.
+    pub fn resident_parameters(
+        &self,
+    ) -> impl Iterator<Item = (ParameterId, &ParameterSpec, &StateSlot)> {
+        self.schema
+            .parameters()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, spec)| {
+                self.resident_parameters[index]
+                    .as_ref()
+                    .map(|slot| (ParameterId::from_index(index), spec, slot))
+            })
+    }
+
     pub fn is_stateful(&self) -> bool {
-        !self.states.is_empty()
+        !self.states.is_empty() || self.resident_parameters.iter().any(Option::is_some)
     }
 
     /// The frozen effect schema used to produce this program.
@@ -174,7 +193,7 @@ impl AppliedModel {
     /// Lower model outputs while preserving the frozen schema ABI exactly.
     pub fn prepare(&self) -> Result<LoweredProgram> {
         ensure!(
-            self.states.is_empty(),
+            !self.is_stateful(),
             InvalidDefinitionSnafu {
                 message: "stateful models must use prepare_stateful"
             }
@@ -189,7 +208,7 @@ impl AppliedModel {
     /// Compile this immutable model snapshot through the caller's cache-aware compiler.
     pub fn compile(&self, compiler: &mut Compiler) -> Result<Arc<Executable>> {
         ensure!(
-            self.states.is_empty(),
+            !self.is_stateful(),
             InvalidDefinitionSnafu {
                 message: "stateful models must use compile_stateful"
             }
@@ -223,13 +242,14 @@ impl AppliedModel {
             model: self,
             program,
             overrides: BTreeMap::new(),
+            parameter_overrides: BTreeMap::new(),
         }
     }
 
     /// Lower graph-local outputs produced by a model transformation.
     pub fn prepare_tensors(&self, outputs: &[Tensor]) -> Result<LoweredProgram> {
         ensure!(
-            self.states.is_empty(),
+            !self.is_stateful(),
             InvalidDefinitionSnafu {
                 message: "stateful transforms require a state-aware training path"
             }
@@ -244,7 +264,7 @@ impl AppliedModel {
         outputs: &[Tensor],
     ) -> Result<Arc<Executable>> {
         ensure!(
-            self.states.is_empty(),
+            !self.is_stateful(),
             InvalidDefinitionSnafu {
                 message: "stateful transforms require a state-aware training path"
             }
@@ -281,7 +301,7 @@ impl AppliedModel {
     fn order_parameters<'a>(
         &self,
         parameters: impl IntoIterator<Item = (&'a str, &'a Buffer)>,
-    ) -> Result<Vec<&'a Buffer>> {
+    ) -> Result<Vec<Option<&'a Buffer>>> {
         let mut named = BTreeMap::new();
         for (path, buffer) in parameters {
             let spec = self
@@ -297,11 +317,25 @@ impl AppliedModel {
         self.schema
             .parameters
             .iter()
-            .map(|spec| {
+            .enumerate()
+            .map(|(index, spec)| {
+                if self.resident_parameters[index].is_some() {
+                    ensure!(
+                        !named.contains_key(spec.path()),
+                        InvalidDefinitionSnafu {
+                            message: format!(
+                                "resident parameter {:?} must be initialized through a session",
+                                spec.path()
+                            )
+                        }
+                    );
+                    return Ok(None);
+                }
                 named
                     .get(spec.path())
                     .copied()
                     .with_context(|| MissingBindingSnafu { path: spec.path() })
+                    .map(Some)
             })
             .collect()
     }
@@ -309,7 +343,7 @@ impl AppliedModel {
     fn bind_ordered<'a>(
         &self,
         inputs: &[&'a Buffer],
-        parameters: &[&'a Buffer],
+        parameters: &[Option<&'a Buffer>],
     ) -> Result<ModelArguments<'a>> {
         self.validate_inputs(inputs)?;
         self.assemble(inputs, parameters)
@@ -332,7 +366,7 @@ impl AppliedModel {
     fn assemble<'a>(
         &self,
         inputs: &[&'a Buffer],
-        parameters: &[&'a Buffer],
+        parameters: &[Option<&'a Buffer>],
     ) -> Result<ModelArguments<'a>> {
         ensure!(
             parameters.len() == self.schema.parameters.len(),
@@ -345,7 +379,11 @@ impl AppliedModel {
         for argument in &self.schema.arguments {
             match *argument {
                 ModelArgument::Input(index) => values.push(inputs[index]),
-                ModelArgument::Parameter(index) => values.push(parameters[index]),
+                ModelArgument::Parameter(index) => {
+                    if let Some(parameter) = parameters[index] {
+                        values.push(parameter);
+                    }
+                }
                 ModelArgument::State(_) => {}
             }
         }
@@ -370,6 +408,28 @@ impl ModelSessionBuilder<'_> {
             self.overrides.insert(name.clone(), value).is_none(),
             InvalidDefinitionSnafu {
                 message: format!("duplicate state initializer {name:?}")
+            }
+        );
+        Ok(self)
+    }
+
+    /// Initialize one resident parameter by its canonical schema path.
+    pub fn parameter(mut self, path: impl Into<String>, value: Buffer) -> Result<Self> {
+        let path = path.into();
+        ensure!(
+            self.model
+                .resident_parameters()
+                .any(|(_, spec, _)| spec.path() == path),
+            InvalidDefinitionSnafu {
+                message: format!("unknown resident parameter {path:?}")
+            }
+        );
+        ensure!(
+            self.parameter_overrides
+                .insert(path.clone(), value)
+                .is_none(),
+            InvalidDefinitionSnafu {
+                message: format!("duplicate resident parameter initializer {path:?}")
             }
         );
         Ok(self)
@@ -405,18 +465,37 @@ impl ModelSessionBuilder<'_> {
     }
 
     pub fn build(mut self) -> Result<Session> {
-        let slots = self
+        let resident = self
+            .model
+            .resident_parameters()
+            .map(|(_, spec, slot)| (spec.path().to_owned(), slot.clone()))
+            .collect::<Vec<_>>();
+        let mut initial = Vec::with_capacity(resident.len() + self.model.states.len());
+        for (name, slot) in &resident {
+            let value = self
+                .parameter_overrides
+                .remove(name)
+                .with_context(|| MissingResidentParameterInitializerSnafu { path: name })?;
+            initial.push((slot.clone(), value));
+        }
+        let mut ordinary = self
             .model
             .states
             .iter()
-            .map(|(_, slot)| slot.clone())
-            .collect::<Vec<_>>();
-        let mut initial = self.program.zero_state(&slots)?;
-        for ((name, _), (_, value)) in self.model.states.iter().zip(&mut initial) {
+            .map(|(_, slot)| Ok((slot.clone(), self.program.zero_state_slot(slot)?)))
+            .collect::<Result<Vec<_>>>()?;
+        for ((name, _), (_, value)) in self.model.states.iter().zip(&mut ordinary) {
             if let Some(override_value) = self.overrides.remove(name) {
                 *value = override_value;
             }
         }
+        initial.extend(ordinary);
+        ensure!(
+            self.parameter_overrides.is_empty(),
+            InvalidDefinitionSnafu {
+                message: "unused resident parameter initializers"
+            }
+        );
         Ok(self.program.session(initial)?)
     }
 }

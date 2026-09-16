@@ -54,6 +54,8 @@ pub enum Error {
     NegativeParameterDimension { path: String },
     #[snafu(display("parameter dtype {dtype:?} is unsupported"))]
     UnsupportedParameterDType { dtype: DType },
+    #[snafu(display("resident parameter {path:?} has no session initializer"))]
+    MissingResidentParameterInitializer { path: String },
     #[snafu(display("model input dtype {dtype:?} is unsupported"))]
     UnsupportedInputDType { dtype: DType },
     #[snafu(display("parameter declaration for {path:?} is incompatible with the schema"))]
@@ -154,6 +156,15 @@ where
     pub fn apply(&self, schema: &ParamSchema) -> Result<AppliedModel> {
         apply(schema, |cx| (self.apply)(cx))
     }
+
+    /// Trace with selected parameters stored as resident session state.
+    pub fn apply_resident(
+        &self,
+        schema: &ParamSchema,
+        selection: &ParameterSelection<'_>,
+    ) -> Result<AppliedModel> {
+        apply_resident(schema, selection, |cx| (self.apply)(cx))
+    }
 }
 
 impl<F, I> Model<F, I>
@@ -183,6 +194,18 @@ where
     {
         apply(schema, |cx| self.apply.invoke(cx, &self.inputs))
     }
+
+    /// Trace with selected parameters stored as resident session state.
+    pub fn apply_resident<Marker>(
+        &self,
+        schema: &ParamSchema,
+        selection: &ParameterSelection<'_>,
+    ) -> Result<AppliedModel>
+    where
+        F: ModelHandler<I, Marker>,
+    {
+        apply_resident(schema, selection, |cx| self.apply.invoke(cx, &self.inputs))
+    }
 }
 
 enum ParamMode {
@@ -194,6 +217,7 @@ enum ParamMode {
         schema: ParamSchema,
         values: BTreeMap<String, Tensor>,
         read: HashSet<String>,
+        resident: HashSet<ParameterId>,
     },
 }
 
@@ -209,6 +233,7 @@ pub struct Cx {
     mode: ParamMode,
     states: BTreeMap<String, StateDeclaration>,
     rngs: BTreeMap<String, RngStream>,
+    resident_parameters: BTreeMap<String, StateSlot>,
 }
 
 struct StateDeclaration {
@@ -249,10 +274,11 @@ impl Cx {
             },
             states: BTreeMap::new(),
             rngs: BTreeMap::new(),
+            resident_parameters: BTreeMap::new(),
         }
     }
 
-    fn apply(schema: ParamSchema) -> Self {
+    fn apply(schema: ParamSchema, resident: HashSet<ParameterId>) -> Self {
         Self {
             graph: StateGraph::default(),
             scope: Vec::new(),
@@ -262,9 +288,11 @@ impl Cx {
                 schema,
                 values: BTreeMap::new(),
                 read: HashSet::new(),
+                resident,
             },
             states: BTreeMap::new(),
             rngs: BTreeMap::new(),
+            resident_parameters: BTreeMap::new(),
         }
     }
 
@@ -290,7 +318,11 @@ impl Cx {
             shape: shape.to_vec(),
             dtype,
         };
-        let (graph, mode) = (&mut self.graph, &mut self.mode);
+        let (graph, mode, resident_parameters) = (
+            &mut self.graph,
+            &mut self.mode,
+            &mut self.resident_parameters,
+        );
         match mode {
             ParamMode::Init { schema, values } => {
                 if let Some(existing) = schema.get(&path) {
@@ -313,6 +345,7 @@ impl Cx {
                 schema,
                 values,
                 read,
+                resident,
             } => {
                 let expected = schema
                     .get(&path)
@@ -333,7 +366,19 @@ impl Cx {
                         index: self.effect_index
                     }
                 );
-                let value = parameter_tensor(graph, shape, dtype)?;
+                let value = if resident.contains(&ParameterId::from_index(parameter_index)) {
+                    let slot = graph.state_named(&format!("__parameter.{path}"), shape, dtype)?;
+                    let stored = graph.read(&slot)?;
+                    let value = match dtype {
+                        DType::BF16 => stored.cast(DType::F32)?,
+                        DType::F32 | DType::U8 => stored,
+                        _ => return UnsupportedParameterDTypeSnafu { dtype }.fail(),
+                    };
+                    resident_parameters.insert(path.clone(), slot);
+                    value
+                } else {
+                    parameter_tensor(graph, shape, dtype)?
+                };
                 values.insert(path, value.clone());
                 self.effect_index += 1;
                 Ok(value)
@@ -584,6 +629,14 @@ impl Cx {
             .collect()
     }
 
+    fn resident_parameter_slots(&self, schema: &ParamSchema) -> Vec<Option<StateSlot>> {
+        schema
+            .parameters()
+            .iter()
+            .map(|parameter| self.resident_parameters.get(parameter.path()).cloned())
+            .collect()
+    }
+
     fn into_schema(self) -> ParamSchema {
         match self.mode {
             ParamMode::Init { schema, .. } => schema,
@@ -707,17 +760,37 @@ pub fn apply<T: ModelOutputs>(
     schema: &ParamSchema,
     body: impl FnOnce(&mut Cx) -> Result<T>,
 ) -> Result<AppliedModel> {
-    let mut cx = Cx::apply(schema.clone());
+    apply_with_resident(schema, HashSet::new(), body)
+}
+
+/// Interpret selected parameters as resident state rather than ABI inputs.
+pub fn apply_resident<T: ModelOutputs>(
+    schema: &ParamSchema,
+    selection: &ParameterSelection<'_>,
+    body: impl FnOnce(&mut Cx) -> Result<T>,
+) -> Result<AppliedModel> {
+    ensure!(selection.schema() == schema, SelectionSchemaMismatchSnafu);
+    apply_with_resident(schema, selection.ids().iter().copied().collect(), body)
+}
+
+fn apply_with_resident<T: ModelOutputs>(
+    schema: &ParamSchema,
+    resident: HashSet<ParameterId>,
+    body: impl FnOnce(&mut Cx) -> Result<T>,
+) -> Result<AppliedModel> {
+    let mut cx = Cx::apply(schema.clone(), resident);
     let outputs = body(&mut cx)?.into_tensors();
     cx.finish_rngs()?;
     cx.finish_apply()?;
     let parameters = cx.parameter_tensors();
     let states = cx.state_slots(schema);
+    let resident_parameters = cx.resident_parameter_slots(schema);
     Ok(AppliedModel::new(
         cx.graph,
         states,
         outputs,
         parameters,
+        resident_parameters,
         schema.clone(),
     ))
 }
@@ -975,6 +1048,74 @@ mod tests {
         let prepared = applied.prepare_stateful().unwrap();
         let (_, slot) = applied.states().next().unwrap();
         assert_eq!(prepared.state_type(slot).unwrap(), (DType::F32, vec![2]));
+    }
+
+    #[test]
+    fn selected_parameters_can_be_traced_as_resident_state() {
+        let definition = Model::new(|cx: &mut Cx, input: Tensor| {
+            cx.named("head")?.linear(2).bias(false).apply(&input)
+        })
+        .inputs(ModelInput::new([1, 3]));
+        let schema = definition.init().unwrap();
+        let selection = schema.select_under("head");
+        let applied = definition.apply_resident(&schema, &selection).unwrap();
+
+        assert!(applied.is_stateful());
+        assert_eq!(applied.resident_parameters().count(), 1);
+        let prepared = applied.prepare_stateful().unwrap();
+        assert_eq!(prepared.input_indices(), [0]);
+        let (_, spec, slot) = applied.resident_parameters().next().unwrap();
+        assert_eq!(spec.path(), "head.weight");
+        assert_eq!(prepared.state_type(slot).unwrap(), (DType::F32, vec![2, 3]));
+
+        let quantized = Model::new(|cx: &mut Cx| {
+            Ok(cx
+                .param_dtype("weight", &[2], DType::U8)?
+                .cast(DType::F32)?)
+        });
+        let schema = quantized.init().unwrap();
+        let applied = quantized
+            .apply_resident(&schema, &schema.select_all())
+            .unwrap();
+        let prepared = applied.prepare_stateful().unwrap();
+        let (_, _, slot) = applied.resident_parameters().next().unwrap();
+        assert_eq!(prepared.state_type(slot).unwrap(), (DType::U8, vec![2]));
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
+    fn resident_parameter_executes_without_a_parameter_argument() {
+        let client = unsafe {
+            Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
+        }
+        .unwrap();
+        let definition = Model::new(|cx: &mut Cx, input: Tensor| {
+            cx.named("head")?.linear(2).bias(false).apply(&input)
+        })
+        .inputs(ModelInput::new([1, 3]));
+        let schema = definition.init().unwrap();
+        let applied = definition
+            .apply_resident(&schema, &schema.select_all())
+            .unwrap();
+        let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+        let program = applied.compile_stateful(&mut compiler).unwrap();
+        assert!(matches!(
+            applied.session(&program).build(),
+            Err(Error::MissingResidentParameterInitializer { .. })
+        ));
+        let weight = client
+            .buffer(&[2, 3], &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+            .unwrap();
+        let mut session = applied
+            .session(&program)
+            .parameter("head.weight", weight)
+            .unwrap()
+            .build()
+            .unwrap();
+        let input = client.buffer(&[1, 3], &[2.0, 3.0, 4.0]).unwrap();
+        let outputs = session.run(&[&input]).unwrap();
+        let output: Buffer = applied.decode_outputs(outputs).unwrap();
+        assert_eq!(output.to_vec::<f32>().unwrap(), [2.0, 3.0]);
     }
 
     #[test]

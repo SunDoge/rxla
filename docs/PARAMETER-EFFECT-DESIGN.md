@@ -162,16 +162,20 @@ only selected replacement parameters cross the visible output ABI. This is not
 a global optimizer registry: the transform explicitly declares stable paths
 under `__optimizer.adam`, and a session owns the resulting buffers.
 
-Selected model parameters are currently ordinary device-buffer inputs and
-updated parameter buffers are visible optimizer results. This involves no
-host payload copy, but the host still installs the returned handles for the
-next call. Making trainable parameters resident is a future parameter-effect
-interpretation, not a per-step fixed-input rebinding shortcut: it must choose
-resident storage while tracing, initialize it by canonical parameter identity,
-record optimizer writes as hidden state roots, and preserve the same storage
-policy when switching between training and inference programs. Until those
-contracts are implemented together, RXLA does not describe parameters as
-resident or claim an atomic parameter/state commit.
+Parameters are ordinary device-buffer inputs by default. `apply_resident`
+instead interprets a `ParameterSelection` as session-owned state while tracing.
+Those parameters disappear from the visible execution ABI and must be
+initialized once, by canonical schema path, through `ModelSessionBuilder`.
+F32, BF16 and U8 storage preserve the same symbolic semantics as input-backed
+parameters, so frozen and quantized inference weights can use this policy too.
+
+SGD and Adam still expose selected replacement parameters as visible optimizer
+results. Their resident optimizer state is committed atomically with model state
+and RNG, but parameter handles are still installed by the caller between steps.
+The next integration step is to record selected optimizer writes into the
+resident parameter slots. Only then will one training session atomically commit
+parameters, model state, RNG and optimizer state with no visible parameter
+results; the current implementation deliberately makes no such claim.
 
 `Cx` intentionally exposes only effect primitives and `named`. The layer
 vocabulary lives on the temporary named namespace, so adding layers does not
