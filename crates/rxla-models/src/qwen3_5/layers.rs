@@ -2,7 +2,7 @@ use super::*;
 use rxla_core::{Conv2dOptions, RotaryLayout};
 
 fn projection(cx: &mut Cx, name: &str, input: &Tensor, width: i64, group: i64) -> Result<Tensor> {
-    cx.named(name)?.quantized_linear(width, group).apply(input)
+    cx.layer(name)?.quantized_linear(width, group).apply(input)
 }
 
 fn partial_rope(input: &Tensor, angles: &Tensor, width: i64) -> Result<Tensor> {
@@ -51,7 +51,7 @@ pub(super) fn full_attention(
         .reshape(&[*batch, *sequence, config.attention_heads * config.head_dim])?
         .sigmoid()?;
     let query = cx
-        .named("q_norm")?
+        .layer("q_norm")?
         .rms_norm()
         .epsilon(config.epsilon)
         .zero_centered(true)
@@ -66,7 +66,7 @@ pub(super) fn full_attention(
     )?
     .reshape(&[*batch, *sequence, config.key_value_heads, config.head_dim])?;
     let key = cx
-        .named("k_norm")?
+        .layer("k_norm")?
         .rms_norm()
         .epsilon(config.epsilon)
         .zero_centered(true)
@@ -120,7 +120,7 @@ pub(super) fn gated_delta_attention(
     let mixed = projection(cx, "in_proj_qkv", input, width * 3, config.quant_group_size)?
         .reshape(&[*batch, *sequence, 1, width * 3])?;
     let kernel = cx
-        .named("conv1d")?
+        .layer("conv1d")?
         .param("weight", &[width * 3, 1, config.conv_kernel])?
         .reshape(&[width * 3, 1, config.conv_kernel, 1])?;
     let mixed = mixed
@@ -232,7 +232,7 @@ pub(super) fn gated_delta_attention(
         .rsqrt()?
         .broadcast_to(output.shape())?;
     let norm_weight = cx
-        .named("norm")?
+        .layer("norm")?
         .param("weight", &[config.linear_head_dim])?
         .broadcast_to(output.shape())?;
     let output = output

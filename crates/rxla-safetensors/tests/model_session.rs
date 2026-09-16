@@ -7,7 +7,7 @@ use safetensors::tensor::{TensorView, serialize};
 use std::io::Cursor;
 
 fn linear(cx: &mut Cx, input: Tensor) -> NnResult<Tensor> {
-    cx.named("head")?.linear(2).bias(false).apply(&input)
+    cx.layer("head")?.linear(2).bias(false).apply(&input)
 }
 
 #[test]

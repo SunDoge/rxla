@@ -13,21 +13,21 @@ fn convolution() -> Conv2dOptions {
 }
 
 fn tiny_block(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
-    let mut conv = cx.named("conv")?;
+    let mut conv = cx.scope("conv")?;
     let hidden = conv
-        .named("0")?
+        .layer("0")?
         .conv2d(input.shape()[3], [3, 3])
         .options(convolution())
         .apply(input)?
         .relu()?;
     let hidden = conv
-        .named("2")?
+        .layer("2")?
         .conv2d(input.shape()[3], [3, 3])
         .options(convolution())
         .apply(&hidden)?
         .relu()?;
     let hidden = conv
-        .named("4")?
+        .layer("4")?
         .conv2d(input.shape()[3], [3, 3])
         .options(convolution())
         .apply(&hidden)?;
@@ -41,7 +41,7 @@ fn transition(
     output_channels: i64,
     bias: bool,
 ) -> Result<Tensor> {
-    cx.named(&layer.to_string())?
+    cx.layer(&layer.to_string())?
         .conv2d(output_channels, [3, 3])
         .options(convolution())
         .bias(bias)
@@ -60,15 +60,15 @@ pub fn taesd_decoder(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
         });
     }
 
-    let mut decoder = cx.named("decoder")?;
-    let mut layers = decoder.named("layers")?;
+    let mut decoder = cx.scope("decoder")?;
+    let mut layers = decoder.scope("layers")?;
     let mut hidden = input.mul_scalar(1. / 3.)?.tanh()?.mul_scalar(3.)?;
     hidden = transition(&mut layers, 0, &hidden, 64, true)?.relu()?;
 
     let mut next_layer = 2;
     for (stage_index, block_count) in [3, 3, 3, 1].into_iter().enumerate() {
         for _ in 0..block_count {
-            let mut block = layers.named(&next_layer.to_string())?;
+            let mut block = layers.scope(&next_layer.to_string())?;
             hidden = tiny_block(&mut block, &hidden)?;
             next_layer += 1;
         }

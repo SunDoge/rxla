@@ -83,13 +83,8 @@ fn convolution(padding: i64, stride: i64) -> Conv2dOptions {
     }
 }
 
-fn indexed_scope<T>(
-    cx: &mut Cx,
-    collection: &str,
-    index: usize,
-    build: impl FnOnce(&mut Cx) -> Result<T>,
-) -> Result<T> {
-    cx.scope(collection, |cx| cx.scope(&index.to_string(), build))
+fn indexed_scope<'a>(cx: &'a mut Cx, collection: &str, index: usize) -> Result<Scope<'a>> {
+    cx.scope_path([collection.to_owned(), index.to_string()])
 }
 
 /// Conditional latent-diffusion UNet. Samples/results are NHWC; timestep input
@@ -119,135 +114,132 @@ pub fn unet(
         .ok_or_else(|| Error::InvalidDefinition {
             message: "UNet timestep width overflow".into(),
         })?;
-    let temb = cx.scope("time_embedding", |cx| {
-        timestep_embedding(cx, timestep, time_width)
-    })?;
+    let temb = {
+        let mut scope = cx.scope("time_embedding")?;
+        timestep_embedding(&mut scope, timestep, time_width)?
+    };
     let mut hidden = cx
-        .named("conv_in")?
+        .layer("conv_in")?
         .conv2d(base, [3, 3])
         .options(convolution(1, 1))
         .apply(sample)?;
     let mut residuals = vec![hidden.clone()];
 
     for (stage, &out_channels) in config.block_channels.iter().enumerate() {
-        hidden = indexed_scope(cx, "down_blocks", stage, |cx| {
-            let mut value = hidden;
-            for layer in 0..config.layers_per_block {
-                value = indexed_scope(cx, "resnets", layer, |cx| {
-                    resnet2d(
-                        cx,
-                        &value,
-                        &temb,
-                        Resnet2dOptions::new(out_channels)
-                            .groups(config.norm_groups)
-                            .epsilon(config.norm_epsilon),
-                    )
-                })?;
-                if config.down_cross_attention[stage] {
-                    value = indexed_scope(cx, "attentions", layer, |cx| {
-                        spatial_transformer(
-                            cx,
-                            &value,
-                            context,
-                            SpatialTransformerOptions::new(out_channels / config.attention_heads)
-                                .groups(config.norm_groups),
-                        )
-                    })?;
-                }
-                residuals.push(value.clone());
+        let mut block = indexed_scope(cx, "down_blocks", stage)?;
+        let mut value = hidden;
+        for layer in 0..config.layers_per_block {
+            {
+                let mut scope = indexed_scope(&mut block, "resnets", layer)?;
+                value = resnet2d(
+                    &mut scope,
+                    &value,
+                    &temb,
+                    Resnet2dOptions::new(out_channels)
+                        .groups(config.norm_groups)
+                        .epsilon(config.norm_epsilon),
+                )?;
             }
-            if stage + 1 < config.block_channels.len() {
-                value = cx.scope("downsamplers", |cx| {
-                    cx.scope("0", |cx| {
-                        cx.named("conv")?
-                            .conv2d(out_channels, [3, 3])
-                            .options(convolution(1, 2))
-                            .apply(&value)
-                    })
-                })?;
-                residuals.push(value.clone());
+            if config.down_cross_attention[stage] {
+                let mut scope = indexed_scope(&mut block, "attentions", layer)?;
+                value = spatial_transformer(
+                    &mut scope,
+                    &value,
+                    context,
+                    SpatialTransformerOptions::new(out_channels / config.attention_heads)
+                        .groups(config.norm_groups),
+                )?;
             }
-            Ok(value)
-        })?;
+            residuals.push(value.clone());
+        }
+        if stage + 1 < config.block_channels.len() {
+            let mut scope = block.scope_path(["downsamplers", "0"])?;
+            value = scope
+                .layer("conv")?
+                .conv2d(out_channels, [3, 3])
+                .options(convolution(1, 2))
+                .apply(&value)?;
+            residuals.push(value.clone());
+        }
+        hidden = value;
     }
 
-    hidden = cx.scope("mid_block", |cx| {
-        let first = indexed_scope(cx, "resnets", 0, |cx| {
+    hidden = {
+        let mut mid = cx.scope("mid_block")?;
+        let first = {
+            let mut scope = indexed_scope(&mut mid, "resnets", 0)?;
             resnet2d(
-                cx,
+                &mut scope,
                 &hidden,
                 &temb,
                 Resnet2dOptions::new(hidden.shape()[3])
                     .groups(config.norm_groups)
                     .epsilon(config.norm_epsilon),
-            )
-        })?;
-        let attended = indexed_scope(cx, "attentions", 0, |cx| {
+            )?
+        };
+        let attended = {
+            let mut scope = indexed_scope(&mut mid, "attentions", 0)?;
             spatial_transformer(
-                cx,
+                &mut scope,
                 &first,
                 context,
                 SpatialTransformerOptions::new(first.shape()[3] / config.attention_heads)
                     .groups(config.norm_groups),
-            )
-        })?;
-        indexed_scope(cx, "resnets", 1, |cx| {
-            resnet2d(
-                cx,
-                &attended,
-                &temb,
-                Resnet2dOptions::new(attended.shape()[3])
-                    .groups(config.norm_groups)
-                    .epsilon(config.norm_epsilon),
-            )
-        })
-    })?;
+            )?
+        };
+        let mut scope = indexed_scope(&mut mid, "resnets", 1)?;
+        resnet2d(
+            &mut scope,
+            &attended,
+            &temb,
+            Resnet2dOptions::new(attended.shape()[3])
+                .groups(config.norm_groups)
+                .epsilon(config.norm_epsilon),
+        )?
+    };
 
     for up_stage in 0..config.block_channels.len() {
         let channel_stage = config.block_channels.len() - 1 - up_stage;
         let out_channels = config.block_channels[channel_stage];
-        hidden = indexed_scope(cx, "up_blocks", up_stage, |cx| {
-            let mut value = hidden;
-            for layer in 0..=config.layers_per_block {
-                let residual = residuals.pop().ok_or_else(|| Error::InvalidDefinition {
-                    message: "UNet has too few down-block residuals".into(),
-                })?;
-                value = Tensor::concatenate(&[value, residual], 3)?;
-                value = indexed_scope(cx, "resnets", layer, |cx| {
-                    resnet2d(
-                        cx,
-                        &value,
-                        &temb,
-                        Resnet2dOptions::new(out_channels)
-                            .groups(config.norm_groups)
-                            .epsilon(config.norm_epsilon),
-                    )
-                })?;
-                if config.up_cross_attention[up_stage] {
-                    value = indexed_scope(cx, "attentions", layer, |cx| {
-                        spatial_transformer(
-                            cx,
-                            &value,
-                            context,
-                            SpatialTransformerOptions::new(out_channels / config.attention_heads)
-                                .groups(config.norm_groups),
-                        )
-                    })?;
-                }
+        let mut block = indexed_scope(cx, "up_blocks", up_stage)?;
+        let mut value = hidden;
+        for layer in 0..=config.layers_per_block {
+            let residual = residuals.pop().ok_or_else(|| Error::InvalidDefinition {
+                message: "UNet has too few down-block residuals".into(),
+            })?;
+            value = Tensor::concatenate(&[value, residual], 3)?;
+            {
+                let mut scope = indexed_scope(&mut block, "resnets", layer)?;
+                value = resnet2d(
+                    &mut scope,
+                    &value,
+                    &temb,
+                    Resnet2dOptions::new(out_channels)
+                        .groups(config.norm_groups)
+                        .epsilon(config.norm_epsilon),
+                )?;
             }
-            if up_stage + 1 < config.block_channels.len() {
-                value = value.upsample_nearest2d([2, 2])?;
-                value = cx.scope("upsamplers", |cx| {
-                    cx.scope("0", |cx| {
-                        cx.named("conv")?
-                            .conv2d(out_channels, [3, 3])
-                            .options(convolution(1, 1))
-                            .apply(&value)
-                    })
-                })?;
+            if config.up_cross_attention[up_stage] {
+                let mut scope = indexed_scope(&mut block, "attentions", layer)?;
+                value = spatial_transformer(
+                    &mut scope,
+                    &value,
+                    context,
+                    SpatialTransformerOptions::new(out_channels / config.attention_heads)
+                        .groups(config.norm_groups),
+                )?;
             }
-            Ok(value)
-        })?;
+        }
+        if up_stage + 1 < config.block_channels.len() {
+            value = value.upsample_nearest2d([2, 2])?;
+            let mut scope = block.scope_path(["upsamplers", "0"])?;
+            value = scope
+                .layer("conv")?
+                .conv2d(out_channels, [3, 3])
+                .options(convolution(1, 1))
+                .apply(&value)?;
+        }
+        hidden = value;
     }
     if !residuals.is_empty() {
         return Err(Error::InvalidDefinition {
@@ -255,11 +247,11 @@ pub fn unet(
         });
     }
     let hidden = cx
-        .named("conv_norm_out")?
+        .layer("conv_norm_out")?
         .group_norm(config.norm_groups)
         .epsilon(config.norm_epsilon)
         .apply(&hidden)?;
-    cx.named("conv_out")?
+    cx.layer("conv_out")?
         .conv2d(config.output_channels, [3, 3])
         .options(convolution(1, 1))
         .apply(&hidden.silu()?)

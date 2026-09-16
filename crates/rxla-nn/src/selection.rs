@@ -104,8 +104,8 @@ mod tests {
 
     fn branched(cx: &mut Cx) -> crate::Result<Tensor> {
         let input = cx.input(&[2, 4])?;
-        let body = cx.named("body")?.linear(4).apply(&input)?;
-        cx.named("head")?.linear(2).apply(&body)
+        let body = cx.layer("body")?.linear(4).apply(&input)?;
+        cx.layer("head")?.linear(2).apply(&body)
     }
 
     #[test]

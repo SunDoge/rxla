@@ -72,7 +72,7 @@ fn attention(cx: &mut Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> R
     let head_dim = width / heads;
     let project = |cx: &mut Cx, name: &str| -> Result<Tensor> {
         Ok(cx
-            .named(name)?
+            .layer(name)?
             .linear(*width)
             .apply(input)?
             .reshape(&[*batch, *length, heads, head_dim])?)
@@ -84,7 +84,7 @@ fn attention(cx: &mut Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> R
         .scaled_dot_product_attention(&k, &v, Some(causal_bias), None)?
         .transpose(&[0, 2, 1, 3])?
         .reshape(&[*batch, *length, *width])?;
-    cx.named("out_proj")?.linear(*width).apply(&hidden)
+    cx.layer("out_proj")?.linear(*width).apply(&hidden)
 }
 
 fn quick_gelu(input: &Tensor) -> Result<Tensor> {
@@ -98,27 +98,31 @@ fn encoder_layer(
     config: &ClipTextConfig,
 ) -> Result<Tensor> {
     let normalized = cx
-        .named("layer_norm1")?
+        .layer("layer_norm1")?
         .layer_norm(1)
         .epsilon(config.epsilon)
         .apply(input)?;
-    let hidden = input.add(&cx.scope("self_attn", |cx| {
-        attention(cx, &normalized, causal_bias, config.heads)
-    })?)?;
+    let attended = {
+        let mut scope = cx.scope("self_attn")?;
+        attention(&mut scope, &normalized, causal_bias, config.heads)?
+    };
+    let hidden = input.add(&attended)?;
     let normalized = cx
-        .named("layer_norm2")?
+        .layer("layer_norm2")?
         .layer_norm(1)
         .epsilon(config.epsilon)
         .apply(&hidden)?;
-    let feed_forward = cx.scope("mlp", |cx| {
-        let projected = cx
-            .named("fc1")?
+    let feed_forward = {
+        let mut scope = cx.scope("mlp")?;
+        let projected = scope
+            .layer("fc1")?
             .linear(config.intermediate_width)
             .apply(&normalized)?;
-        cx.named("fc2")?
+        scope
+            .layer("fc2")?
             .linear(config.width)
             .apply(&quick_gelu(&projected)?)
-    })?;
+    }?;
     Ok(hidden.add(&feed_forward)?)
 }
 
@@ -140,19 +144,18 @@ pub fn clip_text_encoder(
         });
     }
     let positions = cx.iota_i32(token_ids.shape(), 1)?;
-    let mut hidden = cx.scope("text_model", |cx| {
-        cx.scope("embeddings", |cx| {
-            let tokens = cx
-                .named("token_embedding")?
-                .embedding(config.vocabulary, config.width)
-                .apply(token_ids)?;
-            let positions = cx
-                .named("position_embedding")?
-                .embedding(config.max_positions, config.width)
-                .apply(&positions)?;
-            Ok(tokens.add(&positions)?)
-        })
-    })?;
+    let mut hidden = {
+        let mut scope = cx.scope_path(["text_model", "embeddings"])?;
+        let tokens = scope
+            .layer("token_embedding")?
+            .embedding(config.vocabulary, config.width)
+            .apply(token_ids)?;
+        let positions = scope
+            .layer("position_embedding")?
+            .embedding(config.max_positions, config.width)
+            .apply(&positions)?;
+        tokens.add(&positions)?
+    };
     let bias_shape = [1, 1, *length, *length];
     let query = cx.iota_i32(&bias_shape, 2)?.to_f32()?;
     let key = cx.iota_i32(&bias_shape, 3)?.to_f32()?;
@@ -162,25 +165,18 @@ pub fn clip_text_encoder(
         .constant(&[], &[f32::NEG_INFINITY])?
         .broadcast_to(&bias_shape)?;
     let causal_bias = allowed.select(&zero, &blocked)?;
-    hidden = cx.scope("text_model", |cx| {
-        cx.scope("encoder", |cx| {
-            cx.scope("layers", |cx| {
-                let mut value = hidden;
-                for layer in 0..config.layers {
-                    value = cx.scope(&layer.to_string(), |cx| {
-                        encoder_layer(cx, &value, &causal_bias, config)
-                    })?;
-                }
-                Ok(value)
-            })
-        })
-    })?;
-    cx.scope("text_model", |cx| {
-        cx.named("final_layer_norm")?
-            .layer_norm(1)
-            .epsilon(config.epsilon)
-            .apply(&hidden)
-    })
+    {
+        let mut layers = cx.scope_path(["text_model", "encoder", "layers"])?;
+        for layer in 0..config.layers {
+            let mut scope = layers.scope(&layer.to_string())?;
+            hidden = encoder_layer(&mut scope, &hidden, &causal_bias, config)?;
+        }
+    }
+    cx.scope("text_model")?
+        .layer("final_layer_norm")?
+        .layer_norm(1)
+        .epsilon(config.epsilon)
+        .apply(&hidden)
 }
 
 #[cfg(test)]

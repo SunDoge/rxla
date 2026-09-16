@@ -56,7 +56,7 @@ use rxla::{
 };
 
 fn apply(cx: &mut Cx, image: Tensor, label: Tensor) -> Result<(Tensor, Tensor)> {
-    let logits = cx.linear("head", &image, 10)?;
+    let logits = cx.layer("head")?.linear(10).apply(&image)?;
     let loss = logits.cross_entropy_with_indices(&label, 1)?.mean(&[0], false)?;
     Ok((loss, logits))
 }

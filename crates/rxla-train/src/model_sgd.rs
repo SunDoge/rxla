@@ -282,7 +282,7 @@ mod tests {
 
     fn linear_loss(cx: &mut Cx) -> Result<Tensor> {
         let input = cx.input(&[2, 3])?;
-        let prediction = cx.named("linear")?.linear(1).bias(false).apply(&input)?;
+        let prediction = cx.layer("linear")?.linear(1).bias(false).apply(&input)?;
         Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
     }
 
@@ -344,7 +344,7 @@ mod tests {
             let input = cx.input(&[1, 1])?;
             let steps = cx.state("steps", &[], DType::F32)?;
             steps.add_(cx, &cx.constant(&[], &[1.0])?)?;
-            let prediction = cx.named("linear")?.linear(1).bias(false).apply(&input)?;
+            let prediction = cx.layer("linear")?.linear(1).bias(false).apply(&input)?;
             Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
         }
 
@@ -396,7 +396,7 @@ mod tests {
             let input = cx.input(&[1, 1])?;
             let steps = cx.state("steps", &[], DType::F32)?;
             steps.add_(cx, &cx.constant(&[], &[1.0])?)?;
-            let prediction = cx.named("linear")?.linear(1).bias(false).apply(&input)?;
+            let prediction = cx.layer("linear")?.linear(1).bias(false).apply(&input)?;
             Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
         }
 
@@ -431,7 +431,7 @@ mod tests {
         fn regression_loss(cx: &mut Cx) -> Result<Tensor> {
             let input = cx.input(&[1, 1])?;
             let target = cx.input(&[1, 1])?;
-            let prediction = cx.named("linear")?.linear(1).bias(false).apply(&input)?;
+            let prediction = cx.layer("linear")?.linear(1).bias(false).apply(&input)?;
             let error = prediction.sub(&target)?;
             Ok(error.mul(&error)?.sum(&[0, 1], false)?)
         }
@@ -502,7 +502,7 @@ mod tests {
     fn resident_linear_sgd_initializes_once_and_commits_in_session() {
         fn regression_loss(cx: &mut Cx) -> Result<Tensor> {
             let input = cx.input(&[1, 1])?;
-            let prediction = cx.named("linear")?.linear(1).bias(false).apply(&input)?;
+            let prediction = cx.layer("linear")?.linear(1).bias(false).apply(&input)?;
             Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
         }
 

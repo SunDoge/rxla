@@ -68,13 +68,8 @@ impl AutoencoderKlDecoderConfig {
     }
 }
 
-fn indexed_scope<T>(
-    cx: &mut Cx,
-    collection: &str,
-    index: usize,
-    build: impl FnOnce(&mut Cx) -> Result<T>,
-) -> Result<T> {
-    cx.scope(collection, |cx| cx.scope(&index.to_string(), build))
+fn indexed_scope<'a>(cx: &'a mut Cx, collection: &str, index: usize) -> Result<Scope<'a>> {
+    cx.scope_path([collection.to_owned(), index.to_string()])
 }
 
 fn resnet(
@@ -85,29 +80,29 @@ fn resnet(
     epsilon: f32,
 ) -> Result<Tensor> {
     let normalized = cx
-        .named("norm1")?
+        .layer("norm1")?
         .group_norm(groups)
         .epsilon(epsilon)
         .apply(input)?;
     let hidden = cx
-        .named("conv1")?
+        .layer("conv1")?
         .conv2d(output_channels, [3, 3])
         .options(convolution(3))
         .apply(&normalized.silu()?)?;
     let normalized = cx
-        .named("norm2")?
+        .layer("norm2")?
         .group_norm(groups)
         .epsilon(epsilon)
         .apply(&hidden)?;
     let hidden = cx
-        .named("conv2")?
+        .layer("conv2")?
         .conv2d(output_channels, [3, 3])
         .options(convolution(3))
         .apply(&normalized.silu()?)?;
     let residual = if input.shape()[3] == output_channels {
         input.clone()
     } else {
-        cx.named("conv_shortcut")?
+        cx.layer("conv_shortcut")?
             .conv2d(output_channels, [1, 1])
             .apply(input)?
     };
@@ -121,27 +116,28 @@ fn attention(cx: &mut Cx, input: &Tensor, groups: i64, epsilon: f32) -> Result<T
         });
     };
     let hidden = cx
-        .named("group_norm")?
+        .layer("group_norm")?
         .group_norm(groups)
         .epsilon(epsilon)
         .apply(input)?
         .reshape(&[*batch, height * width, *channels])?;
-    let q = cx.named("to_q")?.linear(*channels).apply(&hidden)?;
+    let q = cx.layer("to_q")?.linear(*channels).apply(&hidden)?;
     let k = cx
-        .named("to_k")?
+        .layer("to_k")?
         .linear(*channels)
         .apply(&hidden)?
         .transpose(&[0, 2, 1])?;
-    let v = cx.named("to_v")?.linear(*channels).apply(&hidden)?;
+    let v = cx.layer("to_v")?.linear(*channels).apply(&hidden)?;
     let attended = q
         .matmul(&k)?
         .mul_scalar(1.0 / (*channels as f32).sqrt())?
         .softmax(2)?
         .matmul(&v)?;
-    Ok(cx
-        .scope("to_out", |cx| {
-            cx.named("0")?.linear(*channels).apply(&attended)
-        })?
+    let mut to_out = cx.scope("to_out")?;
+    Ok(to_out
+        .layer("0")?
+        .linear(*channels)
+        .apply(&attended)?
         .reshape(input.shape())?
         .add(input)?)
 }
@@ -167,83 +163,75 @@ pub fn autoencoder_kl_decoder(
         })?;
     let mut hidden = latent.mul_scalar(1.0 / config.scaling_factor)?;
     hidden = cx
-        .named("post_quant_conv")?
+        .layer("post_quant_conv")?
         .conv2d(config.latent_channels, [1, 1])
         .apply(&hidden)?;
-    hidden = cx.scope("decoder", |cx| {
-        cx.named("conv_in")?
-            .conv2d(deepest, [3, 3])
-            .options(convolution(3))
-            .apply(&hidden)
-    })?;
-    hidden = cx.scope("decoder", |cx| {
-        cx.scope("mid_block", |cx| {
-            let first = indexed_scope(cx, "resnets", 0, |cx| {
-                resnet(
-                    cx,
-                    &hidden,
-                    deepest,
-                    config.norm_groups,
-                    config.norm_epsilon,
-                )
-            })?;
-            let attended = indexed_scope(cx, "attentions", 0, |cx| {
-                attention(cx, &first, config.norm_groups, config.norm_epsilon)
-            })?;
-            indexed_scope(cx, "resnets", 1, |cx| {
-                resnet(
-                    cx,
-                    &attended,
-                    deepest,
-                    config.norm_groups,
-                    config.norm_epsilon,
-                )
-            })
-        })
-    })?;
+    let mut decoder = cx.scope("decoder")?;
+    hidden = decoder
+        .layer("conv_in")?
+        .conv2d(deepest, [3, 3])
+        .options(convolution(3))
+        .apply(&hidden)?;
+    hidden = {
+        let mut mid = decoder.scope("mid_block")?;
+        let first = {
+            let mut scope = indexed_scope(&mut mid, "resnets", 0)?;
+            resnet(
+                &mut scope,
+                &hidden,
+                deepest,
+                config.norm_groups,
+                config.norm_epsilon,
+            )?
+        };
+        let attended = {
+            let mut scope = indexed_scope(&mut mid, "attentions", 0)?;
+            attention(&mut scope, &first, config.norm_groups, config.norm_epsilon)?
+        };
+        let mut scope = indexed_scope(&mut mid, "resnets", 1)?;
+        resnet(
+            &mut scope,
+            &attended,
+            deepest,
+            config.norm_groups,
+            config.norm_epsilon,
+        )?
+    };
 
     let stages = config.block_channels.len();
     for (stage, &output_channels) in config.block_channels.iter().rev().enumerate() {
-        hidden = cx.scope("decoder", |cx| {
-            indexed_scope(cx, "up_blocks", stage, |cx| {
-                let mut value = hidden;
-                for layer in 0..=config.layers_per_block {
-                    value = indexed_scope(cx, "resnets", layer, |cx| {
-                        resnet(
-                            cx,
-                            &value,
-                            output_channels,
-                            config.norm_groups,
-                            config.norm_epsilon,
-                        )
-                    })?;
-                }
-                if stage + 1 < stages {
-                    value = cx.scope("upsamplers", |cx| {
-                        cx.scope("0", |cx| {
-                            cx.named("conv")?
-                                .conv2d(output_channels, [3, 3])
-                                .options(convolution(3))
-                                .apply(&value.upsample_nearest2d([2, 2])?)
-                        })
-                    })?;
-                }
-                Ok(value)
-            })
-        })?;
+        let mut block = indexed_scope(&mut decoder, "up_blocks", stage)?;
+        let mut value = hidden;
+        for layer in 0..=config.layers_per_block {
+            let mut scope = indexed_scope(&mut block, "resnets", layer)?;
+            value = resnet(
+                &mut scope,
+                &value,
+                output_channels,
+                config.norm_groups,
+                config.norm_epsilon,
+            )?;
+        }
+        if stage + 1 < stages {
+            let mut scope = block.scope_path(["upsamplers", "0"])?;
+            value = scope
+                .layer("conv")?
+                .conv2d(output_channels, [3, 3])
+                .options(convolution(3))
+                .apply(&value.upsample_nearest2d([2, 2])?)?;
+        }
+        hidden = value;
     }
-    let normalized = cx.scope("decoder", |cx| {
-        cx.named("conv_norm_out")?
-            .group_norm(config.norm_groups)
-            .epsilon(config.norm_epsilon)
-            .apply(&hidden)
-    })?;
-    cx.scope("decoder", |cx| {
-        cx.named("conv_out")?
-            .conv2d(config.output_channels, [3, 3])
-            .options(convolution(3))
-            .apply(&normalized.silu()?)
-    })
+    let normalized = decoder
+        .layer("conv_norm_out")?
+        .group_norm(config.norm_groups)
+        .epsilon(config.norm_epsilon)
+        .apply(&hidden)?;
+    decoder
+        .layer("conv_out")?
+        .conv2d(config.output_channels, [3, 3])
+        .options(convolution(3))
+        .apply(&normalized.silu()?)
 }
 
 #[cfg(test)]

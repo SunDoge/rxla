@@ -7,6 +7,7 @@
 use rxla_core::{DType, StateGraph, StateSlot, Tensor};
 use snafu::{OptionExt, Snafu, ensure};
 use std::collections::{BTreeMap, HashSet};
+use std::ops::{Deref, DerefMut};
 
 mod applied;
 pub use applied::{
@@ -17,7 +18,7 @@ mod inputs;
 pub use inputs::{ModelHandler, ModelInput, ModelInputValues, ModelInputs};
 mod layers;
 pub use layers::{
-    Conv2d, Embedding, GroupNorm, LayerNorm, Linear, Named, QuantizedLinear, RmsNorm,
+    Conv2d, Embedding, GroupNorm, Layer, LayerNorm, Linear, QuantizedLinear, RmsNorm,
 };
 mod outputs;
 pub use outputs::{ModelOutputValues, ModelOutputs};
@@ -278,6 +279,36 @@ pub struct Cx {
     resident_parameters: BTreeMap<String, StateSlot>,
 }
 
+/// A temporary lexical effect scope.
+///
+/// It dereferences to [`Cx`] but adds no layer methods of its own, so nested
+/// model code can use any built-in or third-party builder without name
+/// collisions. Dropping the guard restores the parent path.
+pub struct Scope<'a> {
+    cx: &'a mut Cx,
+    parent_depth: usize,
+}
+
+impl Drop for Scope<'_> {
+    fn drop(&mut self) {
+        self.cx.scope.truncate(self.parent_depth);
+    }
+}
+
+impl Deref for Scope<'_> {
+    type Target = Cx;
+
+    fn deref(&self) -> &Self::Target {
+        self.cx
+    }
+}
+
+impl DerefMut for Scope<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.cx
+    }
+}
+
 struct StateDeclaration {
     slot: StateSlot,
     shape: Vec<i64>,
@@ -425,13 +456,30 @@ impl Cx {
         }
     }
 
-    /// Enter one lexical parameter scope for the duration of `body`.
-    pub fn scope<T>(&mut self, name: &str, body: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
-        validate_name(name)?;
-        self.scope.push(name.to_owned());
-        let result = body(self);
-        self.scope.pop();
-        result
+    /// Enter a lexical parameter/effect scope without a closure.
+    pub fn scope(&mut self, name: &str) -> Result<Scope<'_>> {
+        self.scope_path([name])
+    }
+
+    /// Enter several lexical path segments with one RAII guard.
+    pub fn scope_path<I, S>(&mut self, segments: I) -> Result<Scope<'_>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let segments = segments
+            .into_iter()
+            .map(|segment| segment.as_ref().to_owned())
+            .collect::<Vec<_>>();
+        for segment in &segments {
+            validate_name(segment)?;
+        }
+        let parent_depth = self.scope.len();
+        self.scope.extend(segments);
+        Ok(Scope {
+            cx: self,
+            parent_depth,
+        })
     }
 
     /// Create a visible F32 model input in this trace.
@@ -547,14 +595,15 @@ impl Cx {
         validate_name(name)?;
         let path = self.path(name);
         if !self.rngs.contains_key(&path) {
-            let words = self.scope(name, |cx| {
-                Ok([
-                    cx.state("key0", &[], DType::I32)?,
-                    cx.state("key1", &[], DType::I32)?,
-                    cx.state("counter_low", &[], DType::I32)?,
-                    cx.state("counter_high", &[], DType::I32)?,
-                ])
-            })?;
+            let words = {
+                let mut scope = self.scope(name)?;
+                [
+                    scope.state("key0", &[], DType::I32)?,
+                    scope.state("key1", &[], DType::I32)?,
+                    scope.state("counter_low", &[], DType::I32)?,
+                    scope.state("counter_high", &[], DType::I32)?,
+                ]
+            };
             let values = words
                 .iter()
                 .map(|word| word.read(self))
@@ -839,10 +888,9 @@ mod tests {
 
     fn classifier(cx: &mut Cx) -> Result<Tensor> {
         let input = cx.input(&[2, 4])?;
-        cx.scope("head", |cx| {
-            let weight = cx.param("weight", &[4, 3])?;
-            Ok(input.matmul(&weight)?)
-        })
+        let mut scope = cx.scope("head")?;
+        let weight = scope.param("weight", &[4, 3])?;
+        Ok(input.matmul(&weight)?)
     }
 
     #[test]
@@ -863,6 +911,23 @@ mod tests {
         let applied = apply(&schema, classifier).unwrap();
         assert_eq!(applied.outputs()[0].shape(), [2, 3]);
         assert_eq!(applied.prepare().unwrap().input_count(), 2);
+    }
+
+    #[test]
+    fn scope_guards_restore_paths_and_validate_atomically() {
+        let (schema, _) = init(|cx| {
+            {
+                let mut block = cx.scope_path(["encoder", "0"])?;
+                block.param("weight", &[2])?;
+            }
+            assert!(cx.scope_path(["unused", "bad.segment"]).is_err());
+            cx.param("root", &[1])
+        })
+        .unwrap();
+
+        assert!(schema.get("encoder.0.weight").is_some());
+        assert!(schema.get("root").is_some());
+        assert!(schema.get("unused.root").is_none());
     }
 
     #[test]
@@ -887,8 +952,8 @@ mod tests {
     #[test]
     fn selected_parameter_tensors_drive_partial_autodiff() {
         fn product(cx: &mut Cx) -> Result<Tensor> {
-            let body = cx.scope("body", |cx| cx.param("weight", &[2]))?;
-            let head = cx.scope("head", |cx| cx.param("weight", &[2]))?;
+            let body = cx.scope("body")?.param("weight", &[2])?;
+            let head = cx.scope("head")?.param("weight", &[2])?;
             Ok(body.mul(&head)?.sum(&[0], false)?)
         }
 
@@ -962,7 +1027,7 @@ mod tests {
         let (schema, _) = init(classifier).unwrap();
         let changed = match apply(&schema, |cx| {
             let input = cx.input(&[3, 4])?;
-            let weight = cx.scope("head", |cx| cx.param("weight", &[4, 3]))?;
+            let weight = cx.scope("head")?.param("weight", &[4, 3])?;
             Ok(input.matmul(&weight)?)
         }) {
             Ok(_) => panic!("changed input ABI unexpectedly applied"),
@@ -973,7 +1038,7 @@ mod tests {
         let extra = match apply(&schema, |cx| {
             let input = cx.input(&[2, 4])?;
             let _unused = cx.input(&[1])?;
-            let weight = cx.scope("head", |cx| cx.param("weight", &[4, 3]))?;
+            let weight = cx.scope("head")?.param("weight", &[4, 3])?;
             Ok(input.matmul(&weight)?)
         }) {
             Ok(_) => panic!("extra input ABI unexpectedly applied"),
@@ -986,7 +1051,7 @@ mod tests {
     fn apply_rejects_effect_reordering() {
         let (schema, _) = init(classifier).unwrap();
         let error = match apply(&schema, |cx| {
-            let weight = cx.scope("head", |cx| cx.param("weight", &[4, 3]))?;
+            let weight = cx.scope("head")?.param("weight", &[4, 3])?;
             let input = cx.input(&[2, 4])?;
             Ok(input.matmul(&weight)?)
         }) {
@@ -1018,7 +1083,7 @@ mod tests {
     fn linear_infers_input_features_at_its_use_site() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 4])?;
-            cx.named("head")?.linear(3).apply(&input)
+            cx.layer("head")?.linear(3).apply(&input)
         })
         .unwrap();
         assert_eq!(output.shape(), [2, 3]);
@@ -1033,12 +1098,12 @@ mod tests {
         let model = Model::new(|cx: &mut Cx| {
             let input = cx.input(&[2, 4])?;
             let hidden = cx
-                .named("hidden")?
+                .layer("hidden")?
                 .linear(8)
                 .bias(false)
                 .apply(&input)?
                 .relu()?;
-            cx.named("head")?.linear(3).apply(&hidden)
+            cx.layer("head")?.linear(3).apply(&hidden)
         });
 
         let (schema, applied) = model.trace().unwrap();
@@ -1055,7 +1120,7 @@ mod tests {
     fn one_context_composes_parameters_and_resident_state() {
         let model = Model::new(|cx: &mut Cx| {
             let input = cx.input(&[2, 4])?;
-            let output = cx.named("head")?.linear(3).apply(&input)?;
+            let output = cx.layer("head")?.linear(3).apply(&input)?;
             let count = cx.state("steps", &[], DType::I32)?;
             let next = count.read(cx)?.wrapping_add_scalar(1)?;
             count.write(cx, &next)?;
@@ -1096,7 +1161,7 @@ mod tests {
     #[test]
     fn selected_parameters_can_be_traced_as_resident_state() {
         let definition = Model::new(|cx: &mut Cx, input: Tensor| {
-            cx.named("head")?.linear(2).bias(false).apply(&input)
+            cx.layer("head")?.linear(2).bias(false).apply(&input)
         })
         .inputs(ModelInput::new([1, 3]));
         let (schema, selection, applied) = definition
@@ -1135,7 +1200,7 @@ mod tests {
         }
         .unwrap();
         let definition = Model::new(|cx: &mut Cx, input: Tensor| {
-            cx.named("head")?.linear(2).bias(false).apply(&input)
+            cx.layer("head")?.linear(2).bias(false).apply(&input)
         })
         .inputs(ModelInput::new([1, 3]));
         let schema = definition.init().unwrap();
@@ -1226,9 +1291,10 @@ mod tests {
         };
         let model = |cx: &mut Cx| {
             let input = cx.input(&[1, 8, 8, 4])?;
-            cx.scope("conv_in", |cx| {
-                cx.apply_conv2d(&input, 6, [3, 3], options, true)
-            })
+            cx.layer("conv_in")?
+                .conv2d(6, [3, 3])
+                .options(options)
+                .apply(&input)
         };
         let (schema, output) = init(model).unwrap();
         assert_eq!(output.shape(), [1, 8, 8, 6]);
@@ -1250,7 +1316,7 @@ mod tests {
     fn group_norm_nhwc_infers_affine_channel_shape() {
         let model = |cx: &mut Cx| {
             let input = cx.input(&[1, 8, 8, 32])?;
-            cx.scope("norm", |cx| cx.apply_group_norm_nhwc(&input, 8, 1e-5, true))
+            cx.layer("norm")?.group_norm(8).apply(&input)
         };
         let (schema, output) = init(model).unwrap();
         assert_eq!(output.shape(), [1, 8, 8, 32]);
@@ -1265,7 +1331,7 @@ mod tests {
     fn layer_norm_infers_trailing_affine_shape() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 7, 32])?;
-            cx.scope("norm", |cx| cx.apply_layer_norm(&input, 1, 1e-5, true))
+            cx.layer("norm")?.layer_norm(1).apply(&input)
         })
         .unwrap();
         assert_eq!(output.shape(), [2, 7, 32]);
@@ -1292,7 +1358,10 @@ mod tests {
         let model = |cx: &mut Cx| {
             let input = cx.input(&[2, 3])?;
             Ok(cx
-                .scope("head", |cx| cx.apply_linear(&input, 2, false))?
+                .layer("head")?
+                .linear(2)
+                .bias(false)
+                .apply(&input)?
                 .relu()?)
         };
         let (schema, _) = init(model).expect("initialize model schema");

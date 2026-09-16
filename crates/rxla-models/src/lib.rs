@@ -1,7 +1,7 @@
 //! Functional Stable Diffusion building blocks using scoped parameter effects.
 
 use rxla_core::{Conv2dOptions, DType, Tensor};
-use rxla_nn::{Cx, Error, Result};
+use rxla_nn::{Cx, Error, Result, Scope};
 
 mod unet;
 pub use unet::{UnetConfig, unet};
@@ -20,8 +20,8 @@ pub mod pp_ocr_v6;
 /// Learned two-layer projection for a sinusoidal timestep embedding.
 /// The input width is inferred at the point of use.
 pub fn timestep_embedding(cx: &mut Cx, input: &Tensor, output_width: i64) -> Result<Tensor> {
-    let hidden = cx.named("linear_1")?.linear(output_width).apply(input)?;
-    cx.named("linear_2")?
+    let hidden = cx.layer("linear_1")?.linear(output_width).apply(input)?;
+    cx.layer("linear_2")?
         .linear(output_width)
         .apply(&hidden.silu()?)
 }
@@ -81,36 +81,36 @@ pub fn resnet2d(
         ..Default::default()
     };
     let normalized = cx
-        .named("norm1")?
+        .layer("norm1")?
         .group_norm(options.groups)
         .epsilon(options.epsilon)
         .apply(input)?;
     let mut hidden = cx
-        .named("conv1")?
+        .layer("conv1")?
         .conv2d(options.out_channels, [3, 3])
         .options(convolution)
         .apply(&normalized.silu()?)?;
     let time = cx
-        .named("time_emb_proj")?
+        .layer("time_emb_proj")?
         .linear(options.out_channels)
         .apply(&timestep_embedding.silu()?)?
         .reshape(&[timestep_embedding.shape()[0], 1, 1, options.out_channels])?
         .broadcast_to(hidden.shape())?;
     hidden = hidden.add(&time)?;
     let normalized = cx
-        .named("norm2")?
+        .layer("norm2")?
         .group_norm(options.groups)
         .epsilon(options.epsilon)
         .apply(&hidden)?;
     hidden = cx
-        .named("conv2")?
+        .layer("conv2")?
         .conv2d(options.out_channels, [3, 3])
         .options(convolution)
         .apply(&normalized.silu()?)?;
     let residual = if input.shape()[3] == options.out_channels {
         input.clone()
     } else {
-        cx.named("conv_shortcut")?
+        cx.layer("conv_shortcut")?
             .conv2d(options.out_channels, [1, 1])
             .apply(input)?
     };
@@ -165,21 +165,21 @@ fn cross_attention(cx: &mut Cx, query: &Tensor, context: &Tensor, head_dim: i64)
     let heads = width / head_dim;
     let context_length = context.shape()[1];
     let q = cx
-        .named("to_q")?
+        .layer("to_q")?
         .linear(*width)
         .bias(false)
         .apply(query)?
         .reshape(&[*batch, *query_length, heads, head_dim])?
         .transpose(&[0, 2, 1, 3])?;
     let k = cx
-        .named("to_k")?
+        .layer("to_k")?
         .linear(*width)
         .bias(false)
         .apply(context)?
         .reshape(&[*batch, context_length, heads, head_dim])?
         .transpose(&[0, 2, 1, 3])?;
     let v = cx
-        .named("to_v")?
+        .layer("to_v")?
         .linear(*width)
         .bias(false)
         .apply(context)?
@@ -189,7 +189,10 @@ fn cross_attention(cx: &mut Cx, query: &Tensor, context: &Tensor, head_dim: i64)
         .scaled_dot_product_attention(&k, &v, None, None)?
         .transpose(&[0, 2, 1, 3])?
         .reshape(&[*batch, *query_length, *width])?;
-    cx.scope("to_out", |cx| cx.named("0")?.linear(*width).apply(&hidden))
+    cx.scope("to_out")?
+        .layer("0")?
+        .linear(*width)
+        .apply(&hidden)
 }
 
 fn feed_forward(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
@@ -209,12 +212,15 @@ fn feed_forward(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
         .ok_or_else(|| Error::InvalidDefinition {
             message: "GEGLU projected width overflow".into(),
         })?;
-    let projected = cx.scope("net", |cx| {
-        cx.scope("0", |cx| cx.named("proj")?.linear(projected).apply(input))
-    })?;
+    let projected = cx
+        .scope("net")?
+        .scope("0")?
+        .layer("proj")?
+        .linear(projected)
+        .apply(input)?;
     let parts = projected.split(projected.shape().len() - 1, &[hidden, hidden])?;
     let gated = parts[0].mul(&parts[1].gelu()?)?;
-    cx.scope("net", |cx| cx.named("2")?.linear(width).apply(&gated))
+    cx.scope("net")?.layer("2")?.linear(width).apply(&gated)
 }
 
 fn transformer_block(
@@ -223,16 +229,21 @@ fn transformer_block(
     context: &Tensor,
     head_dim: i64,
 ) -> Result<Tensor> {
-    let normalized = cx.named("norm1")?.layer_norm(1).apply(input)?;
-    let hidden = input.add(&cx.scope("attn1", |cx| {
-        cross_attention(cx, &normalized, &normalized, head_dim)
-    })?)?;
-    let normalized = cx.named("norm2")?.layer_norm(1).apply(&hidden)?;
-    let hidden = hidden.add(&cx.scope("attn2", |cx| {
-        cross_attention(cx, &normalized, context, head_dim)
-    })?)?;
-    let normalized = cx.named("norm3")?.layer_norm(1).apply(&hidden)?;
-    Ok(hidden.add(&cx.scope("ff", |cx| feed_forward(cx, &normalized))?)?)
+    let normalized = cx.layer("norm1")?.layer_norm(1).apply(input)?;
+    let attention = {
+        let mut scope = cx.scope("attn1")?;
+        cross_attention(&mut scope, &normalized, &normalized, head_dim)?
+    };
+    let hidden = input.add(&attention)?;
+    let normalized = cx.layer("norm2")?.layer_norm(1).apply(&hidden)?;
+    let attention = {
+        let mut scope = cx.scope("attn2")?;
+        cross_attention(&mut scope, &normalized, context, head_dim)?
+    };
+    let hidden = hidden.add(&attention)?;
+    let normalized = cx.layer("norm3")?.layer_norm(1).apply(&hidden)?;
+    let mut ff = cx.scope("ff")?;
+    Ok(hidden.add(&feed_forward(&mut ff, &normalized)?)?)
 }
 
 /// Diffusers `Transformer2DModel` for NHWC activations and `[B,T,C]` context.
@@ -257,25 +268,22 @@ pub fn spatial_transformer(
         unreachable!("rank checked above")
     };
     let normalized = cx
-        .named("norm")?
+        .layer("norm")?
         .group_norm(options.groups)
         .epsilon(1e-6)
         .apply(input)?;
     let mut hidden = cx
-        .named("proj_in")?
+        .layer("proj_in")?
         .conv2d(*channels, [1, 1])
         .apply(&normalized)?
         .reshape(&[*batch, height * width, *channels])?;
     for layer in 0..options.layers {
-        hidden = cx.scope("transformer_blocks", |cx| {
-            cx.scope(&layer.to_string(), |cx| {
-                transformer_block(cx, &hidden, context, options.head_dim)
-            })
-        })?;
+        let mut scope = cx.scope_path(["transformer_blocks".to_owned(), layer.to_string()])?;
+        hidden = transformer_block(&mut scope, &hidden, context, options.head_dim)?;
     }
     let hidden = hidden.reshape(&[*batch, *height, *width, *channels])?;
     Ok(cx
-        .named("proj_out")?
+        .layer("proj_out")?
         .conv2d(*channels, [1, 1])
         .apply(&hidden)?
         .add(input)?)
@@ -289,16 +297,16 @@ mod tests {
     fn model(cx: &mut Cx) -> Result<Tensor> {
         let image = cx.input(&[2, 16, 12, 32])?;
         let timestep = cx.input(&[2, 128])?;
-        cx.scope("block", |cx| {
-            resnet2d(cx, &image, &timestep, Resnet2dOptions::new(64))
-        })
+        let mut scope = cx.scope("block")?;
+        resnet2d(&mut scope, &image, &timestep, Resnet2dOptions::new(64))
     }
 
     #[test]
     fn timestep_mlp_infers_input_width() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 32])?;
-            cx.scope("time_embedding", |cx| timestep_embedding(cx, &input, 128))
+            let mut scope = cx.scope("time_embedding")?;
+            timestep_embedding(&mut scope, &input, 128)
         })
         .unwrap();
         assert_eq!(output.shape(), [2, 128]);

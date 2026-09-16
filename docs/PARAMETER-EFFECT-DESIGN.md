@@ -47,8 +47,8 @@ The first implemented API exposes this directly:
 use rxla::{Tensor, nn::{Cx, Model, ModelInput, Result}};
 
 fn apply(cx: &mut Cx, x: Tensor) -> Result<Tensor> {
-    let x = cx.linear("hidden", &x, 8)?.relu()?;
-    cx.named("head")?.linear(3).apply(&x)
+    let x = cx.layer("hidden")?.linear(8).apply(&x)?.relu()?;
+    cx.layer("head")?.linear(3).apply(&x)
 }
 
 let (schema, applied) = Model::new(apply)
@@ -70,7 +70,7 @@ while arrays, vectors and application-defined structs remain structured values.
 ```rust
 # use rxla::{Tensor, nn::{Cx, Model, ModelInput, Result}};
 fn apply(cx: &mut Cx, image: Tensor, timestep: Tensor) -> Result<Tensor> {
-    let features = cx.named("image")?.linear(32).apply(&image)?;
+    let features = cx.layer("image")?.linear(32).apply(&image)?;
     Ok(features.add(&timestep)?)
 }
 
@@ -118,7 +118,7 @@ and deterministic, scope-based selections instead:
 # use rxla::{Tensor, nn::{Cx, Result, init}};
 # fn apply(cx: &mut Cx) -> Result<Tensor> {
 #     let x = cx.input(&[2, 4])?;
-#     cx.named("head")?.linear(3).apply(&x)
+#     cx.layer("head")?.linear(3).apply(&x)
 # }
 let (schema, _) = init(apply)?;
 let trainable = schema.select_under("head");
@@ -146,7 +146,7 @@ The deliberately small initial training surface provides fused SGD and Adam:
 # use rxla_train::prepare_model_sgd;
 # fn linear_loss(cx: &mut Cx) -> Result<Tensor> {
 #     let x = cx.input(&[2, 3])?;
-#     let y = cx.named("linear")?.linear(1).bias(false).apply(&x)?;
+#     let y = cx.layer("linear")?.linear(1).bias(false).apply(&x)?;
 #     Ok(y.mul(&y)?.sum(&[0, 1], false)?)
 # }
 let (schema, model) = Model::new(linear_loss).trace()?;
@@ -177,7 +177,7 @@ discovers the schema, selects storage and traces the model in one operation:
 # use rxla::{Tensor, nn::{Cx, Model, Result}};
 # fn loss(cx: &mut Cx) -> Result<Tensor> {
 #     let x = cx.input(&[2, 3])?;
-#     Ok(cx.named("linear")?.linear(1).bias(false).apply(&x)?.sum(&[0, 1], false)?)
+#     Ok(cx.layer("linear")?.linear(1).bias(false).apply(&x)?.sum(&[0, 1], false)?)
 # }
 let (_schema, trainable, mut model) = Model::new(loss)
     .trace_resident(|schema| schema.select_under("linear"))?;
@@ -213,17 +213,18 @@ outputs remain the entire visible result ABI. One session execution then
 atomically commits parameters, model state, RNG and—under Adam—moments plus the
 step counter, without host-side handle replacement.
 
-`Cx` intentionally exposes only effect primitives and `named`. The layer
-vocabulary lives on the temporary named namespace, so adding layers does not
-turn `Cx` into an ever-growing god object. `Named` also dereferences to `Cx`,
-which permits closure-free structural scopes:
+`Cx` intentionally exposes effect primitives plus two vocabulary boundaries:
+`scope` creates a lexical path guard, while `layer` enters the built-in layer
+builder. Individual NN operations do not accumulate on `Cx`. `Scope`
+dereferences to `Cx`, so nested model structure stays closure-free and remains
+open to third-party builders:
 
 ```rust
 # use rxla::{Tensor, nn::{Cx, Result}};
 fn block(cx: &mut Cx, x: &Tensor) -> Result<Tensor> {
-    let mut block = cx.named("block")?;
-    let x = block.named("input")?.linear(32).apply(x)?.relu()?;
-    block.named("output")?.linear(32).apply(&x)
+    let mut block = cx.scope("block")?;
+    let x = block.layer("input")?.linear(32).apply(x)?.relu()?;
+    block.layer("output")?.linear(32).apply(&x)
 }
 ```
 

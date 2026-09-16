@@ -216,10 +216,10 @@ fn basic_block(
     stride: i64,
     training: bool,
 ) -> NnResult<Tensor> {
-    let mut stage = cx.named(&format!("stage{stage_index}"))?;
-    let mut block = stage.named(&format!("block{block_index}"))?;
+    let mut stage = cx.scope(&format!("stage{stage_index}"))?;
+    let mut block = stage.scope(&format!("block{block_index}"))?;
     let hidden = block
-        .named("conv1")?
+        .layer("conv1")?
         .conv2d(channels, [3, 3])
         .options(Conv2dOptions {
             strides: [stride, stride],
@@ -229,13 +229,13 @@ fn basic_block(
         .bias(false)
         .apply(input)?;
     let hidden = block
-        .named("bn1")?
+        .layer("bn1")?
         .batch_norm()
         .training(training)
         .apply(&hidden)?
         .relu()?;
     let hidden = block
-        .named("conv2")?
+        .layer("conv2")?
         .conv2d(channels, [3, 3])
         .options(Conv2dOptions {
             padding: [[1, 1], [1, 1]],
@@ -244,7 +244,7 @@ fn basic_block(
         .bias(false)
         .apply(&hidden)?;
     let hidden = block
-        .named("bn2")?
+        .layer("bn2")?
         .batch_norm()
         .training(training)
         .apply(&hidden)?;
@@ -252,7 +252,7 @@ fn basic_block(
         input.clone()
     } else {
         let projected = block
-            .named("shortcut_conv")?
+            .layer("shortcut_conv")?
             .conv2d(channels, [1, 1])
             .options(Conv2dOptions {
                 strides: [stride, stride],
@@ -261,7 +261,7 @@ fn basic_block(
             .bias(false)
             .apply(input)?;
         block
-            .named("shortcut_bn")?
+            .layer("shortcut_bn")?
             .batch_norm()
             .training(training)
             .apply(&projected)?
@@ -285,7 +285,7 @@ fn resnet18(
         .select(&images.flip_left_right()?, &images)?
         .normalize_nhwc(&[0.485, 0.456, 0.406], &[0.229, 0.224, 0.225])?;
     let mut hidden = cx
-        .named("stem_conv")?
+        .layer("stem_conv")?
         .conv2d(64, [7, 7])
         .options(Conv2dOptions {
             strides: [2, 2],
@@ -295,7 +295,7 @@ fn resnet18(
         .bias(false)
         .apply(&images)?;
     hidden = cx
-        .named("stem_bn")?
+        .layer("stem_bn")?
         .batch_norm()
         .training(training)
         .apply(&hidden)?
@@ -315,7 +315,7 @@ fn resnet18(
         }
     }
     let features = hidden.mean(&[1, 2], false)?;
-    let logits = cx.named("head")?.linear(CLASSES).apply(&features)?;
+    let logits = cx.layer("head")?.linear(CLASSES).apply(&features)?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;

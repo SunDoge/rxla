@@ -8,7 +8,7 @@
 //! use rxla_nn::{Cx, Model, ModelInput, Result};
 //!
 //! fn apply(cx: &mut Cx, image: Tensor, label: Tensor) -> Result<(Tensor, Tensor)> {
-//!     let logits = cx.named("head")?.linear(10).apply(&image)?;
+//!     let logits = cx.layer("head")?.linear(10).apply(&image)?;
 //!     let loss = logits.cross_entropy_with_indices(&label, 1)?.mean(&[0], false)?;
 //!     Ok((loss, logits))
 //! }

@@ -203,47 +203,47 @@ pub fn qwen3_5(cx: &mut Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Resul
         )?;
     let causal_mask = positions.causal_attention_mask(&positions)?;
 
-    let mut model = cx.named("model")?;
-    let mut language_model = model.named("language_model")?;
-    let mut embedding = language_model.named("embed_tokens")?;
+    let mut model = cx.scope("model")?;
+    let mut language_model = model.scope("language_model")?;
+    let mut embedding = language_model.scope("embed_tokens")?;
     let mut hidden = quantized_embedding(&mut embedding, token_ids, config)?;
     drop(embedding);
     for (index, layer_type) in config.layers.iter().enumerate() {
-        let mut layers = language_model.named("layers")?;
-        let mut layer = layers.named(&index.to_string())?;
+        let mut layers = language_model.scope("layers")?;
+        let mut layer = layers.scope(&index.to_string())?;
         let normalized = layer
-            .named("input_layernorm")?
+            .layer("input_layernorm")?
             .rms_norm()
             .epsilon(config.epsilon)
             .zero_centered(true)
             .apply(&hidden)?;
         let mixed = match layer_type {
             LayerType::LinearAttention => {
-                let mut mixer = layer.named("linear_attn")?;
+                let mut mixer = layer.scope("linear_attn")?;
                 gated_delta_attention(&mut mixer, &normalized, config)?
             }
             LayerType::FullAttention => {
-                let mut mixer = layer.named("self_attn")?;
+                let mut mixer = layer.scope("self_attn")?;
                 full_attention(&mut mixer, &normalized, &angles, &causal_mask, config)?
             }
         };
         hidden = hidden.add(&mixed)?;
         let normalized = layer
-            .named("post_attention_layernorm")?
+            .layer("post_attention_layernorm")?
             .rms_norm()
             .epsilon(config.epsilon)
             .zero_centered(true)
             .apply(&hidden)?;
-        let mut feed_forward = layer.named("mlp")?;
+        let mut feed_forward = layer.scope("mlp")?;
         hidden = hidden.add(&mlp(&mut feed_forward, &normalized, config)?)?;
     }
     hidden = language_model
-        .named("norm")?
+        .layer("norm")?
         .rms_norm()
         .epsilon(config.epsilon)
         .zero_centered(true)
         .apply(&hidden)?;
-    let mut embedding = language_model.named("embed_tokens")?;
+    let mut embedding = language_model.scope("embed_tokens")?;
     tied_lm_head(&mut embedding, &hidden, config)
 }
 
