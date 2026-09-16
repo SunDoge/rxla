@@ -9,13 +9,13 @@ use std::{
 use crate::generator::Result;
 
 const PUBLIC_PACKAGES: [&str; 7] = [
-    "rxla",
     "rxla-cache",
-    "rxla-core",
-    "rxla-ir",
-    "rxla-nn",
     "rxla-pjrt",
     "rxla-xla-proto",
+    "rxla-ir",
+    "rxla-core",
+    "rxla-nn",
+    "rxla",
 ];
 
 #[derive(Deserialize)]
@@ -81,8 +81,8 @@ pub(crate) fn check() -> Result<()> {
         toml::from_str(&fs::read_to_string(root.join("release-plz.toml"))?)?;
     validate(&metadata, &release, &root)?;
     println!(
-        "Public release graph matches: {}.",
-        PUBLIC_PACKAGES.join(", ")
+        "Public release graph and publish order match: {}.",
+        PUBLIC_PACKAGES.join(" -> ")
     );
     Ok(())
 }
@@ -125,10 +125,27 @@ fn validate(metadata: &Metadata, release: &ReleaseConfig, root: &Path) -> Result
         )
         .into());
     }
+    let configured_order = release
+        .package
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect::<Vec<_>>();
+    if configured_order != PUBLIC_PACKAGES {
+        return Err(format!(
+            "release-plz packages must follow dependency order: expected {:?}, found {configured_order:?}",
+            PUBLIC_PACKAGES
+        )
+        .into());
+    }
 
     let by_name = members
         .iter()
         .map(|package| (package.name.as_str(), *package))
+        .collect::<BTreeMap<_, _>>();
+    let publish_position = PUBLIC_PACKAGES
+        .into_iter()
+        .enumerate()
+        .map(|(position, name)| (name, position))
         .collect::<BTreeMap<_, _>>();
     for package in members
         .into_iter()
@@ -147,6 +164,14 @@ fn validate(metadata: &Metadata, release: &ReleaseConfig, root: &Path) -> Result
             if !target.is_publishable() {
                 return Err(format!(
                     "public package {:?} depends on private package {:?}",
+                    package.name, dependency.name
+                )
+                .into());
+            }
+            if publish_position[dependency.name.as_str()] >= publish_position[package.name.as_str()]
+            {
+                return Err(format!(
+                    "public dependency {} -> {} is not in dependency-first publish order",
                     package.name, dependency.name
                 )
                 .into());
@@ -237,6 +262,13 @@ mod tests {
     }
 
     #[test]
+    fn rejects_release_order_drift() {
+        let (metadata, mut release) = fixture();
+        release.package.swap(0, 3);
+        assert!(validate(&metadata, &release, Path::new(".")).is_err());
+    }
+
+    #[test]
     fn rejects_non_exact_or_private_runtime_dependencies() {
         let root = tempfile::tempdir().unwrap();
         let (mut metadata, release) = fixture();
@@ -259,6 +291,25 @@ mod tests {
             path: Some(root.path().to_owned()),
             kind: None,
         };
+        assert!(validate(&metadata, &release, root.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_dependency_order_that_cannot_be_published() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut metadata, release) = fixture();
+        metadata
+            .packages
+            .iter_mut()
+            .find(|package| package.name == "rxla-cache")
+            .unwrap()
+            .dependencies
+            .push(Dependency {
+                name: "rxla".to_owned(),
+                req: "=0.1.0-alpha.1".to_owned(),
+                path: Some(root.path().to_owned()),
+                kind: None,
+            });
         assert!(validate(&metadata, &release, root.path()).is_err());
     }
 }
