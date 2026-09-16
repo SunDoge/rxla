@@ -90,7 +90,8 @@ impl ParameterSelection {
         self.ids.binary_search(&id).is_ok()
     }
 
-    pub(crate) fn schema(&self) -> &ModelSchema {
+    /// The immutable schema that gives every selected ID its meaning.
+    pub fn schema(&self) -> &ModelSchema {
         &self.schema
     }
 }
@@ -132,7 +133,9 @@ mod tests {
         let (schema, _) = init(branched).unwrap();
         let id = schema.parameter_id("head.weight").unwrap();
         assert_eq!(schema.parameter(id).unwrap().path(), "head.weight");
-        assert!(schema.select_under("head").contains(id));
+        let selection = schema.select_under("head");
+        assert!(selection.contains(id));
+        assert!(selection.schema().parameter(id).is_some());
     }
 
     #[test]

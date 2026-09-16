@@ -6,9 +6,8 @@ Status: public tracing API and resident optimizer effects implemented
 RXLA's primary model-construction API will not require an `nn.Module`-style
 construction phase that predeclares every parameter shape. A parameter is
 declared where it is used while tracing a program, through an explicit context
-effect such as `Cx::param`. The existing `module` API remains supported
-compatibility infrastructure while this direction is implemented; it is not the
-target model authoring abstraction.
+effect such as `Cx::param`. Parameter-owning `Module` objects are deliberately
+not a second model-authoring abstraction.
 
 ```rust
 fn head(cx: &mut Cx, x: Tensor, classes: usize) -> Result<Tensor> {
@@ -26,12 +25,11 @@ known at a tensor use site.
 
 The model body is written once. It is never allowed to infer whether it is the
 "first" invocation by consulting global state or a mutable variable registry.
-Instead, an explicit interpreter chooses the meaning of the same effect:
+Tracing gives each effect one explicit meaning:
 
 | Context | `cx.param[_initialized]("weight", shape, ...)` |
 | --- | --- |
-| schema/init trace | `DeclareParam`: validate and record schema, initializer and canonical path |
-| apply/compile trace | `ReadParam`: look up the already-frozen schema and emit its parameter SSA input |
+| model trace | validate and record schema, initializer and canonical path while emitting its parameter SSA input |
 | execution | bind/read the corresponding resident or supplied buffer; no declaration is possible |
 
 Conceptually, callers capture a model body in `Model` once. `Model::trace`
@@ -39,11 +37,10 @@ interprets it once to discover the schema while retaining that same applied IR;
 ordinary tracing does not rebuild a large model body in a second pass. The
 result is the `AppliedModel` itself, and its frozen declarations remain
 available through `model.schema()` instead of being returned as a duplicate
-tuple element. The
-lower-level `init` and `apply` methods remain available when checkpoint tooling
-needs to inspect or restore a schema between those phases. This is an API
-boundary, not a second model implementation: users never write a separate init
-function, repeat tracing closures, or manually plumb a parameter tree.
+tuple element. There is no public lower-level init/apply replay API: checkpoint
+tooling consumes the frozen schema and compiled model directly. Users never
+write a separate init function, repeat tracing closures, or manually plumb a
+parameter tree.
 
 Built-in trainable layers attach an `Initializer` to each parameter effect:
 affine and convolution weights use fan-in-scaled Kaiming uniform values, their
@@ -213,12 +210,13 @@ rxla_train::apply_model_sgd(&mut model, &trainable, &loss, 0.01)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`trace_resident_all()` and `trace_resident_under("adapter")` avoid both the
-selection closure and the schema-discovery replay for the two common policies.
+`trace_resident_all()` and `trace_resident_under("adapter")` avoid a separate
+selection step for the two common policies.
 They declare resident slots during the single model-body invocation and return
 the matching selection with the applied model. Arbitrary schema-dependent
-selections continue to use `trace_resident` and its explicit two-phase
-interpretation.
+selections use `trace_resident(&selection)`: the selection carries its source
+schema, the model body runs once, and the resulting structure is validated
+before adopting that schema identity.
 
 The selected `ParameterSelection` is interpreted as session-owned state.
 Those parameters disappear from the visible execution ABI and must be
@@ -282,18 +280,18 @@ valid for dynamic dispatch code such as a heterogeneous serving stage.
 1. A parameter identity is its lexical context path plus its local name. Nested
    scopes produce stable names such as `unet.down.0.attention.q.weight` without
    threading parameter structs through every function.
-2. An init trace freezes the full effect ABI: ordered inputs (shape and dtype)
-   and parameter declarations (path, dtype and shape). Every apply trace
-   resolves against that schema; a missing, extra or reordered effect, missing
-   path, duplicate incompatible declaration or changed property fails with a
-   structural-schema error. Initializer policy may become schema metadata;
-   trainability remains a transformation-time parameter selection.
+2. A model trace freezes the full effect ABI and executable IR together:
+   ordered inputs (shape and dtype), parameter declarations (path, dtype and
+   shape), state and outputs. A compatible retrace requested by an existing
+   selection must match the complete structure; missing, extra, reordered or
+   incompatible effects fail with a structural-schema error. Initializer policy
+   is schema metadata; trainability remains a transformation-time selection.
 3. Shape inference is allowed to depend on static or specialization-known tensor
    dimensions. A parameter cannot be sized from arbitrary runtime data. Dynamic
    dimensions require an explicit static constraint or separate specialization.
-4. Parameter declaration is an IR effect, not a host allocation. Init tracing
-   creates schema entries; apply tracing creates parameter SSA inputs;
-   `Session`/checkpoint code owns initialization, binding and mutation.
+4. Parameter declaration is an IR effect, not a host allocation. One trace
+   creates both schema entries and parameter SSA inputs; `Session`/checkpoint
+   code owns initialization, binding and mutation.
 5. The parameter table is deterministic in declaration order and preserves both
    canonical checkpoint paths and intentional aliases. It is part of the
    immutable program artifact, alongside input/output ABI and state effects.
@@ -325,4 +323,4 @@ This deliberately differs from PyTorch `LazyLinear`: laziness is not a special
 case attached to selected layers. It also deliberately differs from TensorFlow
 1 variable scopes: no global graph, `reuse=True`, `AUTO_REUSE`, or hidden
 call-order state determines parameter identity. Parameter shape dependency is a
-general, verified tracing primitive interpreted explicitly by init and apply.
+general, verified tracing primitive captured with its IR in one pass.

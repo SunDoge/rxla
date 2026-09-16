@@ -1,8 +1,8 @@
 //! Scoped parameter effects for tensor tracing.
 //!
-//! A [`Cx`] is deliberately not a global variable store. [`Model`] explicitly
-//! interprets the same parameter effects for schema discovery and application,
-//! so model code is written once without hidden call-order state.
+//! A [`Cx`] is deliberately not a global variable store. [`Model`] traces
+//! parameter effects once into both an immutable schema and executable IR, so
+//! model code has no hidden call-order state or schema-discovery replay.
 
 use rxla_core::{DType, StateGraph, StateSlot, Tensor};
 use snafu::{OptionExt, Snafu, ensure};
@@ -31,8 +31,8 @@ pub use selection::{ParameterId, ParameterSelection};
 
 /// A reusable effect-based model definition.
 ///
-/// It captures one ordinary Rust function so callers do not repeat closures
-/// around schema discovery and application. Compiled execution artifacts use
+/// It captures one ordinary Rust function and traces schema plus executable IR
+/// in one invocation. Compiled execution artifacts use
 /// [`rxla_core::Program`]; keeping the names distinct avoids import aliases in
 /// applications that construct and run models in the same module.
 pub struct Model<F, I = NoModelInputs> {
