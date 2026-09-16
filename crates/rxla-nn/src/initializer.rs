@@ -288,10 +288,12 @@ mod tests {
             );
         }
 
-        let compiled = model
-            .compile(&mut Compiler::new(client.clone(), CacheLimits::default()))
+        let runner = model
+            .compile_initialized(
+                &mut Compiler::new(client.clone(), CacheLimits::default()),
+                42,
+            )
             .unwrap();
-        let runner = compiled.initialize_parameters(42).unwrap();
         let input = client.buffer(&[1, 3], &[1.0, 2.0, 3.0]).unwrap();
         let output: Buffer = runner.run(&input).unwrap();
         assert_eq!(output.dimensions().unwrap(), [1, 2]);
@@ -331,12 +333,7 @@ mod tests {
         let compiled = model
             .compile_stateful(&mut Compiler::new(client.clone(), CacheLimits::default()))
             .unwrap();
-        let session = compiled
-            .session()
-            .initialize_parameters(42)
-            .unwrap()
-            .build()
-            .unwrap();
+        let session = compiled.initialize_session(42).unwrap();
         let states = model.state_buffers(session.raw()).unwrap();
         let variance = states
             .iter()
@@ -346,5 +343,27 @@ mod tests {
             .to_vec::<f32>()
             .unwrap();
         assert_eq!(variance, [1.0; 3]);
+
+        let random_state = Model::new(|cx: &mut Cx| {
+            let state =
+                cx.state_initialized("random", &[8], DType::F32, Initializer::uniform(-1.0, 1.0))?;
+            state.read(cx)
+        })
+        .trace()
+        .unwrap();
+        let compiled = random_state
+            .compile_stateful(&mut Compiler::new(client, CacheLimits::default()))
+            .unwrap();
+        let first = compiled.initialize_session(1).unwrap();
+        let second = compiled.initialize_session(2).unwrap();
+        let first = random_state.state_buffers(first.raw()).unwrap()[0]
+            .1
+            .to_vec::<f32>()
+            .unwrap();
+        let second = random_state.state_buffers(second.raw()).unwrap()[0]
+            .1
+            .to_vec::<f32>()
+            .unwrap();
+        assert_ne!(first, second);
     }
 }

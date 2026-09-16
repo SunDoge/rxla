@@ -293,8 +293,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => Dataset::synthetic(batch_size),
     };
     let data_rng = DataRng::new(args.seed);
-    let session_builder = compiled.session().initialize_parameters(args.seed)?;
-    let mut session = session_builder.build()?;
+    let mut session = compiled.initialize_session(args.seed)?;
     let mut prepared = (args.steps != 0)
         .then(|| {
             prepare_batch(

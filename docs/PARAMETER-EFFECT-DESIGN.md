@@ -128,6 +128,14 @@ runner. Stateful code uses
 `compiled.session().initialize_parameters(seed)?.build()`; this initializes
 only the selected resident parameters, not every parameter in the schema, and
 explicit per-parameter overrides may be installed first.
+The short paths are `model.compile_initialized(&mut compiler, seed)` and
+`compiled_stateful.initialize_session(seed)`. The explicit compiled object and
+session builder remain available when loading checkpoint buffers, overriding
+individual values, or seeding named RNG streams.
+The session initialization seed applies to both resident parameters and ordinary
+state initializer policies. `initializer_seed(seed)` exposes the state-only
+half when parameters come from a checkpoint. Counter-based RNG streams remain
+explicit effects and use `rng_seed(name, seed)` rather than consuming this seed.
 
 Trainability belongs to a particular transformation, not permanently to a
 parameter declaration. The immutable schema provides typed parameter identities

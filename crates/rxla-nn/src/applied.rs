@@ -65,6 +65,7 @@ pub struct ModelSessionBuilder<'a> {
     program: &'a StateProgram,
     overrides: BTreeMap<String, Buffer>,
     parameter_overrides: BTreeMap<String, Buffer>,
+    initializer_seed: u64,
 }
 
 /// Owned device buffers extracted from one model session by canonical path.
@@ -195,6 +196,12 @@ impl CompiledStatefulModel {
         }
     }
 
+    /// Build a session using resident-parameter and state initializer policies.
+    /// Non-resident parameters remain ordinary inputs to `run_with_parameters`.
+    pub fn initialize_session(&self, seed: u64) -> Result<ModelSession> {
+        self.session().initialize_parameters(seed)?.build()
+    }
+
     pub fn state_type(&self, slot: &StateSlot) -> Result<(DType, Vec<i64>)> {
         Ok(self.program.state_type(slot)?)
     }
@@ -246,6 +253,14 @@ impl<'a> CompiledModelSessionBuilder<'a> {
             model: self.model,
             inner: self.inner.initialize_parameters(seed)?,
         })
+    }
+
+    /// Set the deterministic seed used by declaration-time state initializers.
+    pub fn initializer_seed(self, seed: u64) -> Self {
+        Self {
+            model: self.model,
+            inner: self.inner.initializer_seed(seed),
+        }
     }
 
     pub fn rng_seed(self, name: &str, seed: u64) -> Result<Self> {
@@ -561,6 +576,11 @@ impl AppliedModel {
         })
     }
 
+    /// Compile and initialize all ordinary parameter inputs in one operation.
+    pub fn compile_initialized(&self, compiler: &mut Compiler, seed: u64) -> Result<BoundModel> {
+        self.compile(compiler)?.initialize_parameters(seed)
+    }
+
     /// Compile to a low-level executable without retaining model binding metadata.
     pub fn compile_executable(&self, compiler: &mut Compiler) -> Result<Arc<Executable>> {
         ensure!(
@@ -607,6 +627,7 @@ impl AppliedModel {
             program,
             overrides: BTreeMap::new(),
             parameter_overrides: BTreeMap::new(),
+            initializer_seed: 0,
         }
     }
 
@@ -873,6 +894,7 @@ impl ModelSessionBuilder<'_> {
 
     /// Initialize only this trace's resident parameter set from schema policy.
     pub fn initialize_parameters(mut self, seed: u64) -> Result<Self> {
+        self.initializer_seed = seed;
         let declarations = self
             .model
             .resident_parameters()
@@ -896,6 +918,12 @@ impl ModelSessionBuilder<'_> {
             self = self.parameter(spec.path(), value)?;
         }
         Ok(self)
+    }
+
+    /// Set the deterministic seed used by declaration-time state initializers.
+    pub fn initializer_seed(mut self, seed: u64) -> Self {
+        self.initializer_seed = seed;
+        self
     }
 
     pub fn rng_seed(self, name: &str, seed: u64) -> Result<Self> {
@@ -967,7 +995,7 @@ impl ModelSessionBuilder<'_> {
                     &path,
                     &shape,
                     dtype,
-                    crate::schema::stable_seed(0, &path),
+                    crate::schema::stable_seed(self.initializer_seed, &path),
                 )?
             };
             initial.push((slot, value));
