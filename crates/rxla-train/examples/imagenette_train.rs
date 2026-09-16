@@ -482,7 +482,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let inference = Model::new(resnet18_infer)
         .inputs(resnet18_inputs(batch_size))
-        .apply_resident(&schema, &trainable)?;
+        .trace_resident(&schema, &trainable)?;
     let inference_metrics = Tensor::stack(
         &[
             inference.outputs()[0].clone(),

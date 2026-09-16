@@ -6,7 +6,7 @@
 
 use rxla_core::{DType, StateGraph, StateSlot, Tensor};
 use snafu::{OptionExt, Snafu, ensure};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, DerefMut};
 
 mod applied;
@@ -74,18 +74,6 @@ pub enum Error {
     IncompatibleParameter { path: String },
     #[snafu(display("parameter {path:?} is absent from the schema"))]
     UnknownParameter { path: String },
-    #[snafu(display("model effect at index {index} is incompatible with the schema"))]
-    EffectMismatch { index: usize },
-    #[snafu(display("model input {index} is absent from the schema"))]
-    UnexpectedInput { index: usize },
-    #[snafu(display("model input declaration at index {index} is incompatible with the schema"))]
-    IncompatibleInput { index: usize },
-    #[snafu(display("apply did not read schema parameter {path:?}"))]
-    UnreadParameter { path: String },
-    #[snafu(display("apply stopped before schema input {index}"))]
-    UnreadInput { index: usize },
-    #[snafu(display("apply stopped before schema effect {index}"))]
-    UnreadEffect { index: usize },
     #[snafu(display("duplicate parameter binding {path:?}"))]
     DuplicateBinding { path: String },
     #[snafu(display("missing parameter binding {path:?}"))]
@@ -96,6 +84,8 @@ pub enum Error {
     ParameterCount { expected: usize, actual: usize },
     #[snafu(display("parameter selection belongs to a different model schema"))]
     SelectionSchemaMismatch,
+    #[snafu(display("traced model structure does not match the supplied schema"))]
+    ModelSchemaMismatch,
     #[snafu(display("{kind} {identity}: shape does not match the schema"))]
     BufferShape {
         kind: &'static str,
@@ -224,44 +214,12 @@ where
         Ok((selection, applied))
     }
 
-    /// Discover typed inputs and trace a caller-selected resident parameter set.
+    /// Trace once with resident parameters selected from a compatible schema.
+    ///
+    /// This supports distinct training and inference functions that declare the
+    /// same model structure. The selection must belong to `schema`; the newly
+    /// traced structure is compared in full before it is returned.
     pub fn trace_resident<Marker>(
-        &self,
-        select: impl FnOnce(&ModelSchema) -> ParameterSelection,
-    ) -> std::result::Result<
-        (ParameterSelection, AppliedModel),
-        <F as ModelHandler<I, Marker>>::Error,
-    >
-    where
-        F: ModelHandler<I, Marker>,
-    {
-        let schema = self.init()?;
-        let selection = select(&schema);
-        let applied = self.apply_resident(&schema, &selection)?;
-        Ok((selection, applied))
-    }
-
-    pub fn init<Marker>(
-        &self,
-    ) -> std::result::Result<ModelSchema, <F as ModelHandler<I, Marker>>::Error>
-    where
-        F: ModelHandler<I, Marker>,
-    {
-        init_with_error(|cx| self.apply.invoke(cx, &self.inputs)).map(|(schema, _)| schema)
-    }
-
-    pub fn apply<Marker>(
-        &self,
-        schema: &ModelSchema,
-    ) -> std::result::Result<AppliedModel, <F as ModelHandler<I, Marker>>::Error>
-    where
-        F: ModelHandler<I, Marker>,
-    {
-        apply_with_error(schema, |cx| self.apply.invoke(cx, &self.inputs))
-    }
-
-    /// Trace with selected parameters stored as resident session state.
-    pub fn apply_resident<Marker>(
         &self,
         schema: &ModelSchema,
         selection: &ParameterSelection,
@@ -269,28 +227,31 @@ where
     where
         F: ModelHandler<I, Marker>,
     {
-        apply_resident_with_error(schema, selection, |cx| self.apply.invoke(cx, &self.inputs))
+        if !selection.schema().same_identity(schema) {
+            return Err(<F as ModelHandler<I, Marker>>::Error::from(
+                Error::SelectionSchemaMismatch,
+            ));
+        }
+        let paths = selection
+            .parameters()
+            .map(|(_, parameter)| parameter.path().to_owned())
+            .collect();
+        let applied =
+            trace_once_resident_selected(paths, |cx| self.apply.invoke(cx, &self.inputs))?;
+        if applied.schema() != schema {
+            return Err(<F as ModelHandler<I, Marker>>::Error::from(
+                Error::ModelSchemaMismatch,
+            ));
+        }
+        Ok(applied)
     }
-}
-
-enum ParamMode {
-    Init {
-        schema: ModelSchema,
-        values: BTreeMap<String, Tensor>,
-        residency: InitResidency,
-    },
-    Apply {
-        schema: ModelSchema,
-        values: BTreeMap<String, Tensor>,
-        read: HashSet<String>,
-        resident: HashSet<ParameterId>,
-    },
 }
 
 enum InitResidency {
     None,
     All,
     Under(String),
+    Selected(BTreeSet<String>),
 }
 
 impl InitResidency {
@@ -299,21 +260,21 @@ impl InitResidency {
             Self::None => false,
             Self::All => true,
             Self::Under(scope) => selection::path_is_under(path, scope),
+            Self::Selected(paths) => paths.contains(path),
         }
     }
 }
 
 /// The explicit interpreter for scoped parameter effects.
 ///
-/// Model functions receive this same type during [`Model::init`] and
-/// [`Model::apply`]. The mode is selected explicitly, never inferred from prior
-/// invocations.
+/// A model function receives this context once while [`Model::trace`] records
+/// its parameter, input, state, RNG, and tensor operations.
 pub struct Cx {
     graph: StateGraph,
     scope: Vec<String>,
-    input_index: usize,
-    effect_index: usize,
-    mode: ParamMode,
+    schema: ModelSchema,
+    parameter_values: BTreeMap<String, Tensor>,
+    residency: InitResidency,
     states: BTreeMap<String, StateDeclaration>,
     rngs: BTreeMap<String, RngStream>,
     resident_parameters: BTreeMap<String, StateSlot>,
@@ -388,35 +349,17 @@ impl Cx {
         Self::init_with_residency(InitResidency::Under(scope.to_owned()))
     }
 
+    fn init_resident_selected(paths: BTreeSet<String>) -> Self {
+        Self::init_with_residency(InitResidency::Selected(paths))
+    }
+
     fn init_with_residency(residency: InitResidency) -> Self {
         Self {
             graph: StateGraph::default(),
             scope: Vec::new(),
-            input_index: 0,
-            effect_index: 0,
-            mode: ParamMode::Init {
-                schema: ModelSchema::default(),
-                values: BTreeMap::new(),
-                residency,
-            },
-            states: BTreeMap::new(),
-            rngs: BTreeMap::new(),
-            resident_parameters: BTreeMap::new(),
-        }
-    }
-
-    fn apply(schema: ModelSchema, resident: HashSet<ParameterId>) -> Self {
-        Self {
-            graph: StateGraph::default(),
-            scope: Vec::new(),
-            input_index: 0,
-            effect_index: 0,
-            mode: ParamMode::Apply {
-                schema,
-                values: BTreeMap::new(),
-                read: HashSet::new(),
-                resident,
-            },
+            schema: ModelSchema::default(),
+            parameter_values: BTreeMap::new(),
+            residency,
             states: BTreeMap::new(),
             rngs: BTreeMap::new(),
             resident_parameters: BTreeMap::new(),
@@ -469,73 +412,30 @@ impl Cx {
             dtype,
             initializer,
         };
-        let (graph, mode, resident_parameters) = (
+        let (graph, schema, parameter_values, residency, resident_parameters) = (
             &mut self.graph,
-            &mut self.mode,
+            &mut self.schema,
+            &mut self.parameter_values,
+            &self.residency,
             &mut self.resident_parameters,
         );
-        match mode {
-            ParamMode::Init {
-                schema,
-                values,
-                residency,
-            } => {
-                if let Some(existing) = schema.get(&path) {
-                    ensure!(existing == &requested, IncompatibleParameterSnafu { path });
-                    return Ok(values
-                        .get(&path)
-                        .expect("schema and parameter value are inserted together")
-                        .clone());
-                }
-                let value = if residency.contains(&path) {
-                    let (value, slot) = resident_parameter_tensor(graph, &path, shape, dtype)?;
-                    resident_parameters.insert(path.clone(), slot);
-                    value
-                } else {
-                    parameter_tensor(graph, shape, dtype)?
-                };
-                schema.push_parameter(requested);
-                self.effect_index += 1;
-                values.insert(path, value.clone());
-                Ok(value)
-            }
-            ParamMode::Apply {
-                schema,
-                values,
-                read,
-                resident,
-            } => {
-                let expected = schema
-                    .get(&path)
-                    .with_context(|| UnknownParameterSnafu { path: path.clone() })?;
-                ensure!(expected == &requested, IncompatibleParameterSnafu { path });
-                read.insert(path.clone());
-                if let Some(value) = values.get(&path) {
-                    return Ok(value.clone());
-                }
-                let parameter_index = schema
-                    .parameter_id(&path)
-                    .expect("every parameter schema entry has an index")
-                    .index();
-                ensure!(
-                    schema.arguments().get(self.effect_index)
-                        == Some(&ModelArgument::Parameter(parameter_index)),
-                    EffectMismatchSnafu {
-                        index: self.effect_index
-                    }
-                );
-                let value = if resident.contains(&ParameterId::from_index(parameter_index)) {
-                    let (value, slot) = resident_parameter_tensor(graph, &path, shape, dtype)?;
-                    resident_parameters.insert(path.clone(), slot);
-                    value
-                } else {
-                    parameter_tensor(graph, shape, dtype)?
-                };
-                values.insert(path, value.clone());
-                self.effect_index += 1;
-                Ok(value)
-            }
+        if let Some(existing) = schema.get(&path) {
+            ensure!(existing == &requested, IncompatibleParameterSnafu { path });
+            return Ok(parameter_values
+                .get(&path)
+                .expect("schema and parameter value are inserted together")
+                .clone());
         }
+        let value = if residency.contains(&path) {
+            let (value, slot) = resident_parameter_tensor(graph, &path, shape, dtype)?;
+            resident_parameters.insert(path.clone(), slot);
+            value
+        } else {
+            parameter_tensor(graph, shape, dtype)?
+        };
+        schema.push_parameter(requested);
+        parameter_values.insert(path, value.clone());
+        Ok(value)
     }
 
     /// Enter a lexical parameter/effect scope without a closure.
@@ -572,32 +472,7 @@ impl Cx {
             shape: shape.to_vec(),
             dtype,
         };
-        let input_index = self.input_index;
-        match &mut self.mode {
-            ParamMode::Init { schema, .. } => {
-                let declared = schema.push_input(requested.clone());
-                debug_assert_eq!(declared, input_index);
-            }
-            ParamMode::Apply { schema, .. } => {
-                let expected = schema
-                    .inputs()
-                    .get(input_index)
-                    .context(UnexpectedInputSnafu { index: input_index })?;
-                ensure!(
-                    expected == &requested,
-                    IncompatibleInputSnafu { index: input_index }
-                );
-                ensure!(
-                    schema.arguments().get(self.effect_index)
-                        == Some(&ModelArgument::Input(input_index)),
-                    EffectMismatchSnafu {
-                        index: self.effect_index
-                    }
-                );
-            }
-        }
-        self.input_index += 1;
-        self.effect_index += 1;
+        self.schema.push_input(requested);
         match dtype {
             DType::F32 | DType::I32 | DType::U8 => Ok(self.graph.input_with_dtype(shape, dtype)?),
             DType::BF16 => Ok(self.graph.input_bf16_as_f32(shape)?),
@@ -643,38 +518,13 @@ impl Cx {
                 slot: existing.slot.clone(),
             });
         }
-        let state_index = match &mut self.mode {
-            ParamMode::Init { schema, .. } => schema.push_state(StateSpec {
-                path: path.clone(),
-                shape: shape.to_vec(),
-                dtype,
-                initializer,
-            }),
-            ParamMode::Apply { schema, .. } => {
-                let (index, expected) = schema
-                    .states()
-                    .iter()
-                    .enumerate()
-                    .find(|(_, state)| state.path == path)
-                    .context(IncompatibleStateSnafu { path: path.clone() })?;
-                ensure!(
-                    expected.shape == shape
-                        && expected.dtype == dtype
-                        && expected.initializer == initializer,
-                    IncompatibleStateSnafu { path }
-                );
-                ensure!(
-                    schema.arguments().get(self.effect_index) == Some(&ModelArgument::State(index)),
-                    EffectMismatchSnafu {
-                        index: self.effect_index
-                    }
-                );
-                index
-            }
-        };
-        let _ = state_index;
+        self.schema.push_state(StateSpec {
+            path: path.clone(),
+            shape: shape.to_vec(),
+            dtype,
+            initializer,
+        });
         let slot = self.graph.state_named(&path, shape, dtype)?;
-        self.effect_index += 1;
         self.states.insert(
             path.clone(),
             StateDeclaration {
@@ -748,46 +598,12 @@ impl Cx {
         }
     }
 
-    fn finish_apply(&self) -> Result<()> {
-        let ParamMode::Apply { schema, read, .. } = &self.mode else {
-            return Ok(());
-        };
-        if let Some(missing) = schema
-            .parameters()
-            .iter()
-            .find(|parameter| !read.contains(parameter.path()))
-        {
-            return UnreadParameterSnafu {
-                path: missing.path(),
-            }
-            .fail();
-        }
-        ensure!(
-            self.input_index == schema.inputs().len(),
-            UnreadInputSnafu {
-                index: self.input_index,
-            }
-        );
-        ensure!(
-            self.effect_index == schema.arguments().len(),
-            UnreadEffectSnafu {
-                index: self.effect_index,
-            }
-        );
-        Ok(())
-    }
-
     fn parameter_tensors(&self) -> Vec<Tensor> {
-        let (schema, values) = match &self.mode {
-            ParamMode::Init { schema, values, .. } | ParamMode::Apply { schema, values, .. } => {
-                (schema, values)
-            }
-        };
-        schema
+        self.schema
             .parameters()
             .iter()
             .map(|parameter| {
-                values
+                self.parameter_values
                     .get(parameter.path())
                     .expect("each schema parameter has a traced tensor")
                     .clone()
@@ -816,11 +632,9 @@ impl Cx {
             .collect()
     }
 
+    #[cfg(test)]
     fn into_schema(self) -> ModelSchema {
-        match self.mode {
-            ParamMode::Init { schema, .. } => schema,
-            ParamMode::Apply { .. } => unreachable!("only init contexts produce schemas"),
-        }
+        self.schema
     }
 }
 
@@ -947,6 +761,7 @@ fn validate_name(name: &str) -> Result<()> {
 }
 
 /// Interpret parameter effects as declarations and return the frozen schema.
+#[cfg(test)]
 fn init_with_error<T, E>(
     body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
 ) -> std::result::Result<(ModelSchema, T), E>
@@ -962,6 +777,16 @@ where
 #[cfg(test)]
 fn init<T>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ModelSchema, T)> {
     init_with_error(body)
+}
+
+#[cfg(test)]
+fn apply<T: ModelOutputs>(
+    schema: &ModelSchema,
+    body: impl FnOnce(&mut Cx) -> Result<T>,
+) -> Result<AppliedModel> {
+    let applied = trace_once(body)?;
+    assert_eq!(applied.schema(), schema, "test replay changed model schema");
+    Ok(applied)
 }
 
 fn trace_once<T, E>(
@@ -995,6 +820,17 @@ where
     trace_once_with(Cx::init_resident_under(scope), body)
 }
 
+fn trace_once_resident_selected<T, E>(
+    paths: BTreeSet<String>,
+    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+) -> std::result::Result<AppliedModel, E>
+where
+    T: ModelOutputs,
+    E: From<Error>,
+{
+    trace_once_with(Cx::init_resident_selected(paths), body)
+}
+
 fn trace_once_with<T, E>(
     mut cx: Cx,
     body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
@@ -1005,10 +841,7 @@ where
 {
     let outputs = body(&mut cx)?.into_tensors();
     cx.finish_rngs().map_err(E::from)?;
-    let schema = match &cx.mode {
-        ParamMode::Init { schema, .. } => schema.clone(),
-        ParamMode::Apply { .. } => unreachable!("trace_once creates an init context"),
-    };
+    let schema = cx.schema.clone();
     let parameters = cx.parameter_tensors();
     let states = cx.state_slots(&schema);
     let resident_parameters = cx.resident_parameter_slots(&schema);
@@ -1019,68 +852,6 @@ where
         parameters,
         resident_parameters,
         schema,
-    ))
-}
-
-/// Interpret parameter effects as reads from `schema` and retain traced outputs.
-fn apply_with_error<T, E>(
-    schema: &ModelSchema,
-    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
-) -> std::result::Result<AppliedModel, E>
-where
-    T: ModelOutputs,
-    E: From<Error>,
-{
-    apply_with_resident(schema, HashSet::new(), body)
-}
-
-#[cfg(test)]
-fn apply<T: ModelOutputs>(
-    schema: &ModelSchema,
-    body: impl FnOnce(&mut Cx) -> Result<T>,
-) -> Result<AppliedModel> {
-    apply_with_error(schema, body)
-}
-
-/// Interpret selected parameters as resident state rather than ABI inputs.
-fn apply_resident_with_error<T, E>(
-    schema: &ModelSchema,
-    selection: &ParameterSelection,
-    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
-) -> std::result::Result<AppliedModel, E>
-where
-    T: ModelOutputs,
-    E: From<Error>,
-{
-    if !selection.schema().same_identity(schema) {
-        return Err(E::from(Error::SelectionSchemaMismatch));
-    }
-    apply_with_resident(schema, selection.ids().iter().copied().collect(), body)
-}
-
-fn apply_with_resident<T, E>(
-    schema: &ModelSchema,
-    resident: HashSet<ParameterId>,
-    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
-) -> std::result::Result<AppliedModel, E>
-where
-    T: ModelOutputs,
-    E: From<Error>,
-{
-    let mut cx = Cx::apply(schema.clone(), resident);
-    let outputs = body(&mut cx)?.into_tensors();
-    cx.finish_rngs().map_err(E::from)?;
-    cx.finish_apply().map_err(E::from)?;
-    let parameters = cx.parameter_tensors();
-    let states = cx.state_slots(schema);
-    let resident_parameters = cx.resident_parameter_slots(schema);
-    Ok(AppliedModel::new(
-        cx.graph,
-        states,
-        outputs,
-        parameters,
-        resident_parameters,
-        schema.clone(),
     ))
 }
 
@@ -1098,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn init_and_apply_share_one_model_body_and_schema() {
+    fn trace_records_model_body_and_schema() {
         let (schema, init_output) = init(classifier).unwrap();
         assert_eq!(init_output.shape(), [2, 3]);
         assert_eq!(schema.inputs().len(), 1);
@@ -1150,6 +921,30 @@ mod tests {
     }
 
     #[test]
+    fn schema_guided_resident_trace_is_single_pass_and_structural() {
+        fn source(cx: &mut Cx) -> Result<Tensor> {
+            cx.param("weight", &[2])
+        }
+
+        let source = Model::new(source).trace().unwrap();
+        let schema = source.schema().clone();
+        let selection = schema.select_all();
+        let calls = Cell::new(0);
+        let compatible = Model::new(|cx: &mut Cx| -> Result<_> {
+            calls.set(calls.get() + 1);
+            cx.param("weight", &[2])
+        })
+        .trace_resident(&schema, &selection)
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(compatible.resident_parameters().count(), 1);
+
+        let incompatible =
+            Model::new(|cx: &mut Cx| cx.param("weight", &[3])).trace_resident(&schema, &selection);
+        assert!(matches!(incompatible, Err(Error::ModelSchemaMismatch)));
+    }
+
+    #[test]
     fn scope_guards_restore_paths_and_validate_atomically() {
         let (schema, _) = init(|cx| {
             {
@@ -1195,7 +990,7 @@ mod tests {
 
         let (schema, _) = init(product).unwrap();
         let applied = apply(&schema, product).unwrap();
-        let head = schema.select_under("head");
+        let head = applied.schema().select_under("head");
         let leaves = applied.parameter_tensors(&head).unwrap();
         let gradients = applied.outputs()[0].grad(&leaves).unwrap();
 
@@ -1223,25 +1018,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_rejects_changed_or_missing_parameter_effects() {
-        let (schema, _) = init(|cx| cx.param("weight", &[2, 3])).unwrap();
-        let changed = match apply(&schema, |cx| {
-            cx.param("weight", &[3, 2])?;
-            Ok(())
-        }) {
-            Ok(_) => panic!("changed parameter shape unexpectedly applied"),
-            Err(error) => error,
-        };
-        assert!(matches!(changed, Error::IncompatibleParameter { .. }));
-
-        let missing = match apply(&schema, |_cx| Ok(())) {
-            Ok(_) => panic!("missing parameter effect unexpectedly applied"),
-            Err(error) => error,
-        };
-        assert!(matches!(missing, Error::UnreadParameter { .. }));
-    }
-
-    #[test]
     fn repeated_parameter_reads_share_one_input() {
         let (schema, _) = init(|cx| {
             let first = cx.param("weight", &[2, 2])?;
@@ -1256,45 +1032,6 @@ mod tests {
         })
         .unwrap();
         assert_eq!(applied.prepare().unwrap().input_count(), 1);
-    }
-
-    #[test]
-    fn apply_rejects_changed_or_extra_input_effects() {
-        let (schema, _) = init(classifier).unwrap();
-        let changed = match apply(&schema, |cx| {
-            let input = cx.input(&[3, 4])?;
-            let weight = cx.scope("head")?.param("weight", &[4, 3])?;
-            Ok(input.matmul(&weight)?)
-        }) {
-            Ok(_) => panic!("changed input ABI unexpectedly applied"),
-            Err(error) => error,
-        };
-        assert!(matches!(changed, Error::IncompatibleInput { index: 0 }));
-
-        let extra = match apply(&schema, |cx| {
-            let input = cx.input(&[2, 4])?;
-            let _unused = cx.input(&[1])?;
-            let weight = cx.scope("head")?.param("weight", &[4, 3])?;
-            Ok(input.matmul(&weight)?)
-        }) {
-            Ok(_) => panic!("extra input ABI unexpectedly applied"),
-            Err(error) => error,
-        };
-        assert!(matches!(extra, Error::UnexpectedInput { index: 1 }));
-    }
-
-    #[test]
-    fn apply_rejects_effect_reordering() {
-        let (schema, _) = init(classifier).unwrap();
-        let error = match apply(&schema, |cx| {
-            let weight = cx.scope("head")?.param("weight", &[4, 3])?;
-            let input = cx.input(&[2, 4])?;
-            Ok(input.matmul(&weight)?)
-        }) {
-            Ok(_) => panic!("reordered effects unexpectedly applied"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, Error::EffectMismatch { index: 0 }));
     }
 
     #[test]
@@ -1473,7 +1210,6 @@ mod tests {
         })
         .inputs(ModelInput::new([1, 3]));
         let (_, applied) = definition.trace_resident_all().unwrap();
-        let schema = applied.schema().clone();
         let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
         let program = applied.compile_stateful(&mut compiler).unwrap();
         assert!(matches!(
@@ -1505,15 +1241,7 @@ mod tests {
             [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         );
 
-        let snapshot = applied.take_session(session.into_raw()).unwrap();
-        let nonresident = definition
-            .apply_resident(&schema, &schema.select_all().matching(|_, _| false))
-            .unwrap();
-        let nonresident_program = nonresident.compile_stateful(&mut compiler).unwrap();
-        assert!(matches!(
-            snapshot.restore_model(nonresident_program.session().into_raw_builder()),
-            Err(Error::UnexpectedResidentParameter { .. })
-        ));
+        applied.take_session(session.into_raw()).unwrap();
     }
 
     #[test]

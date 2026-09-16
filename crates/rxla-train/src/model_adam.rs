@@ -569,7 +569,7 @@ mod tests {
             [100.0]
         );
 
-        let inference = definition.apply_resident(&schema, &selection).unwrap();
+        let inference = definition.trace_resident(&schema, &selection).unwrap();
         let inference_program = inference.compile_stateful(&mut compiler).unwrap();
         let snapshot = model.take_session(session.into_raw()).unwrap();
         assert!(

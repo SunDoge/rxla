@@ -519,7 +519,7 @@ impl AppliedModel {
     /// Atomically record next values for selected resident parameters.
     ///
     /// The selection and values use schema order. Every selected parameter must
-    /// have been made resident by `Model::apply_resident`; validation completes
+    /// have been made resident by `Model::trace_resident`; validation completes
     /// before any symbolic slot is changed.
     pub fn write_resident_parameters(
         &mut self,

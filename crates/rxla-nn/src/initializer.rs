@@ -257,11 +257,10 @@ mod tests {
                 },
             )
         })
-        .init()
-        .unwrap_err();
+        .trace();
         assert!(matches!(
             error,
-            Error::InvalidInitializer { path, .. } if path == "weight"
+            Err(Error::InvalidInitializer { path, .. }) if path == "weight"
         ));
     }
 
@@ -299,7 +298,8 @@ mod tests {
         assert_eq!(output.dimensions().unwrap(), [1, 2]);
 
         let uninitialized = Model::new(|cx: &mut Cx| cx.param("external", &[1]));
-        let schema = uninitialized.init().unwrap();
+        let uninitialized = uninitialized.trace().unwrap();
+        let schema = uninitialized.schema();
         assert!(matches!(
             schema.initialize(&client, 42),
             Err(Error::MissingInitializer { path }) if path == "external"
@@ -308,13 +308,7 @@ mod tests {
         let definition =
             Model::new(|cx: &mut Cx, input: Tensor| cx.scope("norm")?.batch_norm().apply(&input))
                 .inputs(crate::ModelInput::new([1, 2, 2, 3]));
-        let (_, model) = definition
-            .trace_resident(|schema| {
-                schema
-                    .select_all()
-                    .matching(|_, parameter| parameter.path() == "norm.weight")
-            })
-            .unwrap();
+        let (_, model) = definition.trace_resident_under("norm.weight").unwrap();
         let schema = model.schema();
         assert_eq!(model.resident_parameters().count(), 1);
         assert_eq!(

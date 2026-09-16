@@ -569,7 +569,7 @@ mod tests {
         // A separately traced inference model can take ownership of the
         // trained device buffer by canonical parameter path. No host download,
         // re-upload, or optimizer-shaped public ABI is involved.
-        let inference = definition.apply_resident(&schema, &selection).unwrap();
+        let inference = definition.trace_resident(&schema, &selection).unwrap();
         let inference_program = inference.compile_stateful(&mut compiler).unwrap();
         let snapshot = model.take_session(session.into_raw()).unwrap();
         let mut inference_session = snapshot
