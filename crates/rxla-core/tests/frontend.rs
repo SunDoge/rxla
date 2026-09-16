@@ -129,6 +129,57 @@ fn eval_many_preserves_materialized_values_and_only_executes_lazy_roots() {
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+fn async_eval_publishes_only_after_wait_and_releases_dropped_claims() {
+    let mut runtime = Runtime::new(client());
+    assert!(
+        runtime
+            .eval_many_async(&[])
+            .unwrap()
+            .wait()
+            .unwrap()
+            .is_empty()
+    );
+
+    let ready = Tensor::from_slice([1], DType::F32, [9.0])
+        .unwrap()
+        .to_device(runtime.client())
+        .unwrap();
+    let input = Tensor::from_slice([2], DType::F32, [1.0, 2.0]).unwrap();
+    let lazy = input.add_scalar(4.0).unwrap();
+    let pending = runtime
+        .eval_many_async(&[ready.clone(), lazy.clone()])
+        .unwrap();
+    assert!(!lazy.is_materialized());
+    assert!(matches!(
+        runtime.eval_many_async(std::slice::from_ref(&lazy)),
+        Err(rxla_core::Error::EvaluationInFlight { index: 0 })
+    ));
+    assert!(matches!(
+        runtime.eval_many(std::slice::from_ref(&lazy)),
+        Err(rxla_core::Error::EvaluationInFlight { index: 0 })
+    ));
+    let outputs = pending.wait().unwrap();
+    assert!(outputs[0].same_expression(&ready));
+    assert_eq!(outputs[1].to_vec::<f32>().unwrap(), [5.0, 6.0]);
+    assert!(lazy.is_materialized());
+
+    let retry = input.add_scalar(7.0).unwrap();
+    drop(
+        runtime
+            .eval_many_async(std::slice::from_ref(&retry))
+            .unwrap(),
+    );
+    assert!(!retry.is_materialized());
+    runtime
+        .eval_many_async(std::slice::from_ref(&retry))
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(retry.to_vec::<f32>().unwrap(), [8.0, 9.0]);
+}
+
+#[test]
+#[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn mlx_style_eval_materializes_lazy_tensor_operations_and_reuses_cache() {
     let x = rxla_core::Tensor::from_slice([2], DType::F32, [1.0, 2.0]).unwrap();
     let y = rxla_core::Tensor::from_slice([2], DType::F32, [3.0, 4.0]).unwrap();

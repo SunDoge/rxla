@@ -9,9 +9,11 @@
 
 #[cfg(feature = "disk-cache")]
 use crate::disk_cache::DiskCache;
+use crate::tensor_handle::EvaluationLease;
 use crate::{
     Buffer, CacheLimits, CacheStats, Compiler, Error, Executable, ExecutionPlan, Graph, InputSpec,
-    LoweredProgram, OutputSpec, PlanningPolicy, Result, StateGraph, StateProgram, Tensor, err,
+    LoweredProgram, OutputSpec, PendingExecution, PlanningPolicy, Result, StateGraph, StateProgram,
+    Tensor, err,
 };
 use prost::Message;
 use rxla_pjrt::{Client, ClientOptions, DType};
@@ -332,6 +334,47 @@ pub struct Runtime {
     backends: BTreeMap<String, Backend>,
     default_device: Device,
     planning_policy: PlanningPolicy,
+}
+
+/// An owned Tensor evaluation submitted to a single-device PJRT executable.
+///
+/// Outputs remain lazy until [`wait`](Self::wait) succeeds. Dropping this value
+/// waits for native execution through [`PendingExecution`], discards its result,
+/// and releases the in-flight claim so the original tensors can be evaluated
+/// again. It is thread-affine and is not a `Future`.
+#[must_use = "call wait to publish results and observe execution failures"]
+pub struct PendingEvaluation {
+    execution: Option<PendingExecution>,
+    lease: Option<EvaluationLease>,
+    pending_outputs: Vec<Tensor>,
+    requested_outputs: Vec<Tensor>,
+}
+
+impl PendingEvaluation {
+    /// `true` means completion, including failed completion; `wait` observes
+    /// the final status. A request containing no lazy outputs is immediately ready.
+    pub fn is_ready(&self) -> Result<bool> {
+        match &self.execution {
+            Some(execution) => Ok(execution.is_ready()?),
+            None => Ok(true),
+        }
+    }
+
+    /// Wait for execution, atomically publish all lazy roots, and return the
+    /// originally requested handles in their original order.
+    pub fn wait(mut self) -> Result<Vec<Tensor>> {
+        let Some(execution) = self.execution.take() else {
+            return Ok(std::mem::take(&mut self.requested_outputs));
+        };
+        let values = execution
+            .wait()?
+            .into_iter()
+            .map(Tensor::materialized_detached)
+            .collect::<Result<Vec<_>>>()?;
+        Tensor::materialize_all(&self.pending_outputs, &values)?;
+        self.lease.take();
+        Ok(std::mem::take(&mut self.requested_outputs))
+    }
 }
 
 struct Backend {
@@ -930,6 +973,67 @@ impl Runtime {
         self.eval_many_on(&device, outputs)
     }
 
+    /// Submit several lazy outputs without waiting for device completion.
+    /// Compilation and host uploads still happen before this method returns.
+    /// The returned lease prevents duplicate evaluation of the same roots.
+    pub fn eval_many_async(&mut self, outputs: &[Tensor]) -> Result<PendingEvaluation> {
+        let device = self.default_device.clone();
+        self.eval_many_async_on(&device, outputs)
+    }
+
+    fn eval_many_async_on(
+        &mut self,
+        device: &Device,
+        outputs: &[Tensor],
+    ) -> Result<PendingEvaluation> {
+        let pending_outputs = outputs
+            .iter()
+            .filter(|output| !output.is_materialized())
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(first_pending) = pending_outputs.first() else {
+            return Ok(PendingEvaluation {
+                execution: None,
+                lease: None,
+                pending_outputs,
+                requested_outputs: outputs.to_vec(),
+            });
+        };
+        let lease = Tensor::begin_evaluation(&pending_outputs)?;
+        let graph = first_pending.graph();
+        let roots = pending_outputs.clone();
+        let (lowered, planning, parameters, source) = graph.direct_program(&roots, false)?;
+        let inputs = first_pending.lazy_inputs(&parameters)?;
+        let program = Program {
+            planning,
+            lowered,
+            source,
+        };
+        program.validate_tensor_inputs(&inputs.iter().collect::<Vec<_>>())?;
+        let client = self.client_on(device)?.clone();
+        let buffers = inputs
+            .iter()
+            .map(|input| input.to_buffer_on_device(&client, device.ordinal()))
+            .collect::<Result<Vec<_>>>()?;
+        let executable = self.compile_on(device, &program)?;
+        if executable.device_count() != 1 {
+            return Err(Error::AsyncEvaluationDeviceCount {
+                actual: executable.device_count(),
+            });
+        }
+        let references = buffers
+            .iter()
+            .map(|buffer| buffer.as_ref())
+            .collect::<Vec<_>>();
+        let execution = executable.submit(&references)?;
+        Ok(PendingEvaluation {
+            execution: Some(execution),
+            lease: Some(lease),
+            pending_outputs,
+            requested_outputs: outputs.to_vec(),
+        })
+    }
+
     fn eval_many_on(&mut self, device: &Device, outputs: &[Tensor]) -> Result<Vec<Tensor>> {
         if outputs.is_empty() {
             return Ok(Vec::new());
@@ -942,6 +1046,7 @@ impl Runtime {
         let Some(first_pending) = pending.first() else {
             return Ok(outputs.to_vec());
         };
+        let _lease = Tensor::begin_evaluation(&pending)?;
         let graph = first_pending.graph();
         if pending
             .iter()
@@ -1012,6 +1117,10 @@ impl DeviceRuntime<'_> {
 
     pub fn eval<E: Evaluable>(&mut self, values: E) -> Result<E::Output> {
         values.eval_with(self.runtime, &self.device)
+    }
+
+    pub fn eval_many_async(&mut self, outputs: &[Tensor]) -> Result<PendingEvaluation> {
+        self.runtime.eval_many_async_on(&self.device, outputs)
     }
 }
 

@@ -89,6 +89,14 @@ pub enum Error {
     ExecutorOutputNotMaterialized { index: usize },
     #[snafu(display("tensors belong to different implicit lazy sessions"))]
     LazySessionMismatch,
+    #[snafu(display("lazy output {index} already has an evaluation in flight"))]
+    EvaluationInFlight { index: usize },
+    #[snafu(display("an evaluation lease requires at least one lazy output"))]
+    EmptyEvaluationLease,
+    #[snafu(display(
+        "asynchronous Tensor evaluation currently requires one executable device, got {actual}"
+    ))]
+    AsyncEvaluationDeviceCount { actual: usize },
     #[snafu(display("tensor graph lock is poisoned"))]
     GraphLockPoisoned,
     #[snafu(display("storage can only be bound to a symbolic input"))]
@@ -182,7 +190,8 @@ mod dtype_rules;
 mod metadata;
 mod tensor_handle;
 pub use frontend::{
-    Device, DeviceRuntime, Evaluable, Program, Runtime, RuntimeBuilder, TensorFunction, Tracer,
+    Device, DeviceRuntime, Evaluable, PendingEvaluation, Program, Runtime, RuntimeBuilder,
+    TensorFunction, Tracer,
 };
 pub use tensor_handle::{
     Storage, StorageError, StorageKind, StorageResult, TensorBuildError, TensorBuilder,

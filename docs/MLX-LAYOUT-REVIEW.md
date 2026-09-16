@@ -224,3 +224,14 @@ updates, not a reason to adopt constructor-owned Rust modules. RXLA's parameter
 effects keep shape dependencies at the use site and should expose equivalent
 named selection over the resulting schema without moving parameter creation
 back into constructors.
+
+The first asynchronous materialization checkpoint implements the fifth
+constraint for single-device executables. `Runtime::eval_many_async` returns a
+thread-affine `PendingEvaluation`; requested roots remain lazy until `wait`
+successfully observes the PJRT event and atomically publishes every result. An
+in-flight lease rejects both synchronous and asynchronous duplicate evaluation.
+Failed submission, failed waiting, or dropping the pending handle releases the
+lease without changing the original graph, so evaluation can be retried. Drop
+still waits through PJRT ownership rules but deliberately discards results.
+Multi-device asynchronous execution remains rejected because the current PJRT
+wrapper exposes asynchronous submission only for a single-device executable.

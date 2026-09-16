@@ -6,6 +6,7 @@ use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     cell::{OnceCell, RefCell},
+    collections::HashSet,
     ops::Deref,
     ptr::NonNull,
     rc::{Rc, Weak},
@@ -14,6 +15,21 @@ use std::{
 struct LazySession {
     graph: Graph,
     inputs: RefCell<Vec<Tensor>>,
+    in_flight: RefCell<HashSet<rxla_ir::SsaId>>,
+}
+
+pub(crate) struct EvaluationLease {
+    session: Rc<LazySession>,
+    ids: Vec<rxla_ir::SsaId>,
+}
+
+impl Drop for EvaluationLease {
+    fn drop(&mut self) {
+        let mut in_flight = self.session.in_flight.borrow_mut();
+        for id in &self.ids {
+            in_flight.remove(id);
+        }
+    }
 }
 
 thread_local! {
@@ -28,6 +44,7 @@ fn current_lazy_session() -> Rc<LazySession> {
         let session = Rc::new(LazySession {
             graph: Graph::default(),
             inputs: RefCell::new(Vec::new()),
+            in_flight: RefCell::new(HashSet::new()),
         });
         *slot.borrow_mut() = Rc::downgrade(&session);
         session
@@ -546,6 +563,35 @@ impl Deref for Tensor {
 }
 
 impl Tensor {
+    pub(crate) fn begin_evaluation(outputs: &[Tensor]) -> Result<EvaluationLease> {
+        let first = outputs.first().ok_or(Error::EmptyEvaluationLease)?;
+        let trace = first.trace_value()?;
+        let session = trace
+            .lazy
+            .as_ref()
+            .ok_or(Error::ExplicitTraceEvaluation)?
+            .clone();
+        let mut ids = Vec::with_capacity(outputs.len());
+        for (index, output) in outputs.iter().enumerate() {
+            let trace = output.trace_value()?;
+            if trace
+                .lazy
+                .as_ref()
+                .is_none_or(|other| !Rc::ptr_eq(other, &session))
+            {
+                return Err(Error::LazySessionMismatch);
+            }
+            if !ids.contains(&trace.id) {
+                if session.in_flight.borrow().contains(&trace.id) {
+                    return Err(Error::EvaluationInFlight { index });
+                }
+                ids.push(trace.id);
+            }
+        }
+        session.in_flight.borrow_mut().extend(ids.iter().copied());
+        Ok(EvaluationLease { session, ids })
+    }
+
     /// Whether both tensors belong to the same traced program.
     ///
     /// This checks provenance only; it does not compare shapes, values, or
@@ -675,6 +721,12 @@ impl Tensor {
     /// Wrap an executor result as a materialized leaf in the implicit lazy graph.
     pub(crate) fn materialized(buffer: Buffer) -> Result<Self> {
         Self::from_device_buffer(Rc::new(buffer))?.into_lazy()
+    }
+
+    /// Wrap an executor result only for publication into existing lazy roots.
+    /// Unlike `materialized`, this does not register a temporary graph input.
+    pub(crate) fn materialized_detached(buffer: Buffer) -> Result<Self> {
+        Self::from_device_buffer(Rc::new(buffer))
     }
 
     fn from_device_buffer(buffer: Rc<Buffer>) -> Result<Self> {
@@ -1223,6 +1275,34 @@ mod tests {
             ),
             Err(Error::ExecutorOutputNotMaterialized { index: 0 })
         ));
+    }
+
+    #[test]
+    fn evaluation_leases_are_atomic_and_release_on_drop() {
+        let input = Tensor::from_slice([1], DType::F32, [1.0]).unwrap();
+        let first = input.add_scalar(1.0).unwrap();
+        let second = input.add_scalar(2.0).unwrap();
+
+        assert!(matches!(
+            Tensor::begin_evaluation(&[]),
+            Err(Error::EmptyEvaluationLease)
+        ));
+        let second_lease = Tensor::begin_evaluation(std::slice::from_ref(&second)).unwrap();
+        assert!(matches!(
+            Tensor::begin_evaluation(&[first.clone(), second.clone()]),
+            Err(Error::EvaluationInFlight { index: 1 })
+        ));
+
+        // The failed group acquisition did not leave its first root claimed.
+        let first_lease = Tensor::begin_evaluation(std::slice::from_ref(&first)).unwrap();
+        assert!(matches!(
+            Tensor::begin_evaluation(std::slice::from_ref(&first)),
+            Err(Error::EvaluationInFlight { index: 0 })
+        ));
+        drop(first_lease);
+        assert!(Tensor::begin_evaluation(std::slice::from_ref(&first)).is_ok());
+        drop(second_lease);
+        assert!(Tensor::begin_evaluation(std::slice::from_ref(&second)).is_ok());
     }
 
     #[test]
