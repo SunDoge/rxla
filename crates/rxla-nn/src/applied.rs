@@ -41,6 +41,16 @@ pub struct ModelSessionBuilder<'a> {
     parameter_overrides: BTreeMap<String, Buffer>,
 }
 
+/// Owned device buffers extracted from one model session by canonical path.
+///
+/// This is an in-process, same-client handoff rather than a serialized
+/// checkpoint. It can restore a compatible inference/training trace while
+/// leaving source-only transform state (for example optimizer moments) unused.
+pub struct ModelSessionBuffers {
+    parameters: BTreeMap<String, Buffer>,
+    states: BTreeMap<String, Buffer>,
+}
+
 /// One optimizer/transform-owned resident state slot appended after model tracing.
 pub struct TransformState {
     path: String,
@@ -164,6 +174,51 @@ impl AppliedModel {
             .iter()
             .map(|(path, slot)| Ok((path.as_str(), session.state(slot)?)))
             .collect()
+    }
+
+    /// Consume a compatible session into path-addressed model buffers.
+    pub fn take_session(&self, session: Session) -> Result<ModelSessionBuffers> {
+        // Validate every expected identity before consuming the session.
+        self.resident_parameter_buffers(&session)?;
+        self.state_buffers(&session)?;
+        let mut by_slot = session
+            .into_state()
+            .into_iter()
+            .map(|(slot, buffer)| (slot.identity(), buffer))
+            .collect::<BTreeMap<_, _>>();
+        let parameters =
+            self.resident_parameters()
+                .map(|(_, spec, slot)| {
+                    let buffer = by_slot.remove(&slot.identity()).with_context(|| {
+                        InvalidDefinitionSnafu {
+                            message: format!(
+                                "session is missing resident parameter {:?}",
+                                spec.path()
+                            ),
+                        }
+                    })?;
+                    Ok((spec.path().to_owned(), buffer))
+                })
+                .collect::<Result<_>>()?;
+        let states =
+            self.states
+                .iter()
+                .map(|(path, slot)| {
+                    let buffer = by_slot.remove(&slot.identity()).with_context(|| {
+                        InvalidDefinitionSnafu {
+                            message: format!("session is missing state {path:?}"),
+                        }
+                    })?;
+                    Ok((path.clone(), buffer))
+                })
+                .collect::<Result<_>>()?;
+        ensure!(
+            by_slot.is_empty(),
+            InvalidDefinitionSnafu {
+                message: "session contains state absent from its applied model"
+            }
+        );
+        Ok(ModelSessionBuffers { parameters, states })
     }
 
     /// Validate that a selection belongs to this trace and every member uses
@@ -469,6 +524,60 @@ impl AppliedModel {
 
     pub fn into_parts(self) -> (Tracer, Vec<Tensor>) {
         (self.graph, self.outputs)
+    }
+}
+
+impl ModelSessionBuffers {
+    pub fn parameters(&self) -> impl ExactSizeIterator<Item = (&str, &Buffer)> {
+        self.parameters
+            .iter()
+            .map(|(path, buffer)| (path.as_str(), buffer))
+    }
+
+    pub fn states(&self) -> impl ExactSizeIterator<Item = (&str, &Buffer)> {
+        self.states
+            .iter()
+            .map(|(path, buffer)| (path.as_str(), buffer))
+    }
+
+    /// Move all buffers required by `builder` into its target model.
+    ///
+    /// Every target resident parameter and named state must exist with a valid
+    /// client/shape/dtype. Extra source state is deliberately ignored so a
+    /// training snapshot can initialize an inference trace without carrying
+    /// optimizer-only slots.
+    pub fn restore_model<'model>(
+        mut self,
+        mut builder: ModelSessionBuilder<'model>,
+    ) -> Result<ModelSessionBuilder<'model>> {
+        let parameter_paths = builder
+            .model
+            .resident_parameters()
+            .map(|(_, spec, _)| spec.path().to_owned())
+            .collect::<Vec<_>>();
+        for path in parameter_paths {
+            let value = self
+                .parameters
+                .remove(&path)
+                .with_context(|| MissingResidentParameterInitializerSnafu { path: &path })?;
+            builder = builder.parameter(path, value)?;
+        }
+        let state_paths = builder
+            .model
+            .states
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        for path in state_paths {
+            let value = self
+                .states
+                .remove(&path)
+                .with_context(|| InvalidDefinitionSnafu {
+                    message: format!("session snapshot is missing target state {path:?}"),
+                })?;
+            builder = builder.state(path, value)?;
+        }
+        Ok(builder)
     }
 }
 

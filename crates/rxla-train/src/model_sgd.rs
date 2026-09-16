@@ -517,7 +517,7 @@ mod tests {
         }
         .expect("load CPU plugin");
         let definition = Model::new(regression_loss);
-        let (_, selection, mut model) = definition
+        let (schema, selection, mut model) = definition
             .trace_resident(|schema| schema.select_under("linear"))
             .unwrap();
         let slot = model.resident_parameters().next().unwrap().2.clone();
@@ -560,5 +560,21 @@ mod tests {
             trained.iter().all(|value| value.abs() < 1e-4),
             "{trained:?}"
         );
+
+        // A separately traced inference model can take ownership of the
+        // trained device buffer by canonical parameter path. No host download,
+        // re-upload, or optimizer-shaped public ABI is involved.
+        let inference = definition.apply_resident(&schema, &selection).unwrap();
+        let inference_program = inference.compile_stateful(&mut compiler).unwrap();
+        let snapshot = model.take_session(session).unwrap();
+        let mut inference_session = snapshot
+            .restore_model(inference.session(&inference_program))
+            .unwrap()
+            .build()
+            .unwrap();
+        let inference_loss = inference_session.run(&[&input]).unwrap()[0]
+            .to_vec::<f32>()
+            .unwrap()[0];
+        assert!(inference_loss < first * 1e-6, "{inference_loss}");
     }
 }
