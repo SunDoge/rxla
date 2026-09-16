@@ -5,6 +5,11 @@ not completion of the historical IREE feature list. This page records the
 current boundary and outstanding work; it is not a declaration of completion.
 The detailed API guide is [README.md](README.md).
 
+The product target and ordering of future work are recorded separately in the
+[product vision and roadmap](VISION-ROADMAP.md). In short, RXLA prioritizes
+CUDA-based Stable Diffusion and Flux inference, LoRA training/application and
+multi-GPU/multi-host serving, while preserving TPU as the second backend layer.
+
 ## Accepted architecture requirement
 
 The Pliron SSA IR must support inspection, transformation, planning and staged

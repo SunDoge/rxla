@@ -123,6 +123,7 @@ crates.io publishing.
 
 ## Documentation
 
+- [Product vision and roadmap](docs/VISION-ROADMAP.md)
 - [Scope and current limitations](docs/SCOPE.md)
 - [Implementation and API notes](docs/IMPLEMENTATION-NOTES.md)
 - [Execution-plan design](docs/EXECUTION-PLAN-DESIGN.md)
