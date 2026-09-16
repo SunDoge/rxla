@@ -118,6 +118,32 @@ pub enum Error {
     },
     #[snafu(display("invalid model definition: {message}"))]
     InvalidDefinition { message: String },
+    #[snafu(display("state handle belongs to another model trace"))]
+    ForeignState,
+    #[snafu(display("{operation} requires a stateless model"))]
+    StatefulOperation { operation: &'static str },
+    #[snafu(display("resident parameter {path:?} must be initialized through a session"))]
+    ResidentParameterBinding { path: String },
+    #[snafu(display("unknown session state {path:?}"))]
+    UnknownState { path: String },
+    #[snafu(display("duplicate session state initializer {path:?}"))]
+    DuplicateStateInitializer { path: String },
+    #[snafu(display("duplicate resident parameter initializer {path:?}"))]
+    DuplicateResidentParameterInitializer { path: String },
+    #[snafu(display("unknown RNG stream {name:?}"))]
+    UnknownRng { name: String },
+    #[snafu(display("session is missing {kind} {path:?}"))]
+    MissingSessionValue { kind: &'static str, path: String },
+    #[snafu(display("session contains state absent from its applied model"))]
+    UnexpectedSessionState,
+    #[snafu(display("session contains unused {kind} initializers"))]
+    UnusedSessionInitializers { kind: &'static str },
+    #[snafu(display("invalid {operation} probability {probability}: expected {requirement}"))]
+    InvalidProbability {
+        operation: &'static str,
+        probability: f32,
+        requirement: &'static str,
+    },
     #[snafu(display("state declaration for {path:?} is incompatible with the schema"))]
     IncompatibleState { path: String },
     #[snafu(display("transform state {path:?} is already declared"))]
@@ -746,10 +772,7 @@ impl Cx {
     fn validate_state(&self, state: &State) -> Result<()> {
         match self.states.get(&state.path) {
             Some(declaration) if declaration.slot.identity() == state.slot.identity() => Ok(()),
-            _ => InvalidDefinitionSnafu {
-                message: "state belongs to another model trace",
-            }
-            .fail(),
+            _ => ForeignStateSnafu.fail(),
         }
     }
 
@@ -905,8 +928,10 @@ impl Rng<'_> {
     pub fn bernoulli(&mut self, shape: &[i64], probability: f32) -> Result<Tensor> {
         ensure!(
             (0.0..=1.0).contains(&probability),
-            InvalidDefinitionSnafu {
-                message: "device Bernoulli probability must be finite and in [0, 1]"
+            InvalidProbabilitySnafu {
+                operation: "Bernoulli",
+                probability,
+                requirement: "a finite value in [0, 1]"
             }
         );
         if probability == 0.0 || probability == 1.0 {
@@ -925,8 +950,10 @@ impl Rng<'_> {
     ) -> Result<rxla_core::random::DropoutSample> {
         ensure!(
             keep_probability.is_finite() && keep_probability > 0.0 && keep_probability <= 1.0,
-            InvalidDefinitionSnafu {
-                message: "dropout keep probability must be finite and in (0, 1]"
+            InvalidProbabilitySnafu {
+                operation: "dropout keep",
+                probability: keep_probability,
+                requirement: "a finite value in (0, 1]"
             }
         );
         let keep_mask = self.bernoulli(input.shape(), keep_probability)?;
@@ -1354,10 +1381,33 @@ mod tests {
         assert_eq!(schema.states()[0].path(), "steps");
         assert_eq!(schema.states()[1].path(), "sampling.key0");
         assert!(applied.is_stateful());
-        assert!(applied.prepare().is_err());
+        assert!(matches!(
+            applied.prepare(),
+            Err(Error::StatefulOperation {
+                operation: "prepare"
+            })
+        ));
         let prepared = applied.prepare_stateful().unwrap();
         let (_, steps) = applied.states().next().unwrap();
         assert_eq!(prepared.state_type(steps).unwrap(), (DType::I32, vec![]));
+    }
+
+    #[test]
+    fn invalid_random_probabilities_are_typed_errors() {
+        let result = Model::new(|cx: &mut Cx| {
+            let input = cx.input(&[2])?;
+            Ok(cx.rng("dropout")?.dropout(&input, f32::NAN)?.output)
+        })
+        .trace();
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidProbability {
+                operation: "dropout keep",
+                probability,
+                ..
+            }) if probability.is_nan()
+        ));
     }
 
     #[test]

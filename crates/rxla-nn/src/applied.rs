@@ -421,11 +421,9 @@ impl AppliedModel {
             self.resident_parameters()
                 .map(|(_, spec, slot)| {
                     let buffer = by_slot.remove(&slot.identity()).with_context(|| {
-                        InvalidDefinitionSnafu {
-                            message: format!(
-                                "session is missing resident parameter {:?}",
-                                spec.path()
-                            ),
+                        MissingSessionValueSnafu {
+                            kind: "resident parameter",
+                            path: spec.path(),
                         }
                     })?;
                     Ok((spec.path().to_owned(), buffer))
@@ -436,19 +434,15 @@ impl AppliedModel {
                 .iter()
                 .map(|(path, slot)| {
                     let buffer = by_slot.remove(&slot.identity()).with_context(|| {
-                        InvalidDefinitionSnafu {
-                            message: format!("session is missing state {path:?}"),
+                        MissingSessionValueSnafu {
+                            kind: "state",
+                            path,
                         }
                     })?;
                     Ok((path.clone(), buffer))
                 })
                 .collect::<Result<_>>()?;
-        ensure!(
-            by_slot.is_empty(),
-            InvalidDefinitionSnafu {
-                message: "session contains state absent from its applied model"
-            }
-        );
+        ensure!(by_slot.is_empty(), UnexpectedSessionStateSnafu);
         Ok(ModelSessionBuffers { parameters, states })
     }
 
@@ -557,8 +551,8 @@ impl AppliedModel {
     pub fn prepare(&self) -> Result<LoweredProgram> {
         ensure!(
             !self.is_stateful(),
-            InvalidDefinitionSnafu {
-                message: "stateful models must use prepare_stateful"
+            StatefulOperationSnafu {
+                operation: "prepare"
             }
         );
         Ok(self.graph.prepare_many(&self.outputs)?)
@@ -585,8 +579,8 @@ impl AppliedModel {
     pub fn compile_executable(&self, compiler: &mut Compiler) -> Result<Arc<Executable>> {
         ensure!(
             !self.is_stateful(),
-            InvalidDefinitionSnafu {
-                message: "stateful models must use compile_stateful"
+            StatefulOperationSnafu {
+                operation: "compile_executable"
             }
         );
         Ok(compiler.compile_many(&self.graph, &self.outputs)?)
@@ -635,8 +629,8 @@ impl AppliedModel {
     pub fn prepare_tensors(&self, outputs: &[Tensor]) -> Result<LoweredProgram> {
         ensure!(
             !self.is_stateful(),
-            InvalidDefinitionSnafu {
-                message: "stateful transforms require a state-aware training path"
+            StatefulOperationSnafu {
+                operation: "prepare_tensors"
             }
         );
         Ok(self.graph.prepare_many(outputs)?)
@@ -650,8 +644,8 @@ impl AppliedModel {
     ) -> Result<Arc<Executable>> {
         ensure!(
             !self.is_stateful(),
-            InvalidDefinitionSnafu {
-                message: "stateful transforms require a state-aware training path"
+            StatefulOperationSnafu {
+                operation: "compile_tensors"
             }
         );
         Ok(compiler.compile_many(&self.graph, outputs)?)
@@ -696,12 +690,7 @@ impl AppliedModel {
                 if self.resident_parameters[index].is_some() {
                     ensure!(
                         !named.contains_key(spec.path()),
-                        InvalidDefinitionSnafu {
-                            message: format!(
-                                "resident parameter {:?} must be initialized through a session",
-                                spec.path()
-                            )
-                        }
+                        ResidentParameterBindingSnafu { path: spec.path() }
                     );
                     return Ok(None);
                 }
@@ -817,8 +806,9 @@ impl ModelSessionBuffers {
             let value = self
                 .states
                 .remove(&path)
-                .with_context(|| InvalidDefinitionSnafu {
-                    message: format!("session snapshot is missing target state {path:?}"),
+                .with_context(|| MissingSessionValueSnafu {
+                    kind: "target state",
+                    path: &path,
                 })?;
             builder = builder.state(path, value)?;
         }
@@ -835,15 +825,11 @@ impl ModelSessionBuilder<'_> {
             .iter()
             .find(|(path, _)| path == &name)
             .map(|(_, slot)| slot)
-            .with_context(|| InvalidDefinitionSnafu {
-                message: format!("unknown state {name:?}"),
-            })?;
+            .with_context(|| UnknownStateSnafu { path: &name })?;
         validate_session_buffer(self.program, &value, slot, "state", &name)?;
         ensure!(
             self.overrides.insert(name.clone(), value).is_none(),
-            InvalidDefinitionSnafu {
-                message: format!("duplicate state initializer {name:?}")
-            }
+            DuplicateStateInitializerSnafu { path: &name }
         );
         Ok(self)
     }
@@ -866,17 +852,13 @@ impl ModelSessionBuilder<'_> {
             .model
             .resident_parameters()
             .find(|(_, spec, _)| spec.path() == path)
-            .with_context(|| InvalidDefinitionSnafu {
-                message: format!("unknown resident parameter {path:?}"),
-            })?;
+            .with_context(|| ParameterNotResidentSnafu { path: &path })?;
         validate_session_buffer(self.program, &value, slot, "resident parameter", &path)?;
         ensure!(
             self.parameter_overrides
                 .insert(path.clone(), value)
                 .is_none(),
-            InvalidDefinitionSnafu {
-                message: format!("duplicate resident parameter initializer {path:?}")
-            }
+            DuplicateResidentParameterInitializerSnafu { path: &path }
         );
         Ok(self)
     }
@@ -940,16 +922,12 @@ impl ModelSessionBuilder<'_> {
             let path = format!("{name}.{suffix}");
             ensure!(
                 self.model.states.iter().any(|(state, _)| state == &path),
-                InvalidDefinitionSnafu {
-                    message: format!("unknown RNG stream {name:?}")
-                }
+                UnknownRngSnafu { name }
             );
             let value = self.program.client().buffer(&[], &[word as i32])?;
             ensure!(
                 self.overrides.insert(path.clone(), value).is_none(),
-                InvalidDefinitionSnafu {
-                    message: format!("duplicate state initializer {path:?}")
-                }
+                DuplicateStateInitializerSnafu { path: &path }
             );
         }
         Ok(self)
@@ -1002,15 +980,13 @@ impl ModelSessionBuilder<'_> {
         }
         ensure!(
             self.parameter_overrides.is_empty(),
-            InvalidDefinitionSnafu {
-                message: "unused resident parameter initializers"
+            UnusedSessionInitializersSnafu {
+                kind: "resident parameter"
             }
         );
         ensure!(
             self.overrides.is_empty(),
-            InvalidDefinitionSnafu {
-                message: "unused state initializers"
-            }
+            UnusedSessionInitializersSnafu { kind: "state" }
         );
         Ok(self.program.session(initial)?)
     }
