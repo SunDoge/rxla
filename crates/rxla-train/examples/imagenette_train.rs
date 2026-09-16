@@ -506,7 +506,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let uploaded = phase.elapsed();
         let phase = Instant::now();
         let arguments = model.bind(
-            &[images.buffer(), labels.buffer()],
+            (images.buffer(), labels.buffer()),
             parameters
                 .iter()
                 .map(|(name, value)| (name.as_str(), value)),
@@ -576,7 +576,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (images, labels, _, _) =
             prepare_batch(&validation, step, batch_size, rng, false, &gpu)?;
         let arguments = inference.bind(
-            &[images.buffer(), labels.buffer()],
+            (images.buffer(), labels.buffer()),
             parameters
                 .iter()
                 .map(|(name, value)| (name.as_str(), value)),

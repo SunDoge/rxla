@@ -396,7 +396,7 @@ mod tests {
 
         let initial_arguments = model
             .bind(
-                &[&input, &target],
+                [&input, &target],
                 parameters
                     .iter()
                     .map(|(name, value)| (name.as_str(), value)),
@@ -411,7 +411,7 @@ mod tests {
         for _ in 0..8 {
             let arguments = model
                 .bind(
-                    &[&input, &target],
+                    [&input, &target],
                     parameters
                         .iter()
                         .map(|(name, value)| (name.as_str(), value)),
@@ -428,7 +428,7 @@ mod tests {
 
         let final_arguments = model
             .bind(
-                &[&input, &target],
+                [&input, &target],
                 parameters
                     .iter()
                     .map(|(name, value)| (name.as_str(), value)),

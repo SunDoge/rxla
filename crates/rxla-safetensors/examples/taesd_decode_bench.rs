@@ -71,7 +71,7 @@ fn run(args: Args) -> Result<()> {
         .collect::<Vec<_>>();
     let latent = client.buffer(&[1, args.latent, args.latent, 4], &values)?;
     for _ in 0..args.warmup {
-        let arguments = parameters.bind(&[&latent])?;
+        let arguments = parameters.bind(&latent)?;
         executable.execute(arguments.as_slice())?;
     }
 
@@ -79,7 +79,7 @@ fn run(args: Args) -> Result<()> {
     let mut result = Vec::new();
     for _ in 0..args.iterations {
         let start = Instant::now();
-        let arguments = parameters.bind(&[&latent])?;
+        let arguments = parameters.bind(&latent)?;
         result = executable.execute(arguments.as_slice())?;
         samples.push(start.elapsed().as_secs_f64() * 1e3);
     }

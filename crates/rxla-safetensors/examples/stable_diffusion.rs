@@ -352,7 +352,7 @@ impl Pipeline {
             let history_inputs: Vec<_> = (0..4)
                 .map(|slot| history.get(slot).unwrap_or(&self.zero))
                 .collect();
-            let arguments = denoise_parameters.bind(&[
+            let arguments = denoise_parameters.bind([
                 current.as_ref(),
                 update_sample.as_ref(),
                 self.timesteps[index].as_ref(),

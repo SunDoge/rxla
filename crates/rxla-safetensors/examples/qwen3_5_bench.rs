@@ -59,7 +59,7 @@ fn run(args: Args) -> Result<()> {
         .map(|index| 1000 + index as i32)
         .collect::<Vec<_>>();
     let tokens = client.buffer(&[1, args.sequence], &token_values)?;
-    let arguments = applied.bind(&[&tokens], weights.bindings())?;
+    let arguments = applied.bind(&tokens, weights.bindings())?;
     for _ in 0..args.warmup {
         executable.execute(arguments.as_slice())?;
     }

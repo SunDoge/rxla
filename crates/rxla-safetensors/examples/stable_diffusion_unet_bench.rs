@@ -94,7 +94,7 @@ fn run(args: Args) -> Result<()> {
     let sample = client.buffer(&[1, args.spatial, args.spatial, 4], &sample_values)?;
     let timestep = client.buffer(&[1, 32], &timestep_values)?;
     let context = client.buffer(&[1, 77, 32], &context_values)?;
-    let arguments = applied.bind(&[&sample, &timestep, &context], weights.bindings())?;
+    let arguments = applied.bind((&sample, &timestep, &context), weights.bindings())?;
     for _ in 0..args.warmup {
         executable.execute(arguments.as_slice())?;
     }

@@ -180,6 +180,10 @@ At execution, `AppliedModel::bind` accepts positional model-input buffers and
 path-addressed parameter buffers, validates their schema types, then produces
 the ABI-ordered slice for `Executable::execute`. This keeps checkpoints keyed
 by stable semantic names rather than incidental PJRT input positions.
+`ModelInputValues` preserves tuple, array, vector or application-defined buffer
+structure at this boundary, so a two-input model can bind
+`(&image_buffer, &timestep_buffer)` directly. Legacy `&[&Buffer]` slices remain
+valid for dynamic dispatch code such as a heterogeneous serving stage.
 
 ## Invariants
 

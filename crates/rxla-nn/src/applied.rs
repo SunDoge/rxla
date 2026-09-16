@@ -66,11 +66,12 @@ impl<'a> ModelArguments<'a> {
 impl<'model, 'parameters> BoundParameters<'model, 'parameters> {
     /// Bind changing positional inputs without repeating parameter lookup or
     /// parameter buffer validation.
-    pub fn bind<'inputs>(&self, inputs: &[&'inputs Buffer]) -> Result<ModelArguments<'inputs>>
+    pub fn bind<'inputs, I>(&self, inputs: I) -> Result<ModelArguments<'inputs>>
     where
         'parameters: 'inputs,
+        I: ModelInputValues<'inputs>,
     {
-        self.model.bind_ordered(inputs, &self.values)
+        self.model.bind_ordered(&inputs.into_values(), &self.values)
     }
 }
 
@@ -237,14 +238,18 @@ impl AppliedModel {
     }
 
     /// Assemble positional inputs and path-addressed parameters into the model ABI.
-    pub fn bind<'a>(
+    pub fn bind<'a, I>(
         &self,
-        inputs: &[&'a Buffer],
+        inputs: I,
         parameters: impl IntoIterator<Item = (&'a str, &'a Buffer)>,
-    ) -> Result<ModelArguments<'a>> {
-        self.validate_inputs(inputs)?;
+    ) -> Result<ModelArguments<'a>>
+    where
+        I: ModelInputValues<'a>,
+    {
+        let inputs = inputs.into_values();
+        self.validate_inputs(&inputs)?;
         let parameters = self.order_parameters(parameters)?;
-        self.assemble(inputs, &parameters)
+        self.assemble(&inputs, &parameters)
     }
 
     /// Validate and order named parameter buffers once for repeated execution.

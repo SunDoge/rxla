@@ -1,7 +1,7 @@
 //! Typed model-input declarations.
 
 use crate::{Cx, ModelOutputs, Result};
-use rxla_core::{DType, Tensor};
+use rxla_core::{Buffer, DType, Tensor};
 
 /// One tensor input specification for a [`crate::Model`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,10 +43,64 @@ pub trait ModelInputs {
     fn declare(&self, cx: &mut Cx) -> Result<Self::Tensors>;
 }
 
+/// Flatten structured runtime input buffers in the same deterministic order as
+/// their [`ModelInputs`] declarations.
+///
+/// This trait is intentionally independent from a particular model so domain
+/// structs can implement it once and be passed directly to
+/// [`crate::AppliedModel::bind`]. Shape, dtype, count and client ownership are
+/// still validated against the applied model schema before execution.
+pub trait ModelInputValues<'a> {
+    fn append_to(self, values: &mut Vec<&'a Buffer>);
+
+    fn into_values(self) -> Vec<&'a Buffer>
+    where
+        Self: Sized,
+    {
+        let mut values = Vec::new();
+        self.append_to(&mut values);
+        values
+    }
+}
+
+impl<'a> ModelInputValues<'a> for &'a Buffer {
+    fn append_to(self, values: &mut Vec<&'a Buffer>) {
+        values.push(self);
+    }
+}
+
+impl<'a> ModelInputValues<'a> for &[&'a Buffer] {
+    fn append_to(self, values: &mut Vec<&'a Buffer>) {
+        values.extend_from_slice(self);
+    }
+}
+
+impl<'a, const N: usize> ModelInputValues<'a> for &[&'a Buffer; N] {
+    fn append_to(self, values: &mut Vec<&'a Buffer>) {
+        values.extend_from_slice(self);
+    }
+}
+
+impl<'a, I: ModelInputValues<'a>, const N: usize> ModelInputValues<'a> for [I; N] {
+    fn append_to(self, values: &mut Vec<&'a Buffer>) {
+        for input in self {
+            input.append_to(values);
+        }
+    }
+}
+
+impl<'a, I: ModelInputValues<'a>> ModelInputValues<'a> for Vec<I> {
+    fn append_to(self, values: &mut Vec<&'a Buffer>) {
+        for input in self {
+            input.append_to(values);
+        }
+    }
+}
+
 /// Invoke a model function after extracting its typed lazy inputs.
 ///
 /// Implementations are provided for one structured argument and for ordinary
-/// Rust functions with two through six extracted arguments. The `Marker` type
+/// Rust functions with two through sixteen extracted arguments. The `Marker` type
 /// disambiguates function arities in the same way as web-framework handler
 /// traits and is normally inferred.
 pub trait ModelHandler<I, Marker> {
@@ -117,6 +171,38 @@ macro_rules! impl_tuple_inputs {
 }
 
 impl_tuple_inputs!(
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H),
+    (A, B, C, D, E, F, G, H, I),
+    (A, B, C, D, E, F, G, H, I, J),
+    (A, B, C, D, E, F, G, H, I, J, K),
+    (A, B, C, D, E, F, G, H, I, J, K, L),
+    (A, B, C, D, E, F, G, H, I, J, K, L, M),
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N),
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O),
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P),
+);
+
+macro_rules! impl_tuple_input_values {
+    ($(($($name:ident),+)),+ $(,)?) => {
+        $(
+            impl<'a, $($name: ModelInputValues<'a>),+> ModelInputValues<'a> for ($($name,)+) {
+                #[allow(non_snake_case)]
+                fn append_to(self, values: &mut Vec<&'a Buffer>) {
+                    let ($($name,)+) = self;
+                    $($name.append_to(values);)+
+                }
+            }
+        )+
+    };
+}
+
+impl_tuple_input_values!(
     (A, B),
     (A, B, C),
     (A, B, C, D),

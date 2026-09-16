@@ -13,7 +13,7 @@ pub use applied::{
     AppliedModel, BoundParameters, ModelArguments, ModelSessionBuilder, TransformState,
 };
 mod inputs;
-pub use inputs::{ModelHandler, ModelInput, ModelInputs};
+pub use inputs::{ModelHandler, ModelInput, ModelInputValues, ModelInputs};
 mod layers;
 pub use layers::{
     Conv2d, Embedding, GroupNorm, LayerNorm, Linear, Named, QuantizedLinear, RmsNorm,
@@ -949,7 +949,8 @@ mod tests {
     fn bind_rejects_wrong_number_of_model_inputs_before_buffer_access() {
         let (schema, _) = init(classifier).unwrap();
         let applied = apply(&schema, classifier).unwrap();
-        let error = match applied.bind(&[], std::iter::empty::<(&str, &Buffer)>()) {
+        let no_inputs: [&Buffer; 0] = [];
+        let error = match applied.bind(no_inputs, std::iter::empty::<(&str, &Buffer)>()) {
             Ok(_) => panic!("missing model input unexpectedly bound"),
             Err(error) => error,
         };
@@ -1165,7 +1166,7 @@ mod tests {
                 .buffer(&[2, 3], &[1., 3., 5., 2., 4., 6.])
                 .expect("upload parameter");
             let arguments = applied
-                .bind(&[&input], [("head.weight", &weight)])
+                .bind([&input], [("head.weight", &weight)])
                 .expect("bind model arguments");
             let outputs = executable
                 .execute(arguments.as_slice())

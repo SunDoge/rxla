@@ -434,7 +434,7 @@ mod tests {
         for _ in 0..100 {
             let model_arguments = model
                 .bind(
-                    &[&input, &target],
+                    [&input, &target],
                     parameters
                         .iter()
                         .map(|(name, value)| (name.as_str(), value)),

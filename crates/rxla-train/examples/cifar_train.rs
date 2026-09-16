@@ -384,7 +384,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .transpose()?;
         let arguments = model.bind(
-            &[images.buffer(), labels.buffer()],
+            (images.buffer(), labels.buffer()),
             parameters
                 .iter()
                 .map(|(name, value)| (name.as_str(), value)),
