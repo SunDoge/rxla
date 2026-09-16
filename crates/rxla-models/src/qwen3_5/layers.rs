@@ -119,10 +119,11 @@ pub(super) fn gated_delta_attention(
     let width = config.linear_heads * config.linear_head_dim;
     let mixed = projection(cx, "in_proj_qkv", input, width * 3, config.quant_group_size)?
         .reshape(&[*batch, *sequence, 1, width * 3])?;
-    let kernel = cx
-        .layer("conv1d")?
-        .param("weight", &[width * 3, 1, config.conv_kernel])?
-        .reshape(&[width * 3, 1, config.conv_kernel, 1])?;
+    let kernel = {
+        let mut conv = cx.scope("conv1d")?;
+        conv.param("weight", &[width * 3, 1, config.conv_kernel])?
+            .reshape(&[width * 3, 1, config.conv_kernel, 1])?
+    };
     let mixed = mixed
         .conv2d_oihw(
             &kernel,
@@ -231,10 +232,11 @@ pub(super) fn gated_delta_attention(
         .add_scalar(config.epsilon)?
         .rsqrt()?
         .broadcast_to(output.shape())?;
-    let norm_weight = cx
-        .layer("norm")?
-        .param("weight", &[config.linear_head_dim])?
-        .broadcast_to(output.shape())?;
+    let norm_weight = {
+        let mut norm = cx.scope("norm")?;
+        norm.param("weight", &[config.linear_head_dim])?
+            .broadcast_to(output.shape())?
+    };
     let output = output
         .mul(&norm_scale)?
         .mul(&norm_weight)?

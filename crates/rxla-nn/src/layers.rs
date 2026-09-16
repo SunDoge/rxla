@@ -3,18 +3,17 @@
 use super::*;
 use rxla_core::Conv2dOptions;
 use snafu::{OptionExt, ensure};
-use std::ops::{Deref, DerefMut};
 
 /// A named embedding lookup with an inferred output shape.
 #[must_use = "layer builders do nothing until apply is called"]
 pub struct Embedding<'a> {
-    cx: &'a mut Cx,
+    scope: Scope<'a>,
     vocabulary: i64,
     width: i64,
 }
 
 impl Embedding<'_> {
-    pub fn apply(self, indices: &Tensor) -> Result<Tensor> {
+    pub fn apply(mut self, indices: &Tensor) -> Result<Tensor> {
         ensure!(
             indices.dtype() == DType::I32 && self.vocabulary > 0 && self.width > 0,
             InvalidLayerInputSnafu {
@@ -23,7 +22,7 @@ impl Embedding<'_> {
             }
         );
         Ok(self
-            .cx
+            .scope
             .param_initialized(
                 "weight",
                 &[self.vocabulary, self.width],
@@ -36,7 +35,7 @@ impl Embedding<'_> {
 /// A named affine projection whose input width is inferred by [`Linear::apply`].
 #[must_use = "layer builders do nothing until apply is called"]
 pub struct Linear<'a> {
-    cx: &'a mut Cx,
+    scope: Scope<'a>,
     out_features: i64,
     bias: bool,
 }
@@ -48,13 +47,13 @@ pub struct Linear<'a> {
 /// so XLA may fuse it into the consuming contraction.
 #[must_use = "layer builders do nothing until apply is called"]
 pub struct QuantizedLinear<'a> {
-    cx: &'a mut Cx,
+    scope: Scope<'a>,
     out_features: i64,
     group_size: i64,
 }
 
 impl QuantizedLinear<'_> {
-    pub fn apply(self, input: &Tensor) -> Result<Tensor> {
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
         ensure!(
             input.dtype() == DType::F32 && !input.shape().is_empty(),
             InvalidLayerInputSnafu {
@@ -75,13 +74,13 @@ impl QuantizedLinear<'_> {
         );
         let groups = in_features / self.group_size;
         let weight = self
-            .cx
+            .scope
             .param_dtype("weight", &[self.out_features, in_features], DType::U8)?
             .cast(DType::F32)?
             .add_scalar(-128.0)?
             .reshape(&[self.out_features, groups, self.group_size])?;
         let scale = self
-            .cx
+            .scope
             .param("scale", &[self.out_features, groups])?
             .reshape(&[self.out_features, groups, 1])?
             .broadcast_to(&[self.out_features, groups, self.group_size])?;
@@ -100,15 +99,15 @@ impl Linear<'_> {
         self
     }
 
-    pub fn apply(self, input: &Tensor) -> Result<Tensor> {
-        self.cx.apply_linear(input, self.out_features, self.bias)
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        apply_linear(&mut self.scope, input, self.out_features, self.bias)
     }
 }
 
 /// A named NHWC convolution whose input channels are inferred at its use site.
 #[must_use = "layer builders do nothing until apply is called"]
 pub struct Conv2d<'a> {
-    cx: &'a mut Cx,
+    scope: Scope<'a>,
     out_channels: i64,
     kernel: [i64; 2],
     options: Conv2dOptions,
@@ -126,8 +125,9 @@ impl Conv2d<'_> {
         self
     }
 
-    pub fn apply(self, input: &Tensor) -> Result<Tensor> {
-        self.cx.apply_conv2d(
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        apply_conv2d(
+            &mut self.scope,
             input,
             self.out_channels,
             self.kernel,
@@ -140,7 +140,7 @@ impl Conv2d<'_> {
 /// A named GroupNorm operation with optional learned affine parameters.
 #[must_use = "layer builders do nothing until apply is called"]
 pub struct GroupNorm<'a> {
-    cx: &'a mut Cx,
+    scope: Scope<'a>,
     groups: i64,
     epsilon: f32,
     affine: bool,
@@ -149,7 +149,7 @@ pub struct GroupNorm<'a> {
 /// Stateful NHWC BatchNorm with inferred channel count.
 #[must_use = "layer builders do nothing until apply is called"]
 pub struct BatchNorm<'a> {
-    cx: &'a mut Cx,
+    scope: Scope<'a>,
     epsilon: f32,
     momentum: f32,
     training: bool,
@@ -172,9 +172,14 @@ impl BatchNorm<'_> {
         self
     }
 
-    pub fn apply(self, input: &Tensor) -> Result<Tensor> {
-        self.cx
-            .apply_batch_norm_nhwc(input, self.epsilon, self.momentum, self.training)
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        apply_batch_norm_nhwc(
+            &mut self.scope,
+            input,
+            self.epsilon,
+            self.momentum,
+            self.training,
+        )
     }
 }
 
@@ -189,16 +194,21 @@ impl GroupNorm<'_> {
         self
     }
 
-    pub fn apply(self, input: &Tensor) -> Result<Tensor> {
-        self.cx
-            .apply_group_norm_nhwc(input, self.groups, self.epsilon, self.affine)
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        apply_group_norm_nhwc(
+            &mut self.scope,
+            input,
+            self.groups,
+            self.epsilon,
+            self.affine,
+        )
     }
 }
 
 /// A named LayerNorm operation whose normalized shape is inferred on apply.
 #[must_use = "layer builders do nothing until apply is called"]
 pub struct LayerNorm<'a> {
-    cx: &'a mut Cx,
+    scope: Scope<'a>,
     normalized_rank: usize,
     epsilon: f32,
     affine: bool,
@@ -207,7 +217,7 @@ pub struct LayerNorm<'a> {
 /// A named RMSNorm operation whose width is inferred on apply.
 #[must_use = "layer builders do nothing until apply is called"]
 pub struct RmsNorm<'a> {
-    cx: &'a mut Cx,
+    scope: Scope<'a>,
     epsilon: f32,
     zero_centered: bool,
 }
@@ -224,7 +234,7 @@ impl RmsNorm<'_> {
         self
     }
 
-    pub fn apply(self, input: &Tensor) -> Result<Tensor> {
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
         ensure!(
             input.dtype() == DType::F32 && !input.shape().is_empty(),
             InvalidLayerInputSnafu {
@@ -233,7 +243,7 @@ impl RmsNorm<'_> {
             }
         );
         let width = *input.shape().last().expect("rank checked above");
-        let weight = self.cx.param_initialized(
+        let weight = self.scope.param_initialized(
             "weight",
             &[width],
             if self.zero_centered {
@@ -262,45 +272,50 @@ impl LayerNorm<'_> {
         self
     }
 
-    pub fn apply(self, input: &Tensor) -> Result<Tensor> {
-        self.cx
-            .apply_layer_norm(input, self.normalized_rank, self.epsilon, self.affine)
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        apply_layer_norm(
+            &mut self.scope,
+            input,
+            self.normalized_rank,
+            self.epsilon,
+            self.affine,
+        )
     }
 }
 
 /// Builder entry point for one named layer with non-default options.
 pub struct Layer<'a> {
-    cx: &'a mut Cx,
+    scope: Scope<'a>,
 }
 
-impl Layer<'_> {
-    pub fn embedding(&mut self, vocabulary: i64, width: i64) -> Embedding<'_> {
+impl<'a> Layer<'a> {
+    pub fn embedding(self, vocabulary: i64, width: i64) -> Embedding<'a> {
         Embedding {
-            cx: self.cx,
+            scope: self.scope,
             vocabulary,
             width,
         }
     }
 
-    pub fn linear(&mut self, out_features: i64) -> Linear<'_> {
+    pub fn linear(self, out_features: i64) -> Linear<'a> {
         Linear {
-            cx: self.cx,
+            scope: self.scope,
             out_features,
             bias: true,
         }
     }
 
-    pub fn quantized_linear(&mut self, out_features: i64, group_size: i64) -> QuantizedLinear<'_> {
+    pub fn quantized_linear(self, out_features: i64, group_size: i64) -> QuantizedLinear<'a> {
         QuantizedLinear {
-            cx: self.cx,
+            scope: self.scope,
             out_features,
             group_size,
         }
     }
 
-    pub fn conv2d(&mut self, out_channels: i64, kernel: [i64; 2]) -> Conv2d<'_> {
+    pub fn conv2d(self, out_channels: i64, kernel: [i64; 2]) -> Conv2d<'a> {
         Conv2d {
-            cx: self.cx,
+            scope: self.scope,
             out_channels,
             kernel,
             options: Conv2dOptions::default(),
@@ -308,288 +323,261 @@ impl Layer<'_> {
         }
     }
 
-    pub fn group_norm(&mut self, groups: i64) -> GroupNorm<'_> {
+    pub fn group_norm(self, groups: i64) -> GroupNorm<'a> {
         GroupNorm {
-            cx: self.cx,
+            scope: self.scope,
             groups,
             epsilon: 1e-5,
             affine: true,
         }
     }
 
-    pub fn batch_norm(&mut self) -> BatchNorm<'_> {
+    pub fn batch_norm(self) -> BatchNorm<'a> {
         BatchNorm {
-            cx: self.cx,
+            scope: self.scope,
             epsilon: 1e-5,
             momentum: 0.1,
             training: true,
         }
     }
 
-    pub fn layer_norm(&mut self, normalized_rank: usize) -> LayerNorm<'_> {
+    pub fn layer_norm(self, normalized_rank: usize) -> LayerNorm<'a> {
         LayerNorm {
-            cx: self.cx,
+            scope: self.scope,
             normalized_rank,
             epsilon: 1e-5,
             affine: true,
         }
     }
 
-    pub fn rms_norm(&mut self) -> RmsNorm<'_> {
+    pub fn rms_norm(self) -> RmsNorm<'a> {
         RmsNorm {
-            cx: self.cx,
+            scope: self.scope,
             epsilon: 1e-5,
             zero_centered: false,
         }
     }
 }
 
-impl Drop for Layer<'_> {
-    fn drop(&mut self) {
-        self.cx.scope.pop();
-    }
-}
-
-impl Deref for Layer<'_> {
-    type Target = Cx;
-
-    fn deref(&self) -> &Self::Target {
-        self.cx
-    }
-}
-
-impl DerefMut for Layer<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.cx
-    }
-}
-
 impl Cx {
     /// Enter one named layer builder without changing the effect API surface.
     pub fn layer(&mut self, name: &str) -> Result<Layer<'_>> {
-        validate_name(name)?;
-        self.scope.push(name.to_owned());
-        Ok(Layer { cx: self })
+        Ok(Layer {
+            scope: self.scope(name)?,
+        })
     }
 }
 
-impl Cx {
-    /// Apply an F32 affine projection using parameters declared at the current
-    /// lexical scope. The input feature dimension is inferred from `input`.
-    pub(crate) fn apply_linear(
-        &mut self,
-        input: &Tensor,
-        out_features: i64,
-        bias: bool,
-    ) -> Result<Tensor> {
-        ensure!(
-            input.dtype() == DType::F32,
-            InvalidLayerInputSnafu {
-                layer: "Linear",
-                requirement: "an F32 computation tensor",
-            }
-        );
-        let in_features = *input.shape().last().context(InvalidLayerInputSnafu {
+/// Apply an F32 affine projection using parameters declared at the current
+/// lexical scope. The input feature dimension is inferred from `input`.
+fn apply_linear(cx: &mut Cx, input: &Tensor, out_features: i64, bias: bool) -> Result<Tensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        InvalidLayerInputSnafu {
             layer: "Linear",
-            requirement: "an input with at least one dimension",
-        })?;
-        ensure!(
-            in_features > 0 && out_features > 0,
-            InvalidLayerInputSnafu {
-                layer: "Linear",
-                requirement: "positive input and output feature dimensions",
-            }
-        );
-        let weight = self.param_initialized(
-            "weight",
-            &[out_features, in_features],
-            Initializer::KaimingUniform,
-        )?;
-        let bias_bound = (1.0 / in_features as f32).sqrt();
-        let bias = bias
-            .then(|| {
-                self.param_initialized(
-                    "bias",
-                    &[out_features],
-                    Initializer::uniform(-bias_bound, bias_bound),
-                )
-            })
-            .transpose()?;
-        Ok(input.linear(&weight, bias.as_ref())?)
-    }
-
-    /// Apply an NHWC convolution with checkpoint-native OIHW parameters at the
-    /// current lexical scope. Input channels are inferred from `input`.
-    pub(crate) fn apply_conv2d(
-        &mut self,
-        input: &Tensor,
-        out_channels: i64,
-        kernel: [i64; 2],
-        options: Conv2dOptions,
-        bias: bool,
-    ) -> Result<Tensor> {
-        ensure!(
-            input.dtype() == DType::F32 && input.shape().len() == 4,
-            InvalidLayerInputSnafu {
-                layer: "Conv2d",
-                requirement: "a rank-four F32 NHWC tensor",
-            }
-        );
-        let in_channels = input.shape()[3];
-        ensure!(
-            in_channels > 0
-                && out_channels > 0
-                && kernel.iter().all(|&dim| dim > 0)
-                && options.groups > 0
-                && in_channels % options.groups == 0,
-            InvalidLayerInputSnafu {
-                layer: "Conv2d",
-                requirement: "positive channels/kernel and compatible groups",
-            }
-        );
-        let weight = self.param_initialized(
-            "weight",
-            &[
-                out_channels,
-                in_channels / options.groups,
-                kernel[0],
-                kernel[1],
-            ],
-            Initializer::KaimingUniform,
-        )?;
-        let output = input.conv2d_oihw(&weight, options)?;
-        if !bias {
-            return Ok(output);
+            requirement: "an F32 computation tensor",
         }
-        let fan_in = (in_channels / options.groups) * kernel[0] * kernel[1];
-        let bound = (1.0 / fan_in as f32).sqrt();
-        let bias =
-            self.param_initialized("bias", &[out_channels], Initializer::uniform(-bound, bound))?;
-        Ok(output.add(&bias.broadcast_to(output.shape())?)?)
-    }
-
-    /// Apply GroupNorm to an NHWC activation using `[C]` affine parameters at
-    /// the current lexical scope. Channels are inferred from the input tensor.
-    pub(crate) fn apply_group_norm_nhwc(
-        &mut self,
-        input: &Tensor,
-        groups: i64,
-        epsilon: f32,
-        affine: bool,
-    ) -> Result<Tensor> {
-        ensure!(
-            input.dtype() == DType::F32 && input.shape().len() == 4,
-            InvalidLayerInputSnafu {
-                layer: "GroupNorm",
-                requirement: "a rank-four F32 NHWC tensor",
-            }
-        );
-        let channels = input.shape()[3];
-        ensure!(
-            channels > 0 && groups > 0 && channels % groups == 0,
-            InvalidLayerInputSnafu {
-                layer: "GroupNorm",
-                requirement: "positive groups dividing channels",
-            }
-        );
-        let (weight, bias) = if affine {
-            (
-                Some(self.param_initialized("weight", &[channels], Initializer::Ones)?),
-                Some(self.param_initialized("bias", &[channels], Initializer::Zeros)?),
-            )
-        } else {
-            (None, None)
-        };
-        Ok(input
-            .transpose(&[0, 3, 1, 2])?
-            .group_norm(groups, weight.as_ref(), bias.as_ref(), epsilon)?
-            .transpose(&[0, 2, 3, 1])?)
-    }
-
-    pub(crate) fn apply_batch_norm_nhwc(
-        &mut self,
-        input: &Tensor,
-        epsilon: f32,
-        momentum: f32,
-        training: bool,
-    ) -> Result<Tensor> {
-        ensure!(
-            input.dtype() == DType::F32
-                && input.shape().len() == 4
-                && epsilon.is_finite()
-                && epsilon > 0.0
-                && momentum.is_finite()
-                && (0.0..=1.0).contains(&momentum),
-            InvalidLayerInputSnafu {
-                layer: "BatchNorm",
-                requirement: "rank-four F32 NHWC input, positive epsilon, and momentum in [0, 1]",
-            }
-        );
-        let channels = input.shape()[3];
-        let weight = self.param_initialized("weight", &[channels], Initializer::Ones)?;
-        let bias = self.param_initialized("bias", &[channels], Initializer::Zeros)?;
-        let running_mean = self.state("running_mean", &[channels], DType::F32)?;
-        let running_variance = self.state_initialized(
-            "running_variance",
-            &[channels],
-            DType::F32,
-            Initializer::Ones,
-        )?;
-        if !training {
-            return Ok(input.batch_norm_inference(
-                3,
-                &running_mean.read(self)?,
-                &running_variance.read(self)?,
-                &weight,
-                &bias,
-                epsilon,
-            )?);
+    );
+    let in_features = *input.shape().last().context(InvalidLayerInputSnafu {
+        layer: "Linear",
+        requirement: "an input with at least one dimension",
+    })?;
+    ensure!(
+        in_features > 0 && out_features > 0,
+        InvalidLayerInputSnafu {
+            layer: "Linear",
+            requirement: "positive input and output feature dimensions",
         }
-
-        let batch = input.batch_norm_training(3, &weight, &bias, epsilon)?;
-        let retain = 1.0 - momentum;
-        let next_mean = running_mean
-            .read(self)?
-            .mul_scalar(retain)?
-            .add(&batch.mean.mul_scalar(momentum)?)?;
-        let next_variance = running_variance
-            .read(self)?
-            .mul_scalar(retain)?
-            .add(&batch.variance.mul_scalar(momentum)?)?;
-        running_mean.write(self, &next_mean)?;
-        running_variance.write(self, &next_variance)?;
-        Ok(batch.output)
-    }
-
-    /// Apply LayerNorm over the final `normalized_rank` dimensions, inferring
-    /// affine parameter shapes directly from the input tensor.
-    pub(crate) fn apply_layer_norm(
-        &mut self,
-        input: &Tensor,
-        normalized_rank: usize,
-        epsilon: f32,
-        affine: bool,
-    ) -> Result<Tensor> {
-        ensure!(
-            input.dtype() == DType::F32
-                && normalized_rank > 0
-                && normalized_rank <= input.shape().len(),
-            InvalidLayerInputSnafu {
-                layer: "LayerNorm",
-                requirement: "F32 input and a valid positive normalized rank",
-            }
-        );
-        let normalized_shape = &input.shape()[input.shape().len() - normalized_rank..];
-        let (weight, bias) = if affine {
-            (
-                Some(self.param_initialized("weight", normalized_shape, Initializer::Ones)?),
-                Some(self.param_initialized("bias", normalized_shape, Initializer::Zeros)?),
+    );
+    let weight = cx.param_initialized(
+        "weight",
+        &[out_features, in_features],
+        Initializer::KaimingUniform,
+    )?;
+    let bias_bound = (1.0 / in_features as f32).sqrt();
+    let bias = bias
+        .then(|| {
+            cx.param_initialized(
+                "bias",
+                &[out_features],
+                Initializer::uniform(-bias_bound, bias_bound),
             )
-        } else {
-            (None, None)
-        };
-        Ok(input.layer_norm(normalized_shape, weight.as_ref(), bias.as_ref(), epsilon)?)
+        })
+        .transpose()?;
+    Ok(input.linear(&weight, bias.as_ref())?)
+}
+
+/// Apply an NHWC convolution with checkpoint-native OIHW parameters at the
+/// current lexical scope. Input channels are inferred from `input`.
+fn apply_conv2d(
+    cx: &mut Cx,
+    input: &Tensor,
+    out_channels: i64,
+    kernel: [i64; 2],
+    options: Conv2dOptions,
+    bias: bool,
+) -> Result<Tensor> {
+    ensure!(
+        input.dtype() == DType::F32 && input.shape().len() == 4,
+        InvalidLayerInputSnafu {
+            layer: "Conv2d",
+            requirement: "a rank-four F32 NHWC tensor",
+        }
+    );
+    let in_channels = input.shape()[3];
+    ensure!(
+        in_channels > 0
+            && out_channels > 0
+            && kernel.iter().all(|&dim| dim > 0)
+            && options.groups > 0
+            && in_channels % options.groups == 0,
+        InvalidLayerInputSnafu {
+            layer: "Conv2d",
+            requirement: "positive channels/kernel and compatible groups",
+        }
+    );
+    let weight = cx.param_initialized(
+        "weight",
+        &[
+            out_channels,
+            in_channels / options.groups,
+            kernel[0],
+            kernel[1],
+        ],
+        Initializer::KaimingUniform,
+    )?;
+    let output = input.conv2d_oihw(&weight, options)?;
+    if !bias {
+        return Ok(output);
     }
+    let fan_in = (in_channels / options.groups) * kernel[0] * kernel[1];
+    let bound = (1.0 / fan_in as f32).sqrt();
+    let bias =
+        cx.param_initialized("bias", &[out_channels], Initializer::uniform(-bound, bound))?;
+    Ok(output.add(&bias.broadcast_to(output.shape())?)?)
+}
+
+/// Apply GroupNorm to an NHWC activation using `[C]` affine parameters at
+/// the current lexical scope. Channels are inferred from the input tensor.
+fn apply_group_norm_nhwc(
+    cx: &mut Cx,
+    input: &Tensor,
+    groups: i64,
+    epsilon: f32,
+    affine: bool,
+) -> Result<Tensor> {
+    ensure!(
+        input.dtype() == DType::F32 && input.shape().len() == 4,
+        InvalidLayerInputSnafu {
+            layer: "GroupNorm",
+            requirement: "a rank-four F32 NHWC tensor",
+        }
+    );
+    let channels = input.shape()[3];
+    ensure!(
+        channels > 0 && groups > 0 && channels % groups == 0,
+        InvalidLayerInputSnafu {
+            layer: "GroupNorm",
+            requirement: "positive groups dividing channels",
+        }
+    );
+    let (weight, bias) = if affine {
+        (
+            Some(cx.param_initialized("weight", &[channels], Initializer::Ones)?),
+            Some(cx.param_initialized("bias", &[channels], Initializer::Zeros)?),
+        )
+    } else {
+        (None, None)
+    };
+    Ok(input
+        .transpose(&[0, 3, 1, 2])?
+        .group_norm(groups, weight.as_ref(), bias.as_ref(), epsilon)?
+        .transpose(&[0, 2, 3, 1])?)
+}
+
+fn apply_batch_norm_nhwc(
+    cx: &mut Cx,
+    input: &Tensor,
+    epsilon: f32,
+    momentum: f32,
+    training: bool,
+) -> Result<Tensor> {
+    ensure!(
+        input.dtype() == DType::F32
+            && input.shape().len() == 4
+            && epsilon.is_finite()
+            && epsilon > 0.0
+            && momentum.is_finite()
+            && (0.0..=1.0).contains(&momentum),
+        InvalidLayerInputSnafu {
+            layer: "BatchNorm",
+            requirement: "rank-four F32 NHWC input, positive epsilon, and momentum in [0, 1]",
+        }
+    );
+    let channels = input.shape()[3];
+    let weight = cx.param_initialized("weight", &[channels], Initializer::Ones)?;
+    let bias = cx.param_initialized("bias", &[channels], Initializer::Zeros)?;
+    let running_mean = cx.state("running_mean", &[channels], DType::F32)?;
+    let running_variance = cx.state_initialized(
+        "running_variance",
+        &[channels],
+        DType::F32,
+        Initializer::Ones,
+    )?;
+    if !training {
+        return Ok(input.batch_norm_inference(
+            3,
+            &running_mean.read(cx)?,
+            &running_variance.read(cx)?,
+            &weight,
+            &bias,
+            epsilon,
+        )?);
+    }
+
+    let batch = input.batch_norm_training(3, &weight, &bias, epsilon)?;
+    let retain = 1.0 - momentum;
+    let next_mean = running_mean
+        .read(cx)?
+        .mul_scalar(retain)?
+        .add(&batch.mean.mul_scalar(momentum)?)?;
+    let next_variance = running_variance
+        .read(cx)?
+        .mul_scalar(retain)?
+        .add(&batch.variance.mul_scalar(momentum)?)?;
+    running_mean.write(cx, &next_mean)?;
+    running_variance.write(cx, &next_variance)?;
+    Ok(batch.output)
+}
+
+/// Apply LayerNorm over the final `normalized_rank` dimensions, inferring
+/// affine parameter shapes directly from the input tensor.
+fn apply_layer_norm(
+    cx: &mut Cx,
+    input: &Tensor,
+    normalized_rank: usize,
+    epsilon: f32,
+    affine: bool,
+) -> Result<Tensor> {
+    ensure!(
+        input.dtype() == DType::F32
+            && normalized_rank > 0
+            && normalized_rank <= input.shape().len(),
+        InvalidLayerInputSnafu {
+            layer: "LayerNorm",
+            requirement: "F32 input and a valid positive normalized rank",
+        }
+    );
+    let normalized_shape = &input.shape()[input.shape().len() - normalized_rank..];
+    let (weight, bias) = if affine {
+        (
+            Some(cx.param_initialized("weight", normalized_shape, Initializer::Ones)?),
+            Some(cx.param_initialized("bias", normalized_shape, Initializer::Zeros)?),
+        )
+    } else {
+        (None, None)
+    };
+    Ok(input.layer_norm(normalized_shape, weight.as_ref(), bias.as_ref(), epsilon)?)
 }
 
 #[cfg(test)]
@@ -620,7 +608,8 @@ mod tests {
     fn direct_named_ops_preserve_scoped_parameter_identity() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 8])?;
-            let hidden = cx.layer("encoder")?.linear(4).apply(&input)?;
+            let encoder = cx.layer("encoder")?.linear(4);
+            let hidden = encoder.apply(&input)?;
             cx.layer("head")?.linear(3).apply(&hidden)
         })
         .unwrap();
