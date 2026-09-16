@@ -58,8 +58,22 @@ impl ClipTextConfig {
     }
 }
 
+fn attention_projection(
+    cx: &mut Cx,
+    name: &str,
+    input: &Tensor,
+    width: i64,
+    shape: [i64; 4],
+) -> Result<Tensor> {
+    Ok(cx
+        .scope(name)?
+        .linear(width)
+        .apply(input)?
+        .reshape(&shape)?)
+}
+
 fn attention(cx: &mut Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> Result<Tensor> {
-    let [batch, length, width] = input.shape() else {
+    let &[batch, length, width] = input.shape() else {
         return Err(Error::InvalidModel {
             reason: "CLIP attention expects [batch, sequence, width]",
         });
@@ -70,21 +84,18 @@ fn attention(cx: &mut Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> R
         });
     }
     let head_dim = width / heads;
-    let project = |cx: &mut Cx, name: &str| -> Result<Tensor> {
-        Ok(cx
-            .scope(name)?
-            .linear(*width)
-            .apply(input)?
-            .reshape(&[*batch, *length, heads, head_dim])?)
-    };
-    let q = project(cx, "q_proj")?.transpose(&[0, 2, 1, 3])?;
-    let k = project(cx, "k_proj")?.transpose(&[0, 2, 1, 3])?;
-    let v = project(cx, "v_proj")?.transpose(&[0, 2, 1, 3])?;
+    let projected_shape = [batch, length, heads, head_dim];
+    let q = attention_projection(cx, "q_proj", input, width, projected_shape)?
+        .transpose(&[0, 2, 1, 3])?;
+    let k = attention_projection(cx, "k_proj", input, width, projected_shape)?
+        .transpose(&[0, 2, 1, 3])?;
+    let v = attention_projection(cx, "v_proj", input, width, projected_shape)?
+        .transpose(&[0, 2, 1, 3])?;
     let hidden = q
         .scaled_dot_product_attention(&k, &v, Some(causal_bias), None)?
         .transpose(&[0, 2, 1, 3])?
-        .reshape(&[*batch, *length, *width])?;
-    Ok(cx.scope("out_proj")?.linear(*width).apply(&hidden)?)
+        .reshape(&[batch, length, width])?;
+    Ok(cx.scope("out_proj")?.linear(width).apply(&hidden)?)
 }
 
 fn quick_gelu(input: &Tensor) -> Result<Tensor> {

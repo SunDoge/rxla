@@ -203,14 +203,16 @@ The public model-building path uses the same `rxla_nn::Cx` for parameters,
 resident state, and named device RNG effects:
 
 ```rust
-let model = Model::new(|cx: &mut Cx| {
-    let x = cx.input(&[batch, width])?;
-    let y = cx.scope("head")?.linear(classes).apply(&x)?;
+fn apply(cx: &mut Cx) -> Result<Tensor> {
+    let x = cx.input(&[32, 768])?;
+    let y = cx.scope("head")?.linear(1_000).apply(&x)?;
     let steps = cx.state("steps", &[], DType::I32)?;
     steps.write(cx, &steps.read(cx)?.wrapping_add_scalar(1)?)?;
     let noise = cx.rng("sampling")?.normal_f32(y.shape())?;
     Ok(y.add(&noise)?)
-});
+}
+
+let model = Model::new(apply);
 ```
 
 `Model::trace` discovers all three effect classes in one schema. Stateless
