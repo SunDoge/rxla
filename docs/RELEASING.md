@@ -28,12 +28,14 @@ cargo publish --registry crates-io -p rxla-xla-proto
 cargo publish --registry crates-io -p rxla-ir
 cargo publish --registry crates-io -p rxla-core
 cargo publish --registry crates-io -p rxla-nn
-cargo publish --registry crates-io -p rxla-models
-cargo publish --registry crates-io -p rxla-train
-cargo publish --registry crates-io -p rxla-safetensors
-cargo publish --registry crates-io -p rxla-onnx
 cargo publish --registry crates-io -p rxla
 ```
+
+`rxla-models`, `rxla-onnx`, `rxla-safetensors`, and `rxla-train` remain
+workspace integration crates with `publish = false`. They continue to build and
+test in CI but are intentionally outside the initial crates.io release graph.
+Promoting one later requires removing that flag, adding it to `release-plz.toml`,
+and reviewing its public dependency graph and packaged examples first.
 
 After every crate exists, configure a crates.io trusted publisher for this
 repository and the `.github/workflows/release-plz.yml` workflow. The workflow

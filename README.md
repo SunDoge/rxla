@@ -119,8 +119,8 @@ The foundational crates are:
   neural-network operations.
 
 Experimental integration crates include `rxla-onnx`, `rxla-safetensors`,
-`rxla-train`, and `rxla-models`. They are not all part of the initial public
-release set.
+`rxla-train`, and `rxla-models`. They remain workspace-tested but use
+`publish = false` and are not part of the initial public release set.
 
 ## Development
 

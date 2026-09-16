@@ -19,10 +19,6 @@ name = "rxla-cache"
 version_group = "rxla"
 
 [[package]]
-name = "rxla-safetensors"
-version_group = "rxla"
-
-[[package]]
 name = "rxla-core"
 version_group = "rxla"
 
@@ -31,23 +27,11 @@ name = "rxla-ir"
 version_group = "rxla"
 
 [[package]]
-name = "rxla-models"
-version_group = "rxla"
-
-[[package]]
 name = "rxla-nn"
 version_group = "rxla"
 
 [[package]]
-name = "rxla-onnx"
-version_group = "rxla"
-
-[[package]]
 name = "rxla-pjrt"
-version_group = "rxla"
-
-[[package]]
-name = "rxla-train"
 version_group = "rxla"
 
 [[package]]

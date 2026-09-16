@@ -2,6 +2,7 @@
 name = "rxla-safetensors"
 version.workspace = true
 edition.workspace = true
+publish = false
 description = "Weight loading, schema binding, and export for RXLA"
 license.workspace = true
 repository.workspace = true
