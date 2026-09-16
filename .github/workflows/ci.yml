@@ -27,29 +27,32 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: Check workspace
-        run: sh scripts/check.sh
-      - name: Cache CPU PJRT plugin
-        id: cpu-plugin-cache
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint workspace
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test workspace libraries
+        run: cargo test --locked --workspace --lib
+      - name: Cache CPU PJRT plugin archive
         uses: actions/cache@v4
         with:
-          path: ~/.cache/rxla-ci/zml-202609101243.20.1.7ca6884ea2cb
-          key: zml-cpu-linux-amd64-202609101243.20.1.7ca6884ea2cb-d0d2c537
-      - name: Download CPU PJRT plugin
-        if: steps.cpu-plugin-cache.outputs.cache-hit != 'true'
+          path: ~/.cache/rxla-ci/zml-cpu-linux-amd64.tar.zst
+          key: zml-cpu-linux-amd64-f1670d21
+      - name: Prepare CPU PJRT plugin
         env:
           URL: https://mirror.zml.ai/plugins/202609101243.20.1.7ca6884ea2cb/zml-cpu-linux-amd64.tar.zst
           ARCHIVE_SHA256: f1670d21b92102b8c7c7f9d0f00d6a7a1a5d90a83d7e28ba5fbeb1f9ce4c170c
         run: |
           set -eu
-          plugin_dir="$HOME/.cache/rxla-ci/zml-202609101243.20.1.7ca6884ea2cb"
-          archive="$RUNNER_TEMP/zml-cpu-linux-amd64.tar.zst"
-          mkdir -p "$plugin_dir"
-          curl --fail --location --retry 3 "$URL" --output "$archive"
+          archive="$HOME/.cache/rxla-ci/zml-cpu-linux-amd64.tar.zst"
+          mkdir -p "$(dirname "$archive")" "$RUNNER_TEMP/rxla-pjrt"
+          if ! test -f "$archive"; then
+            curl --fail --location --retry 3 "$URL" --output "$archive"
+          fi
           echo "$ARCHIVE_SHA256  $archive" | sha256sum --check --strict
-          tar --use-compress-program=unzstd -xf "$archive" -C "$plugin_dir"
+          tar --use-compress-program=unzstd -xf "$archive" -C "$RUNNER_TEMP/rxla-pjrt"
       - name: Test CPU PJRT execution
         run: |
-          plugin="$HOME/.cache/rxla-ci/zml-202609101243.20.1.7ca6884ea2cb/libzml_cpu.so"
+          plugin="$RUNNER_TEMP/rxla-pjrt/libzml_cpu.so"
           echo "d0d2c537cfa37ed36f15a6de056fa2a6c12d0d1c036214c26cb5276f941f4509  $plugin" | sha256sum --check --strict
           PJRT_CPU_PLUGIN_PATH="$plugin" sh scripts/check-cpu.sh
