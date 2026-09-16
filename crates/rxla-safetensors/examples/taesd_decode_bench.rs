@@ -1,6 +1,6 @@
 //! Benchmark the real Stable Diffusion TAESD decoder on a PJRT backend.
 use clap::Parser;
-use rxla_core::{CacheLimits, Client, Compiler};
+use rxla_core::{Buffer, CacheLimits, Client, Compiler};
 use rxla_models::taesd_decoder;
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
@@ -84,7 +84,7 @@ fn run(args: Args) -> Result<()> {
         samples.push(start.elapsed().as_secs_f64() * 1e3);
     }
     let download_start = Instant::now();
-    let final_image = result[0].to_vec::<f32>()?;
+    let final_image = decoder.decode_outputs::<Buffer>(result)?.to_vec::<f32>()?;
     let download_time = download_start.elapsed();
     samples.sort_by(f64::total_cmp);
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;

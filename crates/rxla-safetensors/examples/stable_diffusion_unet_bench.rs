@@ -1,6 +1,6 @@
 //! Benchmark one real conditional Stable Diffusion UNet evaluation.
 use clap::Parser;
-use rxla_core::{CacheLimits, Client, Compiler};
+use rxla_core::{Buffer, CacheLimits, Client, Compiler};
 use rxla_models::{UnetConfig, unet};
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
@@ -107,7 +107,7 @@ fn run(args: Args) -> Result<()> {
         samples.push(start.elapsed().as_secs_f64() * 1e3);
     }
     let download_start = Instant::now();
-    let output = result[0].to_vec::<f32>()?;
+    let output = applied.decode_outputs::<Buffer>(result)?.to_vec::<f32>()?;
     let download_time = download_start.elapsed();
     samples.sort_by(f64::total_cmp);
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;

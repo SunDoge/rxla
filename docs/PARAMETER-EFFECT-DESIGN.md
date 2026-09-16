@@ -100,6 +100,12 @@ typed result such as `DenoiserOutputs` without forcing compiler internals to
 understand application containers or making the model return an unlabelled
 `Vec<Tensor>`.
 
+After execution, `AppliedModel::decode_outputs` checks the concrete buffer count
+against that model and reconstructs a `ModelOutputValues` target. Built-in
+targets include `Buffer`, tuples, arrays and `Vec<Buffer>`; a domain result can
+implement the trait as well. A dynamic vector consumes all remaining buffers,
+so it belongs at the top level or at the final position of a custom decoder.
+
 Trainability belongs to a particular transformation, not permanently to a
 parameter declaration. The immutable schema provides typed parameter identities
 and deterministic, scope-based selections instead:

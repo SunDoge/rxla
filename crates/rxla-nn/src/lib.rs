@@ -18,6 +18,8 @@ mod layers;
 pub use layers::{
     Conv2d, Embedding, GroupNorm, LayerNorm, Linear, Named, QuantizedLinear, RmsNorm,
 };
+mod outputs;
+pub use outputs::{ModelOutputValues, ModelOutputs};
 mod schema;
 pub use schema::{ModelArgument, ModelInputSpec, ParamSchema, ParameterSpec, StateSpec};
 mod selection;
@@ -101,6 +103,10 @@ pub enum Error {
     IncompatibleState { path: String },
     #[snafu(display("transform state {path:?} is already declared"))]
     DuplicateTransformState { path: String },
+    #[snafu(display("model returned {actual} output buffers, expected {expected}"))]
+    OutputCount { expected: usize, actual: usize },
+    #[snafu(display("output buffers do not match the requested result structure"))]
+    OutputStructure,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -229,77 +235,6 @@ struct RngStream {
 pub struct Rng<'a> {
     stream: &'a mut RngStream,
 }
-
-/// Structured values a model `apply` function may return.
-///
-/// Containers are flattened deterministically into the executable output ABI.
-/// Applications may implement this for domain structs to keep model signatures
-/// typed without exposing their storage structure to the compiler boundary.
-pub trait ModelOutputs {
-    fn into_tensors(self) -> Vec<Tensor>;
-}
-
-impl ModelOutputs for () {
-    fn into_tensors(self) -> Vec<Tensor> {
-        Vec::new()
-    }
-}
-
-impl ModelOutputs for Tensor {
-    fn into_tensors(self) -> Vec<Tensor> {
-        vec![self]
-    }
-}
-
-impl<T: ModelOutputs> ModelOutputs for Vec<T> {
-    fn into_tensors(self) -> Vec<Tensor> {
-        self.into_iter()
-            .flat_map(ModelOutputs::into_tensors)
-            .collect()
-    }
-}
-
-impl<T: ModelOutputs, const N: usize> ModelOutputs for [T; N] {
-    fn into_tensors(self) -> Vec<Tensor> {
-        self.into_iter()
-            .flat_map(ModelOutputs::into_tensors)
-            .collect()
-    }
-}
-
-macro_rules! impl_tuple_outputs {
-    ($(($($name:ident),+)),+ $(,)?) => {
-        $(
-            impl<$($name: ModelOutputs),+> ModelOutputs for ($($name,)+) {
-                #[allow(non_snake_case)]
-                fn into_tensors(self) -> Vec<Tensor> {
-                    let ($($name,)+) = self;
-                    let mut outputs = Vec::new();
-                    $(outputs.extend($name.into_tensors());)+
-                    outputs
-                }
-            }
-        )+
-    };
-}
-
-impl_tuple_outputs!(
-    (A, B),
-    (A, B, C),
-    (A, B, C, D),
-    (A, B, C, D, E),
-    (A, B, C, D, E, F),
-    (A, B, C, D, E, F, G),
-    (A, B, C, D, E, F, G, H),
-    (A, B, C, D, E, F, G, H, I),
-    (A, B, C, D, E, F, G, H, I, J),
-    (A, B, C, D, E, F, G, H, I, J, K),
-    (A, B, C, D, E, F, G, H, I, J, K, L),
-    (A, B, C, D, E, F, G, H, I, J, K, L, M),
-    (A, B, C, D, E, F, G, H, I, J, K, L, M, N),
-    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O),
-    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P),
-);
 
 impl Cx {
     fn init() -> Self {
@@ -1171,7 +1106,8 @@ mod tests {
             let outputs = executable
                 .execute(arguments.as_slice())
                 .expect("execute model");
-            assert_eq!(outputs[0].to_vec::<f32>().unwrap(), [10., 12., 0., 0.]);
+            let output: Buffer = applied.decode_outputs(outputs).unwrap();
+            assert_eq!(output.to_vec::<f32>().unwrap(), [10., 12., 0., 0.]);
         }
     }
 }

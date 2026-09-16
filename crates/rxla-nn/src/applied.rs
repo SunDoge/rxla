@@ -98,6 +98,21 @@ impl AppliedModel {
         &self.outputs
     }
 
+    /// Decode one ordinary model execution into a typed buffer structure.
+    pub fn decode_outputs<O: ModelOutputValues>(&self, outputs: Vec<Buffer>) -> Result<O> {
+        ensure!(
+            outputs.len() == self.outputs.len(),
+            OutputCountSnafu {
+                expected: self.outputs.len(),
+                actual: outputs.len(),
+            }
+        );
+        let mut outputs = outputs.into_iter();
+        let value = O::take_from(&mut outputs).context(OutputStructureSnafu)?;
+        ensure!(outputs.next().is_none(), OutputStructureSnafu);
+        Ok(value)
+    }
+
     pub fn states(&self) -> impl ExactSizeIterator<Item = (&str, &StateSlot)> {
         self.states.iter().map(|(path, slot)| (path.as_str(), slot))
     }

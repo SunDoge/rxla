@@ -1,6 +1,6 @@
 //! Real quantized Qwen3.5-0.8B text-prefill benchmark.
 use clap::Parser;
-use rxla_core::{CacheLimits, Client, Compiler, DType};
+use rxla_core::{Buffer, CacheLimits, Client, Compiler, DType};
 use rxla_models::{Qwen3_5Config, qwen3_5};
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
@@ -72,7 +72,7 @@ fn run(args: Args) -> Result<()> {
     }
     samples.sort_by(f64::total_cmp);
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-    let logits = output[0].to_vec::<f32>()?;
+    let logits = applied.decode_outputs::<Buffer>(output)?.to_vec::<f32>()?;
     let checksum = logits.iter().map(|&value| f64::from(value)).sum::<f64>();
     if let Some(path) = args.output {
         let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
