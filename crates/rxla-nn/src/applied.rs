@@ -542,10 +542,10 @@ impl ModelSessionBuffers {
 
     /// Move all buffers required by `builder` into its target model.
     ///
-    /// Every target resident parameter and named state must exist with a valid
-    /// client/shape/dtype. Extra source state is deliberately ignored so a
-    /// training snapshot can initialize an inference trace without carrying
-    /// optimizer-only slots.
+    /// The source and target resident parameter sets must match exactly, and
+    /// every target named state must exist with a valid client/shape/dtype.
+    /// Extra source state is deliberately ignored so a training snapshot can
+    /// initialize an inference trace without carrying optimizer-only slots.
     pub fn restore_model<'model>(
         mut self,
         mut builder: ModelSessionBuilder<'model>,
@@ -561,6 +561,9 @@ impl ModelSessionBuffers {
                 .remove(&path)
                 .with_context(|| MissingResidentParameterInitializerSnafu { path: &path })?;
             builder = builder.parameter(path, value)?;
+        }
+        if let Some(path) = self.parameters.keys().next() {
+            return UnexpectedResidentParameterSnafu { path: path.clone() }.fail();
         }
         let state_paths = builder
             .model

@@ -515,7 +515,7 @@ mod tests {
         }
         .unwrap();
         let definition = Model::new(regression_loss);
-        let (_, selection, mut model) = definition
+        let (schema, selection, mut model) = definition
             .trace_resident(|schema| schema.select_under("linear"))
             .unwrap();
         let loss = model.outputs()[0].clone();
@@ -563,5 +563,23 @@ mod tests {
             session.state(&step_slot).unwrap().to_vec::<f32>().unwrap(),
             [100.0]
         );
+
+        let inference = definition.apply_resident(&schema, &selection).unwrap();
+        let inference_program = inference.compile_stateful(&mut compiler).unwrap();
+        let snapshot = model.take_session(session).unwrap();
+        assert!(
+            snapshot
+                .states()
+                .any(|(path, _)| path == "__optimizer.adam.step")
+        );
+        let mut inference_session = snapshot
+            .restore_model(inference.session(&inference_program))
+            .unwrap()
+            .build()
+            .unwrap();
+        let inference_loss = inference_session.run(&[&input, &target]).unwrap()[0]
+            .to_vec::<f32>()
+            .unwrap()[0];
+        assert!(inference_loss < 0.01, "loss = {inference_loss}");
     }
 }

@@ -157,13 +157,14 @@ The lowered program contains forward, loss, reverse-mode autodiff and
 `parameter - learning_rate * gradient` together. A step therefore executes as
 one XLA program and returns device-resident replacement parameter buffers.
 
-Adam uses the same transformation boundary, but its moments and step counter
-are named resident effects appended to the applied model. They are hidden state
-roots rather than extra public graph inputs or outputs. A stateful session
-therefore commits model state, RNG and optimizer state in the same execution;
-only selected replacement parameters cross the visible output ABI. This is not
-a global optimizer registry: the transform explicitly declares stable paths
-under `__optimizer.adam`, and a session owns the resulting buffers.
+Adam uses the same transformation boundary. In its resident form, moments and
+the step counter are named effects appended to the applied model, and selected
+parameters are resident slots too. They are hidden state roots rather than
+extra public graph inputs or outputs. A stateful session therefore commits
+parameters, model state, RNG and optimizer state in the same execution without
+returning replacement parameters through the visible output ABI. This is not a
+global optimizer registry: the transform explicitly declares stable paths under
+`__optimizer.adam`, and a session owns the resulting buffers.
 
 Parameters are ordinary device-buffer inputs by default. `trace_resident`
 discovers the schema, selects storage and traces the model in one operation:
@@ -192,6 +193,11 @@ schema load directly to that builder. In the other direction,
 `AppliedModel::resident_parameter_buffers` exposes the current session weights
 under the same canonical paths, including values changed by resident optimizers,
 for checkpoint export without rebinding or manually materializing host values.
+`AppliedModel::take_session` can instead consume those buffers for an in-process
+handoff. `ModelSessionBuffers::restore_model` requires the target to consume the
+exact resident parameter set, while allowing source-only transform state to be
+dropped when moving from a training trace into a separately compiled inference
+trace. It validates client, shape and dtype and performs no host transfer.
 F32, BF16 and U8 storage preserve the same symbolic semantics as input-backed
 parameters, so frozen and quantized inference weights can use this policy too.
 

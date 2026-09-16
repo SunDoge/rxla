@@ -57,6 +57,10 @@ pub enum Error {
     UnsupportedParameterDType { dtype: DType },
     #[snafu(display("resident parameter {path:?} has no session initializer"))]
     MissingResidentParameterInitializer { path: String },
+    #[snafu(display(
+        "source session contains resident parameter {path:?} absent from the target model"
+    ))]
+    UnexpectedResidentParameter { path: String },
     #[snafu(display("parameter {path:?} is not resident in this model trace"))]
     ParameterNotResident { path: String },
     #[snafu(display("expected {expected} resident parameter updates, received {actual}"))]
@@ -1171,6 +1175,16 @@ mod tests {
             parameters[0].1.to_vec::<f32>().unwrap(),
             [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         );
+
+        let snapshot = applied.take_session(session).unwrap();
+        let nonresident = definition
+            .apply_resident(&schema, &schema.select_all().matching(|_, _| false))
+            .unwrap();
+        let nonresident_program = nonresident.compile_stateful(&mut compiler).unwrap();
+        assert!(matches!(
+            snapshot.restore_model(nonresident.session(&nonresident_program)),
+            Err(Error::UnexpectedResidentParameter { .. })
+        ));
     }
 
     #[test]
