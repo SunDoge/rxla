@@ -108,6 +108,23 @@ fn runtime_results_are_materialized_lazy_tensor_leaves() {
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+fn eval_many_preserves_materialized_values_and_only_executes_lazy_roots() {
+    let mut runtime = Runtime::new(client());
+    let ready = Tensor::from_slice([2], DType::F32, [3.0, 4.0])
+        .unwrap()
+        .to_device(runtime.client())
+        .unwrap();
+    let input = Tensor::from_slice([2], DType::F32, [1.0, 2.0]).unwrap();
+    let lazy = input.add_scalar(5.0).unwrap();
+
+    let outputs = runtime.eval_many(&[ready.clone(), lazy]).unwrap();
+    assert!(outputs[0].same_expression(&ready));
+    assert_eq!(outputs[0].to_vec::<f32>().unwrap(), [3.0, 4.0]);
+    assert_eq!(outputs[1].to_vec::<f32>().unwrap(), [6.0, 7.0]);
+}
+
+#[test]
+#[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn mlx_style_eval_materializes_lazy_tensor_operations_and_reuses_cache() {
     let x = rxla_core::Tensor::from_slice([2], DType::F32, [1.0, 2.0]).unwrap();
     let y = rxla_core::Tensor::from_slice([2], DType::F32, [3.0, 4.0]).unwrap();

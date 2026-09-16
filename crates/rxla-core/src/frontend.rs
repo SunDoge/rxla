@@ -897,26 +897,31 @@ impl Runtime {
         if outputs.is_empty() {
             return Err(err("eval_many requires at least one tensor"));
         }
-        if outputs.iter().all(Tensor::is_materialized) {
+        let pending = outputs
+            .iter()
+            .filter(|output| !output.is_materialized())
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(first_pending) = pending.first() else {
             return Ok(outputs.to_vec());
-        }
-        let graph = outputs[0].graph();
-        if outputs
+        };
+        let graph = first_pending.graph();
+        if pending
             .iter()
             .any(|output| !std::sync::Arc::ptr_eq(&graph.0, &output.graph().0))
         {
             return Err(err("eval_many tensors belong to different lazy sessions"));
         }
-        let roots = outputs.to_vec();
+        let roots = pending.clone();
         let (lowered, planning, parameters, source) = graph.direct_program(&roots, false)?;
-        let inputs = outputs[0].lazy_inputs(&parameters)?;
+        let inputs = first_pending.lazy_inputs(&parameters)?;
         let program = Program {
             planning,
             lowered,
             source,
         };
         let values = self.run_tensors_on(device, &program, &inputs.iter().collect::<Vec<_>>())?;
-        Tensor::materialize_all(outputs, &values)?;
+        Tensor::materialize_all(&pending, &values)?;
         Ok(outputs.to_vec())
     }
 }
