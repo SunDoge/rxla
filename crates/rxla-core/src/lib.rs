@@ -18,6 +18,7 @@ use snafu::Snafu;
 pub use state::{
     Parameter, ParameterId, PreparedStateGraph, Session, StateGraph, StateProgram, StateSlot,
 };
+pub use stateful::{StateCx, StateStep, StateValue, StatefulModel, StatefulSession};
 use std::sync::{Arc, Mutex};
 pub use typed_state::{F32, I32, State, StateDType, StateTransaction, StateUpdates};
 mod artifact;
@@ -54,6 +55,7 @@ pub use rotary::RotaryLayout;
 pub use rxla_ir::{Mesh, MeshAxis, PartitionSpec, Sharding, ShardingError};
 mod state;
 pub mod state_tree;
+mod stateful;
 mod transposed_convolution;
 mod typed_state;
 pub use rxla_ir::IrError;
@@ -205,6 +207,52 @@ impl Graph {
         let number = graph.parameter_count()?;
         let op = Op::Parameter(number);
         Ok(graph.append(&op, &[], &ty)?)
+    }
+
+    fn state_input(
+        &self,
+        dims: &[i64],
+        dtype: DType,
+        state_id: usize,
+        path: &str,
+    ) -> Result<Tensor> {
+        elements(dims)?;
+        let ty = TensorType {
+            dims: dims.to_vec(),
+            dtype,
+        };
+        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let number = graph.parameter_count()?;
+        let id = graph.state_input(number, state_id, path, &ty)?;
+        Ok(Tensor::symbolic(self.clone(), id, dims, dtype))
+    }
+
+    fn state_read(&self, current: &Tensor, state_id: usize) -> Result<Tensor> {
+        if !Arc::ptr_eq(&self.0, &current.graph().0) {
+            return Err(err("state read belongs to another graph"));
+        }
+        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let id = graph.state_read(current.node_id(), state_id)?;
+        Ok(Tensor::symbolic(
+            self.clone(),
+            id,
+            current.shape(),
+            current.dtype(),
+        ))
+    }
+
+    fn state_write(&self, value: &Tensor, state_id: usize) -> Result<Tensor> {
+        if !Arc::ptr_eq(&self.0, &value.graph().0) {
+            return Err(err("state write belongs to another graph"));
+        }
+        let mut graph = self.0.lock().map_err(|_| err("graph lock poisoned"))?;
+        let id = graph.state_write(value.node_id(), state_id)?;
+        Ok(Tensor::symbolic(
+            self.clone(),
+            id,
+            value.shape(),
+            value.dtype(),
+        ))
     }
 
     fn direct_program(

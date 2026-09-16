@@ -16,6 +16,56 @@ impl Default for IrGraph {
 }
 
 impl IrGraph {
+    pub(super) fn state_input(
+        &mut self,
+        number: usize,
+        state_id: usize,
+        path: &str,
+        ty: &TensorType,
+    ) -> Value {
+        let result = self.tensor_type(&ty.dims, ty.dtype);
+        let op = StateInputOp::from_operation(Operation::new(
+            &mut self.ctx,
+            StateInputOp::get_concrete_op_info(),
+            vec![result],
+            vec![],
+            vec![],
+            0,
+        ));
+        op.set_attr_state_number(&self.ctx, StringAttr::new(number.to_string()));
+        op.set_attr_input_state_id(&self.ctx, StringAttr::new(state_id.to_string()));
+        op.set_attr_state_path(&self.ctx, StringAttr::new(path.to_owned()));
+        self.push(op)
+    }
+
+    pub(super) fn state_read(&mut self, current: Value, state_id: usize) -> Value {
+        let result = current.get_type(&self.ctx);
+        let op = StateReadOp::from_operation(Operation::new(
+            &mut self.ctx,
+            StateReadOp::get_concrete_op_info(),
+            vec![result],
+            vec![current],
+            vec![],
+            0,
+        ));
+        op.set_attr_read_state_id(&self.ctx, StringAttr::new(state_id.to_string()));
+        self.push(op)
+    }
+
+    pub(super) fn state_write(&mut self, value: Value, state_id: usize) -> Value {
+        let result = value.get_type(&self.ctx);
+        let op = StateWriteOp::from_operation(Operation::new(
+            &mut self.ctx,
+            StateWriteOp::get_concrete_op_info(),
+            vec![result],
+            vec![value],
+            vec![],
+            0,
+        ));
+        op.set_attr_write_state_id(&self.ctx, StringAttr::new(state_id.to_string()));
+        self.push(op)
+    }
+
     pub(super) fn verify(&self, stage: &'static str) -> Result<()> {
         verify_op(&self.module, &self.ctx).map_err(|error| IrError::Verification {
             stage,
@@ -74,7 +124,7 @@ impl IrGraph {
             {
                 let value = compact_values.len();
                 compact_values.insert(result, value as i64 + 1);
-                if op.as_ref().is::<ParameterOp>() {
+                if op.as_ref().is::<ParameterOp>() || op.as_ref().is::<StateInputOp>() {
                     parameter_values.push(value);
                 }
                 if let Some(attribute) = operation

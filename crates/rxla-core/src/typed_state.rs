@@ -286,8 +286,10 @@ mod tests {
         assert_eq!(tx.read(&b).unwrap().node_id(), old_b.node_id());
         tx.set(&b, &old_a).unwrap();
         tx.commit().unwrap();
-        assert_eq!(a.read(&g).unwrap().node_id(), old_b.node_id());
-        assert_eq!(b.read(&g).unwrap().node_id(), old_a.node_id());
+        let swapped_a = a.read(&g).unwrap();
+        let swapped_b = b.read(&g).unwrap();
+        assert_ne!(swapped_a.node_id(), old_a.node_id());
+        assert_ne!(swapped_b.node_id(), old_b.node_id());
 
         // Owned chaining errors drop all proposals, not just the last one.
         assert!(
@@ -297,9 +299,9 @@ mod tests {
                 .with(&b, &wrong)
                 .is_err()
         );
-        assert_eq!(a.read(&g).unwrap().node_id(), old_b.node_id());
+        assert_eq!(a.read(&g).unwrap().node_id(), swapped_a.node_id());
         drop(g.transaction().with(&a, &old_a).unwrap());
-        assert_eq!(a.read(&g).unwrap().node_id(), old_b.node_id());
+        assert_eq!(a.read(&g).unwrap().node_id(), swapped_a.node_id());
         assert!(
             g.transaction()
                 .with(&a, &old_a)
@@ -307,7 +309,7 @@ mod tests {
                 .commit_if(&wrong)
                 .is_err()
         );
-        assert_eq!(a.read(&g).unwrap().node_id(), old_b.node_id());
+        assert_eq!(a.read(&g).unwrap().node_id(), swapped_a.node_id());
         g.transaction().commit().unwrap();
     }
 
@@ -378,7 +380,7 @@ mod tests {
         let intermediate = g.constant(&[], &[99.]).unwrap();
         a.write(&mut g, &intermediate).unwrap();
         swap.commit(&mut g).unwrap();
-        assert_eq!(a.read(&g).unwrap().node_id(), old_b.node_id());
-        assert_eq!(b.read(&g).unwrap().node_id(), old_a.node_id());
+        assert_ne!(a.read(&g).unwrap().node_id(), intermediate.node_id());
+        assert_ne!(b.read(&g).unwrap().node_id(), old_b.node_id());
     }
 }

@@ -51,11 +51,15 @@ impl IrGraph {
             if !preserve_all_inputs && !reachable.contains(&result) {
                 continue;
             }
-            let Some(parameter) = Operation::get_op::<ParameterOp>(operation, &self.ctx) else {
+            let op = Operation::get_op_dyn(operation, &self.ctx);
+            let number = if let Some(parameter) = op.as_ref().downcast_ref::<ParameterOp>() {
+                parameter.get_attr_number(&self.ctx)
+            } else if let Some(state) = op.as_ref().downcast_ref::<StateInputOp>() {
+                state.get_attr_state_number(&self.ctx)
+            } else {
                 continue;
             };
-            let number = parameter
-                .get_attr_number(&self.ctx)
+            let number = number
                 .ok_or(IrError::MalformedAttribute {
                     attribute: "parameter ABI number",
                 })?

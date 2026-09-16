@@ -88,7 +88,10 @@ impl Tensor {
             if !Arc::ptr_eq(&self.graph().0, &input.graph().0) {
                 return Err(err("cross-graph gradient input"));
             }
-            if !matches!(nodes[input.node_id().index()].op, Op::Parameter(_)) {
+            if !matches!(
+                nodes[input.node_id().index()].op,
+                Op::Parameter(_) | Op::StateRead { .. }
+            ) {
                 return Err(err("grad inputs must be graph input/parameter leaves"));
             }
         }
@@ -142,6 +145,9 @@ impl Tensor {
                     continue;
                 }
                 Op::Parameter(_)
+                | Op::StateInput { .. }
+                | Op::StateRead { .. }
+                | Op::StateWrite { .. }
                 | Op::Relu
                 | Op::Softplus
                 | Op::Sigmoid
@@ -219,10 +225,13 @@ impl Tensor {
             };
             match &node.op {
                 Op::Parameter(_)
+                | Op::StateInput { .. }
+                | Op::StateRead { .. }
                 | Op::ConstantF32(_)
                 | Op::StopGradient
                 | Op::IndexToFloat
                 | Op::Bf16ToFloat => {}
+                Op::StateWrite { .. } => add(0, dy),
                 Op::Convert { .. } => {
                     let source = value(node.operands[0]);
                     add(0, dy.cast(source.dtype())?);

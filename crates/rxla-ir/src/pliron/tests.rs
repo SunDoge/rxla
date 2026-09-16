@@ -83,6 +83,42 @@ fn semantic_snapshot_can_be_lowered_more_than_once() {
     assert_eq!(first.inputs, second.inputs);
     assert_eq!(first.outputs, second.outputs);
 }
+
+#[test]
+fn state_effects_survive_semantic_snapshots_and_discharge_to_pure_stablehlo() {
+    let mut program = ProgramIr::default();
+    let ty = vector_type(2, DType::F32);
+    let state = program.state_input(0, 7, "decoder.cache", &ty).unwrap();
+    let read = program.state_read(state, 7).unwrap();
+    let next = program
+        .append(&Op::Unary(Unary::Exp), &[read], &ty)
+        .unwrap();
+    let written = program.state_write(next, 7).unwrap();
+
+    let nodes = program.semantic_nodes().unwrap();
+    assert!(matches!(
+        &nodes[state.index()].op,
+        Op::StateInput {
+            number: 0,
+            state_id: 7,
+            path,
+        } if path == "decoder.cache"
+    ));
+    assert!(matches!(
+        nodes[read.index()].op,
+        Op::StateRead { state_id: 7 }
+    ));
+    assert!(matches!(
+        nodes[written.index()].op,
+        Op::StateWrite { state_id: 7 }
+    ));
+
+    let snapshot = SemanticProgram::capture(&program, &[written], true).unwrap();
+    let lowered = snapshot.lower(LoweringTarget::Portable).unwrap();
+    assert_eq!(lowered.parameters, [0]);
+    assert!(!lowered.code.contains("rxla.state_"));
+    assert!(lowered.code.contains("stablehlo.exponential"));
+}
 fn conditional(graph: &mut IrGraph, branch_add: bool) -> Value {
     let predicate = graph.parameter_number(0, &[], DType::I32);
     let then_value = graph.parameter_number(1, &[2], DType::F32);

@@ -102,6 +102,65 @@ impl IrGraph {
                 })?;
             return Ok(Op::Parameter(number));
         }
+        if let Some(value) = op.downcast_ref::<StateInputOp>() {
+            return Ok(Op::StateInput {
+                number: value
+                    .get_attr_state_number(&self.ctx)
+                    .ok_or(IrError::MalformedAttribute {
+                        attribute: "state ABI number",
+                    })?
+                    .as_str()
+                    .parse()
+                    .map_err(|_| IrError::MalformedAttribute {
+                        attribute: "state ABI number",
+                    })?,
+                state_id: value
+                    .get_attr_input_state_id(&self.ctx)
+                    .ok_or(IrError::MalformedAttribute {
+                        attribute: "state id",
+                    })?
+                    .as_str()
+                    .parse()
+                    .map_err(|_| IrError::MalformedAttribute {
+                        attribute: "state id",
+                    })?,
+                path: value
+                    .get_attr_state_path(&self.ctx)
+                    .ok_or(IrError::MalformedAttribute {
+                        attribute: "state path",
+                    })?
+                    .as_str()
+                    .to_owned(),
+            });
+        }
+        if let Some(value) = op.downcast_ref::<StateReadOp>() {
+            return Ok(Op::StateRead {
+                state_id: value
+                    .get_attr_read_state_id(&self.ctx)
+                    .ok_or(IrError::MalformedAttribute {
+                        attribute: "state read id",
+                    })?
+                    .as_str()
+                    .parse()
+                    .map_err(|_| IrError::MalformedAttribute {
+                        attribute: "state read id",
+                    })?,
+            });
+        }
+        if let Some(value) = op.downcast_ref::<StateWriteOp>() {
+            return Ok(Op::StateWrite {
+                state_id: value
+                    .get_attr_write_state_id(&self.ctx)
+                    .ok_or(IrError::MalformedAttribute {
+                        attribute: "state write id",
+                    })?
+                    .as_str()
+                    .parse()
+                    .map_err(|_| IrError::MalformedAttribute {
+                        attribute: "state write id",
+                    })?,
+            });
+        }
         if let Some(constant) = op.downcast_ref::<ConstantOp>() {
             let bytes = constant
                 .get_attr_value(&self.ctx)

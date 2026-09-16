@@ -11,7 +11,7 @@
 use crate::disk_cache::DiskCache;
 use crate::{
     Buffer, CacheLimits, CacheStats, Compiler, Executable, ExecutionPlan, Graph, InputSpec,
-    LoweredProgram, OutputSpec, PlanningPolicy, Result, Tensor, err,
+    LoweredProgram, OutputSpec, PlanningPolicy, Result, StateGraph, StateProgram, Tensor, err,
 };
 use prost::Message;
 use rxla_pjrt::{Client, ClientOptions, DType};
@@ -730,6 +730,19 @@ impl Runtime {
     pub fn compile(&mut self, program: &Program) -> Result<Rc<Executable>> {
         let device = self.default_device.clone();
         self.compile_on(&device, program)
+    }
+
+    pub(crate) fn compile_state_graph(
+        &mut self,
+        graph: &StateGraph,
+        outputs: &[Tensor],
+    ) -> Result<StateProgram> {
+        let device = self.default_device.clone();
+        let backend = self
+            .backends
+            .get_mut(device.backend())
+            .ok_or_else(|| err(format!("runtime device {device:?} is not registered")))?;
+        graph.compile(&mut backend.compiler, outputs)
     }
 
     fn compile_on(&mut self, device: &Device, program: &Program) -> Result<Rc<Executable>> {

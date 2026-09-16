@@ -109,11 +109,14 @@ impl ProgramIr {
     pub fn parameter_number(&self, id: SsaId) -> Result<Option<usize>> {
         let operation = self.defining_op(id, "reading a parameter ABI number")?;
         let op = Operation::get_op_dyn(operation, &self.graph.ctx);
-        let Some(parameter) = op.as_ref().downcast_ref::<ParameterOp>() else {
+        let number = if let Some(parameter) = op.as_ref().downcast_ref::<ParameterOp>() {
+            parameter.get_attr_number(&self.graph.ctx)
+        } else if let Some(state) = op.as_ref().downcast_ref::<StateInputOp>() {
+            state.get_attr_state_number(&self.graph.ctx)
+        } else {
             return Ok(None);
         };
-        parameter
-            .get_attr_number(&self.graph.ctx)
+        number
             .ok_or(IrError::MalformedAttribute {
                 attribute: "parameter ABI number",
             })?
@@ -123,6 +126,32 @@ impl ProgramIr {
             .map_err(|_| IrError::MalformedAttribute {
                 attribute: "parameter ABI number",
             })
+    }
+
+    /// Append one logical state input effect.
+    pub fn state_input(
+        &mut self,
+        number: usize,
+        state_id: usize,
+        path: &str,
+        ty: &TensorType,
+    ) -> Result<SsaId> {
+        let value = self.graph.state_input(number, state_id, path, ty);
+        Ok(self.values.push(value))
+    }
+
+    /// Append a read effect for the current state SSA version.
+    pub fn state_read(&mut self, current: SsaId, state_id: usize) -> Result<SsaId> {
+        let current = self.value(current)?;
+        let value = self.graph.state_read(current, state_id);
+        Ok(self.values.push(value))
+    }
+
+    /// Append a write effect and return the next state SSA version.
+    pub fn state_write(&mut self, value: SsaId, state_id: usize) -> Result<SsaId> {
+        let value = self.value(value)?;
+        let next = self.graph.state_write(value, state_id);
+        Ok(self.values.push(next))
     }
 
     pub fn replace_with_parameter(

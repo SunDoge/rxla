@@ -41,6 +41,55 @@ impl Verify for ParameterOp {
     }
 }
 
+impl Verify for StateInputOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let Some(number) = self.get_attr_state_number(ctx) else {
+            return pliron::verify_err_noloc!("rxla.state_input requires an ABI number");
+        };
+        let Some(state_id) = self.get_attr_input_state_id(ctx) else {
+            return pliron::verify_err_noloc!("rxla.state_input requires a state id");
+        };
+        let Some(path) = self.get_attr_state_path(ctx) else {
+            return pliron::verify_err_noloc!("rxla.state_input requires a state path");
+        };
+        if number.as_str().parse::<usize>().is_err()
+            || state_id.as_str().parse::<usize>().is_err()
+            || path.as_str().is_empty()
+        {
+            return pliron::verify_err_noloc!(
+                "rxla.state_input requires numeric ABI/state ids and a nonempty path"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Verify for StateReadOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let _ = value_type(self.get_operation().deref(ctx).get_operand(0), ctx)?;
+        let Some(state_id) = self.get_attr_read_state_id(ctx) else {
+            return pliron::verify_err_noloc!("rxla.state_read requires a state id");
+        };
+        if state_id.as_str().parse::<usize>().is_err() {
+            return pliron::verify_err_noloc!("rxla.state_read state id must be numeric");
+        }
+        Ok(())
+    }
+}
+
+impl Verify for StateWriteOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let _ = value_type(self.get_operation().deref(ctx).get_operand(0), ctx)?;
+        let Some(state_id) = self.get_attr_write_state_id(ctx) else {
+            return pliron::verify_err_noloc!("rxla.state_write requires a state id");
+        };
+        if state_id.as_str().parse::<usize>().is_err() {
+            return pliron::verify_err_noloc!("rxla.state_write state id must be numeric");
+        }
+        Ok(())
+    }
+}
+
 impl Verify for IfOp {
     fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
         let operation = self.get_operation().deref(ctx);

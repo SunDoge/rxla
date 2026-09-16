@@ -201,45 +201,92 @@ pub enum Reduction {
 #[derive(Clone, Debug)]
 pub enum Op {
     Parameter(usize),
+    /// A named mutable value before state-effect discharge.
+    StateInput {
+        number: usize,
+        state_id: usize,
+        path: String,
+    },
+    /// Reads the current SSA version of a state value.
+    StateRead {
+        state_id: usize,
+    },
+    /// Produces the next SSA version of a state value.
+    StateWrite {
+        state_id: usize,
+    },
     ConstantF32(Arc<[f32]>),
     ConstantI32(Arc<[i32]>),
     IndexToFloat,
     Bf16ToFloat,
-    Convert { dtype: DType },
-    Iota { axis: usize },
+    Convert {
+        dtype: DType,
+    },
+    Iota {
+        axis: usize,
+    },
     Unary(Unary),
     Relu,
     Softplus,
     Sigmoid,
     Binary(Binary),
     IntegerBinary(IntegerBinary),
-    Matmul { batch_rank: usize },
-    Attention { scale: f32 },
+    Matmul {
+        batch_rank: usize,
+    },
+    Attention {
+        scale: f32,
+    },
     Reshape,
     StopGradient,
     WithGradient,
     WithElementwiseDerivative,
     OptimizationBarrier,
-    Broadcast { axes: Vec<usize> },
-    Transpose { permutation: Vec<usize> },
-    Reverse { axes: Vec<usize> },
-    Reduce { kind: Reduction, axes: Vec<usize> },
-    Cumsum { axis: usize },
+    Broadcast {
+        axes: Vec<usize>,
+    },
+    Transpose {
+        permutation: Vec<usize>,
+    },
+    Reverse {
+        axes: Vec<usize>,
+    },
+    Reduce {
+        kind: Reduction,
+        axes: Vec<usize>,
+    },
+    Cumsum {
+        axis: usize,
+    },
     Slice(Vec<SliceAxis>),
     SliceGradient(Vec<SliceAxis>),
     Pad(Vec<[i64; 2]>),
     DynamicSlice,
-    Take { axis: usize },
-    TakeAlongAxis { axis: usize },
-    GatherGradient { axis: usize, batched: bool },
+    Take {
+        axis: usize,
+    },
+    TakeAlongAxis {
+        axis: usize,
+    },
+    GatherGradient {
+        axis: usize,
+        batched: bool,
+    },
     IndexLessEqualMask,
     IsFiniteMask,
     CompareMask(Comparison),
     Select,
-    ArgMax { axis: usize },
-    SortedIndices { axis: usize, descending: bool },
+    ArgMax {
+        axis: usize,
+    },
+    SortedIndices {
+        axis: usize,
+        descending: bool,
+    },
     DynamicUpdateSlice,
-    Concatenate { axis: usize },
+    Concatenate {
+        axis: usize,
+    },
     Conv2d(Conv2dOptions),
     Conv2dOihw(Conv2dOptions),
     ConvTranspose2d(ConvTranspose2dOptions),

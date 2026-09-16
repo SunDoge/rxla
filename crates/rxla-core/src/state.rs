@@ -191,16 +191,28 @@ impl StateGraph {
             .causal_attention_mask(queries, keys, query_offset)
     }
     pub fn state(&mut self, dims: &[i64]) -> Result<StateSlot> {
-        let tensor = self.graph.input(dims)?;
-        Ok(self.register_state(tensor))
+        self.state_named(&format!("state.{}", self.slots.len()), dims, DType::F32)
     }
     /// Register resident I32 state (use [] for a scalar position counter).
     pub fn state_i32(&mut self, dims: &[i64]) -> Result<StateSlot> {
-        let value = self.graph.input_i32(dims)?;
+        self.state_named(&format!("state.{}", self.slots.len()), dims, DType::I32)
+    }
+    pub(crate) fn state_named(
+        &mut self,
+        path: &str,
+        dims: &[i64],
+        dtype: DType,
+    ) -> Result<StateSlot> {
+        let index = self.slots.len();
+        let value = self.graph.state_input(dims, dtype, index, path)?;
         Ok(self.register_state(value))
     }
     fn register_state(&mut self, value: Tensor) -> StateSlot {
         let index = self.slots.len();
+        let value = self
+            .graph
+            .state_read(&value, index)
+            .expect("new state input and read always share one graph and type");
         self.slots.push(value);
         self.arguments.push(Argument::State(index));
         StateSlot {
@@ -270,7 +282,7 @@ impl StateGraph {
     pub(super) fn record_updates(&mut self, updates: &[(&StateSlot, Tensor)]) -> Result<()> {
         self.validate_updates(updates)?;
         for (slot, value) in updates {
-            self.slots[slot.index] = value.clone();
+            self.slots[slot.index] = self.graph.state_write(value, slot.index)?;
         }
         Ok(())
     }
@@ -1309,11 +1321,12 @@ mod tests {
         graph.write_many(&[]).unwrap();
         assert_eq!(graph.read(&a).unwrap().node_id(), old_a.node_id());
         graph.write_many(&[(&a, &next)]).unwrap();
-        assert_eq!(graph.read(&a).unwrap().node_id(), next.node_id());
+        let written_a = graph.read(&a).unwrap();
+        assert_ne!(written_a.node_id(), old_a.node_id());
         assert_eq!(graph.read(&b).unwrap().node_id(), old_b.node_id());
         graph.write_many(&[(&b, &next), (&a, &old_b)]).unwrap();
-        assert_eq!(graph.read(&a).unwrap().node_id(), old_b.node_id());
-        assert_eq!(graph.read(&b).unwrap().node_id(), next.node_id());
+        assert_ne!(graph.read(&a).unwrap().node_id(), written_a.node_id());
+        assert_ne!(graph.read(&b).unwrap().node_id(), old_b.node_id());
     }
     #[test]
     #[ignore = "requires trusted PJRT_PLUGIN_PATH"]

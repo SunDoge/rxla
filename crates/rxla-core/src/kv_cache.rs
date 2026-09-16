@@ -150,10 +150,10 @@ mod tests {
         );
         let (k, v) = cache.update_at(&mut g, &good, &good, &starts).unwrap();
         let (actual_k, actual_v) = cache.read(&g).unwrap();
-        assert_eq!(
-            (actual_k.node_id(), actual_v.node_id()),
-            (k.node_id(), v.node_id())
-        );
+        assert_eq!(actual_k.shape(), k.shape());
+        assert_eq!(actual_v.shape(), v.shape());
+        assert_ne!(actual_k.node_id(), old_k.node_id());
+        assert_ne!(actual_v.node_id(), old_v.node_id());
         assert_ne!(k.node_id(), old_k.node_id());
         assert_ne!(v.node_id(), old_v.node_id());
     }

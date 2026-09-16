@@ -147,6 +147,47 @@ impl SortAttr {
 )]
 pub(super) struct ParameterOp;
 
+/// Stateful reference input before effect discharge. State identity is logical
+/// metadata; the result remains an ordinary ranked tensor SSA value.
+#[pliron_op(
+    name = "rxla.state_input",
+    format = "attr($state_number, $StringAttr) ` ` attr($input_state_id, $StringAttr) ` ` attr($state_path, $StringAttr) ` : ` type($0)",
+    interfaces = [NOpdsInterface<0>, OneResultInterface],
+    attributes = (state_number: StringAttr, input_state_id: StringAttr, state_path: StringAttr)
+)]
+pub(super) struct StateInputOp;
+
+/// Explicit state read. Its operand is the current SSA version and its result
+/// is discharged to that value before backend lowering.
+#[pliron_op(
+    name = "rxla.state_read",
+    format = "$0 ` ` attr($read_state_id, $StringAttr) ` : ` type($0)",
+    interfaces = [
+        OneOpdInterface,
+        OneResultInterface,
+        SameOperandsType,
+        SameResultsType,
+        SameOperandsAndResultType
+    ],
+    attributes = (read_state_id: StringAttr)
+)]
+pub(super) struct StateReadOp;
+
+/// Explicit state write. The result is the next SSA version of the reference.
+#[pliron_op(
+    name = "rxla.state_write",
+    format = "$0 ` ` attr($write_state_id, $StringAttr) ` : ` type($0)",
+    interfaces = [
+        OneOpdInterface,
+        OneResultInterface,
+        SameOperandsType,
+        SameResultsType,
+        SameOperandsAndResultType
+    ],
+    attributes = (write_state_id: StringAttr)
+)]
+pub(super) struct StateWriteOp;
+
 #[pliron_op(
     name = "rxla.constant",
     format = "attr($value, $BytesAttr) ` : ` type($0)",

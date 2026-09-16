@@ -39,6 +39,19 @@ impl IrGraph {
         }
         Some(match operation {
             Op::Parameter(number) => self.parameter_number(*number, &result.dims, result.dtype),
+            Op::StateInput {
+                number,
+                state_id,
+                path,
+            } => self.state_input(*number, *state_id, path, result),
+            Op::StateRead { state_id } => {
+                let [current] = operands else { return None };
+                self.state_read(*current, *state_id)
+            }
+            Op::StateWrite { state_id } => {
+                let [value] = operands else { return None };
+                self.state_write(*value, *state_id)
+            }
             Op::ConstantF32(value) => self.constant_f32(&result.dims, value.to_vec()),
             Op::ConstantI32(value) => self.constant_i32(&result.dims, value.to_vec()),
             Op::Iota { axis } => self.iota_typed(result, *axis),

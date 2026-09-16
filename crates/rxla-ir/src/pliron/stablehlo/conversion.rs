@@ -116,6 +116,16 @@ impl DialectConversion for RxlaToStableHlo {
                 (*value.get_attr_number(ctx).unwrap()).clone()
             );
         }
+        if let Some(value) = source.as_ref().downcast_ref::<StateInputOp>() {
+            replace_attr!(
+                ArgumentOp,
+                set_attr_abi_number,
+                (*value.get_attr_state_number(ctx).unwrap()).clone()
+            );
+        }
+        if source.as_ref().is::<StateReadOp>() || source.as_ref().is::<StateWriteOp>() {
+            replace!(StableReshapeOp);
+        }
         if let Some(value) = source.as_ref().downcast_ref::<ConstantOp>() {
             replace_attr!(
                 StableConstantOp,
@@ -606,6 +616,9 @@ fn copy_sharding(ctx: &Context, source: Ptr<Operation>, target: Ptr<Operation>) 
 
 pub(super) fn supports_source_operation(op: &dyn PlironOp) -> bool {
     op.is::<ParameterOp>()
+        || op.is::<StateInputOp>()
+        || op.is::<StateReadOp>()
+        || op.is::<StateWriteOp>()
         || op.is::<IfOp>()
         || op.is::<YieldOp>()
         || op.is::<ConstantOp>()

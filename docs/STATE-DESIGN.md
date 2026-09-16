@@ -1,9 +1,43 @@
 # Stateful API design constraints
 
-Status: the F32/I32 state-slot/session layer is implemented. `StateGraph`
-records tracked slot reads/writes; `StateProgram` appends hidden state results;
-`Session` binds and commits resident buffers. Module derivation, RNG state,
-and transformation policies below are still design work.
+Status: state is now represented in the source IR by `rxla.state_input`,
+`rxla.state_read`, and `rxla.state_write`. The user-facing `StatefulModel` /
+`StateCx` API assigns stable scoped names while tracing; lowering discharges the
+effects into ordinary ABI inputs and hidden final-state outputs. `StateGraph`,
+`StateProgram`, and `Session` remain the lower-level execution machinery.
+Module derivation, RNG state, and several transformation policies below are still
+design work.
+
+## IR effect model
+
+This follows JAX's Ref/discharge split rather than treating Rust mutation as the
+program. A state declaration introduces a logical identity and one tensor SSA
+version. Reads and writes are explicit IR operations, so analysis and later
+transforms can distinguish state from ordinary dataflow. The semantic snapshot
+also preserves these operations; compilation caches and transformation pipelines
+therefore do not erase the effect metadata accidentally.
+
+Before StableHLO emission, discharge makes the program pure:
+
+```text
+state_input(id, path) -> state_read(id) -> computation -> state_write(id)
+       |                                                     |
+       +-- ordinary ABI argument             hidden result --+
+```
+
+Read/write markers lower to typed identity dataflow and the final SSA version is
+returned as a hidden result. The runtime installs new resident buffers only after
+all visible and hidden results have executed and passed validation. Dropping a
+`StateStep` does not execute or commit it, and its exclusive borrow prevents two
+overlapping transactions on one `StatefulSession`.
+
+The first public API is deliberately small: declare state where its shape is
+known with `cx.state(name, shape, dtype)`, use `StateValue::read/write`, group
+paths with `cx.scope`, and evaluate through `session.call(inputs)?.eval(runtime)`.
+One session currently owns one input-shape/dtype specialization. Lazy expressions
+passed as call inputs are materialized before the stateful executable; graph
+inlining across that call boundary is a future IR transformation, not hidden host
+mutation.
 
 With the optional `disk-cache` feature, `StateGraph::compile` can reuse native
 code across processes through `Compiler`. It still reconstructs the current
