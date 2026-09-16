@@ -699,7 +699,11 @@ impl<F> StateStep<'_, '_, F> {
             });
         }
 
-        let compiled = self.owner.compiled.as_mut().expect("initialized above");
+        let compiled = self
+            .owner
+            .compiled
+            .as_mut()
+            .ok_or(Error::MissingStatefulProgram)?;
         let values = compiled.session.run(
             &input_buffers
                 .iter()
@@ -707,7 +711,10 @@ impl<F> StateStep<'_, '_, F> {
                 .collect::<Vec<_>>(),
         )?;
         if values.len() != compiled.output_count {
-            return Err(err("stateful program returned an unexpected output count"));
+            return Err(Error::EvaluationOutputCount {
+                expected: compiled.output_count,
+                actual: values.len(),
+            });
         }
         values.into_iter().map(Tensor::materialized).collect()
     }
@@ -715,7 +722,10 @@ impl<F> StateStep<'_, '_, F> {
     pub fn eval_one(self, runtime: &mut Runtime) -> Result<Tensor> {
         let mut values = self.eval(runtime)?;
         if values.len() != 1 {
-            return Err(err("stateful step does not have exactly one output"));
+            return Err(Error::EvaluationOutputCount {
+                expected: 1,
+                actual: values.len(),
+            });
         }
         Ok(values.remove(0))
     }

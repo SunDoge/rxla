@@ -1174,25 +1174,33 @@ impl Session {
     ) -> Result<Vec<Buffer>> {
         let plan = &self.program.0;
         if inputs.len() != self.dynamic_input_count {
-            return Err(err("session input count mismatch"));
+            return Err(Error::ExecutableInputCount {
+                expected: self.dynamic_input_count,
+                actual: inputs.len(),
+            });
         }
         let arguments: Vec<_> = plan
             .arguments
             .iter()
-            .map(|arg| match *arg {
-                Argument::Input(i) => match &self.inputs[i] {
-                    InputBinding::Dynamic(index) => inputs[*index],
-                    InputBinding::Fixed(buffer) => buffer.as_ref(),
-                    InputBinding::Unused => {
-                        unreachable!("pruned inputs have no execution argument")
-                    }
-                },
-                Argument::State(i) => &self.states[i],
+            .map(|arg| -> Result<&Buffer> {
+                Ok(match *arg {
+                    Argument::Input(i) => match &self.inputs[i] {
+                        InputBinding::Dynamic(index) => inputs[*index],
+                        InputBinding::Fixed(buffer) => buffer.as_ref(),
+                        InputBinding::Unused => {
+                            return Err(Error::PrunedExecutionInput { index: i });
+                        }
+                    },
+                    Argument::State(i) => &self.states[i],
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
         let mut outputs = execute(&arguments)?;
         if outputs.len() != plan.types.len() {
-            return Err(err("stateful execution output count mismatch"));
+            return Err(Error::EvaluationOutputCount {
+                expected: plan.types.len(),
+                actual: outputs.len(),
+            });
         }
         for (buffer, ty) in outputs.iter().zip(&plan.types) {
             validate_buffer(&plan.executable.client, buffer, ty)?;
@@ -1399,7 +1407,21 @@ mod tests {
                 .run_with(&[], |_| Err(err("injected execution failure")))
                 .is_err()
         );
-        assert!(session.run_with(&[], |_| Ok(vec![])).is_err());
+        let unexpected = client.buffer(&[], &[0.]).unwrap();
+        assert!(matches!(
+            session.run_with(&[&unexpected], |_| unreachable!()),
+            Err(Error::ExecutableInputCount {
+                expected: 0,
+                actual: 1,
+            })
+        ));
+        assert!(matches!(
+            session.run_with(&[], |_| Ok(vec![])),
+            Err(Error::EvaluationOutputCount {
+                expected: 2,
+                actual: 0,
+            })
+        ));
         assert!(
             session
                 .run_with(&[], |_| Ok(vec![

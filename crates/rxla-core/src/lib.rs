@@ -208,6 +208,10 @@ pub enum Error {
     RuntimeBackendWithoutSelectedDevice { backend: String },
     #[snafu(display("PJRT backend {backend:?} has no addressable devices"))]
     RuntimeBackendWithoutDevices { backend: String },
+    #[snafu(display("stateful model step has no compiled program"))]
+    MissingStatefulProgram,
+    #[snafu(display("compiled execution argument refers to pruned input {index}"))]
+    PrunedExecutionInput { index: usize },
     #[snafu(display("invalid tensor operation: {message}"))]
     InvalidArgument { message: String },
 }
