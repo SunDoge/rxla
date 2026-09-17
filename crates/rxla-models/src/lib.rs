@@ -82,6 +82,10 @@ pub enum ModelDefinitionError {
     InvalidSam2HieraConfiguration,
     #[snafu(display("SAM 2 Hiera expects a nonempty NHWC F32 image"))]
     InvalidSam2Image,
+    #[snafu(display("invalid FLUX.2 transformer configuration"))]
+    InvalidFlux2Configuration,
+    #[snafu(display("FLUX.2 inputs do not match the configured topology"))]
+    InvalidFlux2Input,
 }
 
 #[derive(Debug, Snafu)]
@@ -109,6 +113,7 @@ mod taesd;
 pub use taesd::taesd_decoder;
 mod qwen3_5;
 pub use qwen3_5::{Qwen3_5Config, qwen3_5};
+pub mod flux2;
 pub mod pp_ocr_v6;
 pub mod sam2;
 
