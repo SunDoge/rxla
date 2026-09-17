@@ -359,8 +359,8 @@ impl Tensor {
             return Err(err("stack axis out of range"));
         }
         for tensor in tensors {
-            if tensor.shape != first.shape {
-                return Err(err("stack requires identical input shapes"));
+            if tensor.ty() != first.ty() {
+                return Err(err("stack requires identical input tensor types"));
             }
             if !Arc::ptr_eq(&first.graph().0, &tensor.graph().0) {
                 return Err(err("cross-graph stack operands"));
@@ -787,33 +787,21 @@ impl Tensor {
         if axis >= first.shape.len() {
             return Err(err("concatenate axis out of range"));
         }
-        let mut dims = first.shape.to_vec();
-        dims[axis] = 0;
         for tensor in tensors {
             if !Arc::ptr_eq(&first.graph().0, &tensor.graph().0) {
                 return Err(err("cross-graph operands"));
             }
-            if tensor.shape.len() != dims.len()
-                || tensor
-                    .shape
-                    .iter()
-                    .zip(&dims)
-                    .enumerate()
-                    .any(|(i, (a, b))| i != axis && a != b)
-            {
-                return Err(err("concatenate non-axis dimensions must match"));
-            }
-            dims[axis] = dims[axis]
-                .checked_add(tensor.shape[axis])
-                .ok_or_else(|| err("concatenate dimension overflow"))?;
         }
+        let types = tensors.iter().map(Tensor::ty).collect::<Vec<_>>();
+        let result_type = TensorType::concatenated(&types, axis)
+            .ok_or_else(|| err("concatenate tensor types are incompatible or overflow"))?;
         if tensors.len() == 1 {
             return Ok(first.clone());
         }
-        first.graph().node(
+        first.graph().node_typed(
             Op::Concatenate { axis },
             tensors.iter().map(|t| t.node_id()).collect(),
-            &dims,
+            result_type,
         )
     }
 }

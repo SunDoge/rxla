@@ -632,8 +632,7 @@ pub(super) struct GatherGradientOp;
     name = "rxla.concatenate",
     format,
     interfaces = [OneResultInterface],
-    attributes = (concatenate_axis: AxisAttr),
-    verifier = "succ"
+    attributes = (concatenate_axis: AxisAttr)
 )]
 pub(super) struct ConcatenateOp;
 

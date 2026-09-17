@@ -4968,7 +4968,13 @@ bare dimension vector: transpose permutes bounds, reduction drops or replaces
 reduced axes, singleton insertion/removal preserves the remaining axes, and
 `broadcast_in_dim` only admits dynamic axes whose bound can be traced to an
 input axis. A newly introduced dynamic broadcast axis requires `broadcast_as`
-with an explicitly bounded target instead of an unbounded `-1`.
+with an explicitly bounded target instead of an unbounded `-1`. Concatenation
+also derives its result in `TensorType`: non-concatenated axes must have equal
+dimensions and bounds, while a dynamic concatenation axis receives the checked
+sum of every operand's maximum extent. Stack is expressed through singleton
+insertion plus that same rule. The Pliron concatenate verifier recomputes this
+type independently, so malformed frontends cannot merely assert a convenient
+result bound.
 
 This is currently an IR and compilation feature, not a promise that every PJRT
 plugin can construct and execute bounded-dynamic buffers. The development ZML

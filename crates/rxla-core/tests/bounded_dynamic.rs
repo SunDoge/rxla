@@ -1,4 +1,4 @@
-use rxla_core::{CacheLimits, Client, Compiler, DType, Dim, Tracer};
+use rxla_core::{CacheLimits, Client, Compiler, DType, Dim, Tensor, Tracer};
 
 #[test]
 fn bounded_shape_survives_tensor_ir_and_elementwise_lowering() {
@@ -78,6 +78,32 @@ fn axis_transforms_keep_dynamic_bounds_attached_to_their_axes() {
     let code = std::str::from_utf8(program.lowered_program().code()).unwrap();
     assert!(code.contains("tensor<4x?x1xf32, #stablehlo.bounds<?, 8, ?>>"));
     assert!(code.contains("tensor<1x1x?xi32, #stablehlo.bounds<?, ?, 8>>"));
+}
+
+#[test]
+fn concatenate_and_stack_infer_bounds_from_all_operands() {
+    let tracer = Tracer::new();
+    let dynamic = tracer
+        .input_shape(&[Dim::Bounded { upper: 8 }, Dim::Static(4)], DType::F32)
+        .unwrap();
+    let fixed = tracer.input(&[2, 4]).unwrap();
+    let concatenated = Tensor::concatenate(&[dynamic.clone(), fixed], 0).unwrap();
+    assert_eq!(concatenated.shape(), [-1, 4]);
+    assert_eq!(concatenated.dim_bound(0), Some(10));
+
+    let stacked = Tensor::stack(&[dynamic.clone(), dynamic], 0).unwrap();
+    assert_eq!(stacked.shape(), [2, -1, 4]);
+    assert_eq!(stacked.dim_bound(1), Some(8));
+
+    let incompatible = tracer
+        .input_shape(&[Dim::Static(2), Dim::Bounded { upper: 5 }], DType::F32)
+        .unwrap();
+    assert!(Tensor::concatenate(&[concatenated.clone(), incompatible], 0).is_err());
+
+    let program = tracer.program(vec![concatenated, stacked]).unwrap();
+    let code = std::str::from_utf8(program.lowered_program().code()).unwrap();
+    assert!(code.contains("tensor<?x4xf32, #stablehlo.bounds<10, ?>>"));
+    assert!(code.contains("tensor<2x?x4xf32, #stablehlo.bounds<?, 8, ?>>"));
 }
 
 #[test]

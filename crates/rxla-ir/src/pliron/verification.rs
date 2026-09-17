@@ -336,6 +336,31 @@ impl Verify for BroadcastOp {
     }
 }
 
+impl Verify for ConcatenateOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let operation = self.get_operation().deref(ctx);
+        let Some(axis) = self.get_attr_concatenate_axis(ctx) else {
+            return pliron::verify_err_noloc!("rxla.concatenate requires an axis");
+        };
+        let operands = operation
+            .operands()
+            .map(|operand| value_type(operand, ctx))
+            .collect::<pliron::result::Result<Vec<_>>>()?;
+        let result = value_type(operation.get_result(0), ctx)?;
+        let Some(expected) = TensorType::concatenated(&operands, axis.value()) else {
+            return pliron::verify_err_noloc!(
+                "rxla.concatenate requires compatible nonempty tensor operands"
+            );
+        };
+        if result != expected {
+            return pliron::verify_err_noloc!(
+                "rxla.concatenate result type must match its operand types and axis"
+            );
+        }
+        Ok(())
+    }
+}
+
 impl Verify for TransposeOp {
     fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
         let operation = self.get_operation().deref(ctx);

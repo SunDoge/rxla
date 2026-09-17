@@ -608,6 +608,19 @@ fn shape_operation_verifiers_reject_invalid_transformed_ir() {
     ));
     assert!(verify_op(&reshape, &graph.ctx).is_err());
 
+    let rhs = graph.parameter(&[2, 4]);
+    let result = graph.tensor_type(&[4, 3], DType::F32);
+    let concatenate = ConcatenateOp::from_operation(Operation::new(
+        &mut graph.ctx,
+        ConcatenateOp::get_concrete_op_info(),
+        vec![result],
+        vec![input, rhs],
+        vec![],
+        0,
+    ));
+    concatenate.set_attr_concatenate_axis(&graph.ctx, AxisAttr::new(0));
+    assert!(verify_op(&concatenate, &graph.ctx).is_err());
+
     let result = graph.tensor_type(&[2, 3], DType::F32);
     let iota = IotaOp::from_operation(Operation::new(
         &mut graph.ctx,

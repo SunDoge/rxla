@@ -263,6 +263,49 @@ impl TensorType {
             dynamic_bounds: Self::normalized_bounds(bounds),
         })
     }
+
+    /// Infer the result of concatenating compatible tensor types along one axis.
+    /// A dynamic concatenation extent receives the sum of all operand maxima.
+    pub fn concatenated(types: &[Self], axis: usize) -> Option<Self> {
+        let first = types.first()?;
+        if axis >= first.dims.len() {
+            return None;
+        }
+        let mut axis_extent = 0_i64;
+        let mut dynamic_axis = false;
+        for ty in types {
+            if ty.dtype != first.dtype || ty.dims.len() != first.dims.len() {
+                return None;
+            }
+            for dimension in 0..first.dims.len() {
+                if dimension != axis
+                    && (ty.dims[dimension] != first.dims[dimension]
+                        || ty.bound(dimension) != first.bound(dimension))
+                {
+                    return None;
+                }
+            }
+            let extent = if ty.dims[axis] == -1 {
+                dynamic_axis = true;
+                ty.bound(axis)?
+            } else {
+                ty.dims[axis]
+            };
+            axis_extent = axis_extent.checked_add(extent)?;
+        }
+
+        let mut dims = first.dims.clone();
+        dims[axis] = if dynamic_axis { -1 } else { axis_extent };
+        let mut bounds = (0..dims.len())
+            .map(|dimension| first.bound(dimension).unwrap_or(-1))
+            .collect::<Vec<_>>();
+        bounds[axis] = if dynamic_axis { axis_extent } else { -1 };
+        Some(Self {
+            dims,
+            dtype: first.dtype,
+            dynamic_bounds: Self::normalized_bounds(bounds),
+        })
+    }
 }
 
 /// Static half-open slice semantics retained as a typed Pliron attribute.
