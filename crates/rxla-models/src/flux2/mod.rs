@@ -29,6 +29,7 @@ pub struct Flux2Config {
     mlp_ratio: i64,
     timestep_channels: i64,
     epsilon: f32,
+    parameter_dtype: DType,
 }
 
 impl Flux2Config {
@@ -46,6 +47,7 @@ impl Flux2Config {
             mlp_ratio: 3,
             timestep_channels: 256,
             epsilon: 1e-6,
+            parameter_dtype: DType::BF16,
         }
     }
 
@@ -64,6 +66,7 @@ impl Flux2Config {
             mlp_ratio: 2,
             timestep_channels: 256,
             epsilon: 1e-6,
+            parameter_dtype: DType::F32,
         }
     }
 
@@ -92,7 +95,8 @@ impl Flux2Config {
             && self.timestep_channels > 0
             && self.timestep_channels % 2 == 0
             && self.epsilon.is_finite()
-            && self.epsilon > 0.0;
+            && self.epsilon > 0.0
+            && matches!(self.parameter_dtype, DType::BF16 | DType::F32);
         if !valid {
             return Err(Error::InvalidModel {
                 kind: ModelDefinitionError::InvalidFlux2Configuration,
@@ -120,6 +124,7 @@ pub fn flux2(
     config: &Flux2Config,
 ) -> Result<Tensor> {
     config.validate()?;
+    let cx = cx.with_parameter_storage_dtype(config.parameter_dtype)?;
     let ([batch, image_tokens, image_width], [context_batch, context_tokens, context_width]) =
         (image.shape(), context.shape())
     else {
@@ -298,6 +303,11 @@ mod tests {
         .unwrap();
         let parameters = model.schema().parameters();
         assert_eq!(parameters.len(), 149);
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter.storage_dtype() == DType::BF16)
+        );
         let elements = parameters
             .iter()
             .map(|parameter| parameter.shape().iter().product::<i64>())
