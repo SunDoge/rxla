@@ -39,11 +39,15 @@ cargo run -p rxla --example basic -- --plugin /path/to/libpjrt_plugin.so
 Loading a PJRT shared library is unsafe because its ABI and provenance must be
 trusted by the application.
 
-For reusable computations, use `Tracer` to construct a `Program`; use
-`Runtime::eval` for ordinary lazy expressions. `Tensor` is the single value
-handle across supported dtypes, including I32 index tensors. Indexing is
-expressed through operations such as `take`, `take_along_axis`, gather lowering,
-and dynamic slicing rather than a separate `Index` type.
+`Tensor` is the primary public programming model. Use `Runtime::eval` to
+materialize one tensor or a tuple, array, or slice of tensors together; use
+`TensorFunction` when one statically shaped computation should be called
+repeatedly. `Tensor` is the single value handle across supported dtypes,
+including I32 index tensors. Indexing is expressed through operations such as
+`take`, `take_along_axis`, gather lowering, and dynamic slicing rather than a
+separate `Index` type. Compiler tooling can still access `Tracer` and `Program`
+through the explicit `rxla::core` module, but they are not parallel user-facing
+graph APIs.
 
 Models are ordinary Rust `apply` functions. Typed input extractors keep shapes
 and dtypes outside the mathematical body, while parameter shapes are inferred
@@ -85,7 +89,7 @@ RXLA separates the frontend from execution without maintaining two competing
 semantic graph representations:
 
 ```text
-Tensor API / Tracer
+Tensor API + parameter/state effects
         ↓
 Pliron SSA IR
         ↓
