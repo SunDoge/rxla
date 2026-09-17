@@ -116,6 +116,25 @@ threshold to include 196-token windows was measured and rejected because it
 increased end-to-end latency; a suitable short-attention fusion/kernel is the
 next optimization target.
 
+### Attention layout audit
+
+The apparent `[B,T,H,D] -> [B,H,T,D] -> [B,T,H,D]` round trip around the
+three global cuDNN attention blocks was checked in XLA's optimized HLO and in
+the Nsight capture. XLA folds the final ABI adaptation into `bitcast` values at
+the custom-call boundary, but real kernels remain where the packed QKV GEMM
+output must be deinterleaved and transposed, and where the cuDNN result must be
+returned to the token-major layout consumed by the output projection.
+
+Across the 55 profiled steady-state executions, the three Q/K/V transpose
+kernels and one result transpose for each global block cost about `0.031 ms`
+per model execution in total (`~0.022 ms` before cuDNN and `~0.009 ms` after
+it). This is real work, but it is far too small to explain the roughly
+`1.5 ms` PyTorch gap. A local transpose-cancellation pass would therefore not
+materially improve this benchmark. Removing this remaining work requires a
+region-level QKV/projection lowering (or a fused kernel with compatible
+producer and consumer layouts), rather than deleting adjacent IR transpose
+operations.
+
 ### Isolated JAX attention backends
 
 JAX 0.11.1's public `jax.nn.dot_product_attention` was measured on the same RTX
