@@ -237,3 +237,35 @@ cargo run -p rxla-safetensors --features model --example flux2_vae_bench -- \
 All 142 required decoder/statistics tensors from the official checkpoint match
 directly. A 2×2 token-grid smoke test produced a 32×32 RGB tensor on the RTX
 5080, compiling in `3.39 s` and executing synchronously in `14.23 ms`.
+
+### End-to-end Klein 4B image generation
+
+Until the Qwen3 text tower is implemented in RXLA, prepare its three-layer
+concatenated context plus deterministic noise through the project `uv`
+environment:
+
+```sh
+uv run python benchmarks/flux2_prompt.py \
+  "a small red fox sitting in fresh snow, cinematic natural light" \
+  /tmp/flux2-prompt.safetensors --height 256 --width 256 --seed 42
+```
+
+The Rust runner keeps the latent on CUDA across all four denoising steps,
+reuses one compiled transformer executable with runtime timestep/step-size
+inputs, decodes with the official VAE, and writes a PNG:
+
+```sh
+cargo run -p rxla-safetensors --features model --example flux2_generate -- \
+  "$PJRT_CUDA_PLUGIN_PATH" \
+  /path/to/flux-2-klein-4b.safetensors \
+  /path/to/vae/diffusion_pytorch_model.safetensors \
+  /tmp/flux2-prompt.safetensors /tmp/flux2.png \
+  --height 256 --width 256
+```
+
+The first September 18, 2026 end-to-end RTX 5080 run produced a coherent fox
+in snow matching the prompt. Transformer compilation took `32.66 s`; four
+denoising steps took `829.84 ms` total; VAE compilation took `8.15 s`; and VAE
+decode plus host synchronization took `43.71 ms`. Checkpoint upload and the
+separate Qwen3 prompt-encoding process are excluded. This is the first image
+quality integration gate, not a tuned serving result.
