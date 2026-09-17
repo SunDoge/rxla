@@ -4,6 +4,15 @@ use super::*;
 use rxla_core::Conv2dOptions;
 use snafu::{OptionExt, ensure};
 
+/// Logical image activation layout accepted by spatial neural-network layers.
+/// Checkpoint convolution kernels remain OIHW in either layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImageLayout {
+    Nchw,
+    #[default]
+    Nhwc,
+}
+
 /// A named embedding lookup with an inferred output shape.
 #[must_use = "layer builders do nothing until apply is called"]
 pub struct Embedding<'a> {
@@ -112,9 +121,15 @@ pub struct Conv2d<'a> {
     kernel: [i64; 2],
     options: Conv2dOptions,
     bias: bool,
+    layout: ImageLayout,
 }
 
 impl Conv2d<'_> {
+    pub fn layout(mut self, layout: ImageLayout) -> Self {
+        self.layout = layout;
+        self
+    }
+
     pub fn options(mut self, options: Conv2dOptions) -> Self {
         self.options = options;
         self
@@ -133,6 +148,7 @@ impl Conv2d<'_> {
             self.kernel,
             self.options,
             self.bias,
+            self.layout,
         )
     }
 }
@@ -144,6 +160,7 @@ pub struct GroupNorm<'a> {
     groups: i64,
     epsilon: f32,
     affine: bool,
+    layout: ImageLayout,
 }
 
 /// Stateful NHWC BatchNorm with inferred channel count.
@@ -153,9 +170,15 @@ pub struct BatchNorm<'a> {
     epsilon: f32,
     momentum: f32,
     training: bool,
+    layout: ImageLayout,
 }
 
 impl BatchNorm<'_> {
+    pub fn layout(mut self, layout: ImageLayout) -> Self {
+        self.layout = layout;
+        self
+    }
+
     pub fn epsilon(mut self, epsilon: f32) -> Self {
         self.epsilon = epsilon;
         self
@@ -173,17 +196,23 @@ impl BatchNorm<'_> {
     }
 
     pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
-        apply_batch_norm_nhwc(
+        apply_batch_norm(
             &mut self.scope,
             input,
             self.epsilon,
             self.momentum,
             self.training,
+            self.layout,
         )
     }
 }
 
 impl GroupNorm<'_> {
+    pub fn layout(mut self, layout: ImageLayout) -> Self {
+        self.layout = layout;
+        self
+    }
+
     pub fn epsilon(mut self, epsilon: f32) -> Self {
         self.epsilon = epsilon;
         self
@@ -195,12 +224,13 @@ impl GroupNorm<'_> {
     }
 
     pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
-        apply_group_norm_nhwc(
+        apply_group_norm(
             &mut self.scope,
             input,
             self.groups,
             self.epsilon,
             self.affine,
+            self.layout,
         )
     }
 }
@@ -319,6 +349,7 @@ impl<'a> Scope<'a> {
             kernel,
             options: Conv2dOptions::default(),
             bias: true,
+            layout: ImageLayout::Nhwc,
         }
     }
 
@@ -328,6 +359,7 @@ impl<'a> Scope<'a> {
             groups,
             epsilon: 1e-5,
             affine: true,
+            layout: ImageLayout::Nhwc,
         }
     }
 
@@ -337,6 +369,7 @@ impl<'a> Scope<'a> {
             epsilon: 1e-5,
             momentum: 0.1,
             training: true,
+            layout: ImageLayout::Nhwc,
         }
     }
 
@@ -406,15 +439,19 @@ fn apply_conv2d(
     kernel: [i64; 2],
     options: Conv2dOptions,
     bias: bool,
+    layout: ImageLayout,
 ) -> Result<Tensor> {
     ensure!(
         input.dtype() == DType::F32 && input.shape().len() == 4,
         InvalidLayerInputSnafu {
             layer: "Conv2d",
-            requirement: "a rank-four F32 NHWC tensor",
+            requirement: "a rank-four F32 image tensor",
         }
     );
-    let in_channels = input.shape()[3];
+    let in_channels = input.shape()[match layout {
+        ImageLayout::Nchw => 1,
+        ImageLayout::Nhwc => 3,
+    }];
     ensure!(
         in_channels > 0
             && out_channels > 0
@@ -436,34 +473,49 @@ fn apply_conv2d(
         ],
         Initializer::kaiming_uniform(),
     )?;
+    let input = match layout {
+        ImageLayout::Nchw => input.transpose(&[0, 2, 3, 1])?,
+        ImageLayout::Nhwc => input.clone(),
+    };
     let output = input.conv2d_oihw(&weight, options)?;
     if !bias {
-        return Ok(output);
+        return match layout {
+            ImageLayout::Nchw => Ok(output.transpose(&[0, 3, 1, 2])?),
+            ImageLayout::Nhwc => Ok(output),
+        };
     }
     let fan_in = (in_channels / options.groups) * kernel[0] * kernel[1];
     let bound = (1.0 / fan_in as f32).sqrt();
     let bias =
         cx.param_initialized("bias", &[out_channels], Initializer::uniform(-bound, bound))?;
-    Ok(output.add(&bias.broadcast_to(output.shape())?)?)
+    let output = output.add(&bias.broadcast_to(output.shape())?)?;
+    match layout {
+        ImageLayout::Nchw => Ok(output.transpose(&[0, 3, 1, 2])?),
+        ImageLayout::Nhwc => Ok(output),
+    }
 }
 
-/// Apply GroupNorm to an NHWC activation using `[C]` affine parameters at
-/// the current lexical scope. Channels are inferred from the input tensor.
-fn apply_group_norm_nhwc(
+/// Apply GroupNorm using `[C]` affine parameters at the current lexical scope.
+/// Channels are inferred according to the declared logical image layout.
+fn apply_group_norm(
     cx: &mut Cx,
     input: &Tensor,
     groups: i64,
     epsilon: f32,
     affine: bool,
+    layout: ImageLayout,
 ) -> Result<Tensor> {
     ensure!(
         input.dtype() == DType::F32 && input.shape().len() == 4,
         InvalidLayerInputSnafu {
             layer: "GroupNorm",
-            requirement: "a rank-four F32 NHWC tensor",
+            requirement: "a rank-four F32 image tensor",
         }
     );
-    let channels = input.shape()[3];
+    let channels = input.shape()[match layout {
+        ImageLayout::Nchw => 1,
+        ImageLayout::Nhwc => 3,
+    }];
     ensure!(
         channels > 0 && groups > 0 && channels % groups == 0,
         InvalidLayerInputSnafu {
@@ -479,18 +531,24 @@ fn apply_group_norm_nhwc(
     } else {
         (None, None)
     };
-    Ok(input
-        .transpose(&[0, 3, 1, 2])?
-        .group_norm(groups, weight.as_ref(), bias.as_ref(), epsilon)?
-        .transpose(&[0, 2, 3, 1])?)
+    let input = match layout {
+        ImageLayout::Nchw => input.clone(),
+        ImageLayout::Nhwc => input.transpose(&[0, 3, 1, 2])?,
+    };
+    let output = input.group_norm(groups, weight.as_ref(), bias.as_ref(), epsilon)?;
+    match layout {
+        ImageLayout::Nchw => Ok(output),
+        ImageLayout::Nhwc => Ok(output.transpose(&[0, 2, 3, 1])?),
+    }
 }
 
-fn apply_batch_norm_nhwc(
+fn apply_batch_norm(
     cx: &mut Cx,
     input: &Tensor,
     epsilon: f32,
     momentum: f32,
     training: bool,
+    layout: ImageLayout,
 ) -> Result<Tensor> {
     ensure!(
         input.dtype() == DType::F32
@@ -501,10 +559,17 @@ fn apply_batch_norm_nhwc(
             && (0.0..=1.0).contains(&momentum),
         InvalidLayerInputSnafu {
             layer: "BatchNorm",
-            requirement: "rank-four F32 NHWC input, positive epsilon, and momentum in [0, 1]",
+            requirement: "rank-four F32 image input, positive epsilon, and momentum in [0, 1]",
         }
     );
-    let channels = input.shape()[3];
+    let channels = input.shape()[match layout {
+        ImageLayout::Nchw => 1,
+        ImageLayout::Nhwc => 3,
+    }];
+    let input = match layout {
+        ImageLayout::Nchw => input.transpose(&[0, 2, 3, 1])?,
+        ImageLayout::Nhwc => input.clone(),
+    };
     let weight = cx.param_initialized("weight", &[channels], Initializer::ones())?;
     let bias = cx.param_initialized("bias", &[channels], Initializer::zeros())?;
     let running_mean = cx.state("running_mean", &[channels], DType::F32)?;
@@ -515,14 +580,18 @@ fn apply_batch_norm_nhwc(
         Initializer::ones(),
     )?;
     if !training {
-        return Ok(input.batch_norm_inference(
+        let output = input.batch_norm_inference(
             3,
             &running_mean.read(cx)?,
             &running_variance.read(cx)?,
             &weight,
             &bias,
             epsilon,
-        )?);
+        )?;
+        return match layout {
+            ImageLayout::Nchw => Ok(output.transpose(&[0, 3, 1, 2])?),
+            ImageLayout::Nhwc => Ok(output),
+        };
     }
 
     let batch = input.batch_norm_training(3, &weight, &bias, epsilon)?;
@@ -537,7 +606,10 @@ fn apply_batch_norm_nhwc(
         .add(&batch.variance.mul_scalar(momentum)?)?;
     running_mean.write(cx, &next_mean)?;
     running_variance.write(cx, &next_variance)?;
-    Ok(batch.output)
+    match layout {
+        ImageLayout::Nchw => Ok(batch.output.transpose(&[0, 3, 1, 2])?),
+        ImageLayout::Nhwc => Ok(batch.output),
+    }
 }
 
 /// Apply LayerNorm over the final `normalized_rank` dimensions, inferring
@@ -609,6 +681,27 @@ mod tests {
         assert_eq!(schema.get("encoder.bias").unwrap().shape(), [4]);
         assert_eq!(schema.get("head.weight").unwrap().shape(), [3, 4]);
         assert_eq!(schema.get("head.bias").unwrap().shape(), [3]);
+    }
+
+    #[test]
+    fn spatial_builders_accept_checkpoint_native_nchw_activations() {
+        let (schema, output) = init(|cx| {
+            let input = cx.input(&[2, 4, 16, 12])?;
+            let convolved = cx
+                .scope("conv")?
+                .conv2d(8, [3, 3])
+                .layout(ImageLayout::Nchw)
+                .apply(&input)?;
+            cx.scope("norm")?
+                .group_norm(4)
+                .layout(ImageLayout::Nchw)
+                .apply(&convolved)
+        })
+        .unwrap();
+
+        assert_eq!(output.shape(), [2, 8, 14, 10]);
+        assert_eq!(schema.get("conv.weight").unwrap().shape(), [8, 4, 3, 3]);
+        assert_eq!(schema.get("norm.weight").unwrap().shape(), [8]);
     }
 
     #[test]

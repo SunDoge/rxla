@@ -20,7 +20,8 @@ mod initializer;
 pub use initializer::Initializer;
 mod layers;
 pub use layers::{
-    BatchNorm, Conv2d, Embedding, GroupNorm, LayerNorm, Linear, QuantizedLinear, RmsNorm,
+    BatchNorm, Conv2d, Embedding, GroupNorm, ImageLayout, LayerNorm, Linear, QuantizedLinear,
+    RmsNorm,
 };
 mod outputs;
 pub use outputs::{ModelOutputValues, ModelOutputs};
