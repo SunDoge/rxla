@@ -225,6 +225,42 @@ pub fn flux2(
     )
 }
 
+/// One reusable device-resident rectified-flow denoising step.
+///
+/// `step_size` has shape `[batch]` and contains `next_timestep - timestep`.
+/// Keeping it as an input lets one compiled executable serve every Klein step;
+/// the transformer prediction and latent update remain in one graph.
+#[allow(clippy::too_many_arguments)]
+pub fn flux2_euler_step(
+    cx: Cx,
+    sample: &Tensor,
+    image_ids: &Tensor,
+    timestep: &Tensor,
+    step_size: &Tensor,
+    context: &Tensor,
+    context_ids: &Tensor,
+    config: &Flux2Config,
+) -> Result<Tensor> {
+    let prediction = flux2(
+        cx,
+        sample,
+        image_ids,
+        timestep,
+        context,
+        context_ids,
+        config,
+    )?;
+    if step_size.dtype() != DType::F32 || step_size.shape() != [sample.shape()[0]] {
+        return Err(Error::InvalidModel {
+            kind: ModelDefinitionError::InvalidFlux2Input,
+        });
+    }
+    let coefficient = step_size
+        .reshape(&[sample.shape()[0], 1, 1])?
+        .broadcast_to(sample.shape())?;
+    Ok(sample.add(&prediction.mul(&coefficient)?)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,5 +349,33 @@ mod tests {
             .map(|parameter| parameter.shape().iter().product::<i64>())
             .sum::<i64>();
         assert_eq!(elements, 3_875_544_576);
+    }
+
+    #[test]
+    fn reusable_euler_step_keeps_one_parameter_tree() {
+        let config = Flux2Config::tiny();
+        let model = Model::new(|cx: Cx| {
+            let image = cx.input(&[1, 3, 8])?;
+            let image_ids = cx.input(&[1, 3, 4])?;
+            let timestep = cx.input(&[1])?;
+            let step_size = cx.input(&[1])?;
+            let context = cx.input(&[1, 2, 12])?;
+            let context_ids = cx.input(&[1, 2, 4])?;
+            flux2_euler_step(
+                cx,
+                &image,
+                &image_ids,
+                &timestep,
+                &step_size,
+                &context,
+                &context_ids,
+                &config,
+            )
+        })
+        .trace()
+        .unwrap();
+        assert_eq!(model.outputs()[0].shape(), [1, 3, 8]);
+        assert_eq!(model.schema().parameters().len(), 25);
+        model.prepare().unwrap();
     }
 }
