@@ -262,6 +262,19 @@ pub(super) struct IfOp;
 pub(super) struct YieldOp;
 
 #[pliron_op(
+    name = "rxla.custom_call",
+    format,
+    interfaces = [OneResultInterface],
+    attributes = (
+        custom_call_target: StringAttr,
+        custom_call_backend_config: StringAttr,
+        custom_call_has_side_effect: StringAttr,
+        custom_call_api_version: StringAttr
+    )
+)]
+pub(super) struct CustomCallOp;
+
+#[pliron_op(
     name = "rxla.integer_binary",
     format = "$0 `, ` $1 ` ` attr($integer_binary, $IntegerBinaryAttr) ` : ` type($0)",
     interfaces = [

@@ -379,6 +379,36 @@ pub(super) fn emit_module(
                 format!("batching_dims = [{dimensions}] x [{dimensions}], ")
             };
             writeln!(body, "    {name} = stablehlo.dot_general {}, {}, {batching}contracting_dims = [{}] x [{}], precision = [HIGHEST, HIGHEST] : ({lhs_type}, {rhs_type}) -> {ty}", operands[0], operands[1], batch_rank + 1, batch_rank).unwrap();
+        } else if let Some(custom) = op.as_ref().downcast_ref::<StableCustomCallOp>() {
+            let target = escape_mlir_string(
+                custom
+                    .get_attr_stable_custom_call_target(ctx)
+                    .unwrap()
+                    .as_str(),
+            );
+            let config = escape_mlir_string(
+                custom
+                    .get_attr_stable_custom_call_backend_config(ctx)
+                    .unwrap()
+                    .as_str(),
+            );
+            let side_effect = custom
+                .get_attr_stable_custom_call_has_side_effect(ctx)
+                .unwrap();
+            let api_version = custom.get_attr_stable_custom_call_api_version(ctx).unwrap();
+            let operand_types = operation
+                .operands()
+                .map(|operand| stablehlo_type(&value_type(ctx, operand)))
+                .collect::<Result<Vec<_>>>()?;
+            writeln!(
+                body,
+                "    {name} = \"stablehlo.custom_call\"({}) {{call_target_name = \"{target}\", has_side_effect = {}, backend_config = \"{config}\", api_version = {} : i32}} : ({}) -> {ty}",
+                operands.join(", "),
+                side_effect.as_str(),
+                api_version.as_str(),
+                operand_types.join(", ")
+            )
+            .unwrap();
         } else if op.as_ref().is::<ChloErfOp>() {
             writeln!(body, "    {name} = chlo.erf {} : {ty} -> {ty}", operands[0]).unwrap();
         } else {

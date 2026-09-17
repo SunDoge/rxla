@@ -3,24 +3,41 @@ impl ProgramIr {
     pub fn append(&mut self, op: &Op, operand_ids: &[SsaId], result: &TensorType) -> Result<SsaId> {
         if let Op::If {
             then_marker,
-            then_value,
+            then_values,
             else_marker,
-            else_value,
-        } = *op
+            else_values,
+            result_types,
+        } = op
         {
             let [predicate] = operand_ids else {
                 return Err(IrError::InvalidValue {
                     operation: "building a conditional predicate",
                 });
             };
-            return self.append_conditional(
+            let values = self.append_conditional(
                 *predicate,
-                then_marker,
-                SsaId::from_index(then_value),
-                else_marker,
-                SsaId::from_index(else_value),
-                result,
-            );
+                *then_marker,
+                &then_values
+                    .iter()
+                    .copied()
+                    .map(SsaId::from_index)
+                    .collect::<Vec<_>>(),
+                *else_marker,
+                &else_values
+                    .iter()
+                    .copied()
+                    .map(SsaId::from_index)
+                    .collect::<Vec<_>>(),
+                result_types,
+            )?;
+            if result_types.first() != Some(result) {
+                return Err(IrError::InvalidValue {
+                    operation: "building conditional result metadata",
+                });
+            }
+            return values.first().copied().ok_or(IrError::InvalidValue {
+                operation: "building conditional results",
+            });
         }
         let operands = operand_ids
             .iter()
@@ -72,6 +89,30 @@ impl IrGraph {
             Op::StateWrite { state_id } => {
                 let [value] = operands else { return None };
                 self.state_write(*value, *state_id)
+            }
+            Op::CustomCall {
+                target,
+                backend_config,
+                has_side_effect,
+                api_version,
+                result_dtype: _,
+            } => {
+                let ty = self.tensor_type(&result.dims, result.dtype);
+                let op = construct_op!(CustomCallOp, &mut self.ctx, vec![ty], operands.to_vec());
+                op.set_attr_custom_call_target(&self.ctx, StringAttr::new(target.clone()));
+                op.set_attr_custom_call_backend_config(
+                    &self.ctx,
+                    StringAttr::new(backend_config.clone()),
+                );
+                op.set_attr_custom_call_has_side_effect(
+                    &self.ctx,
+                    StringAttr::new(has_side_effect.to_string()),
+                );
+                op.set_attr_custom_call_api_version(
+                    &self.ctx,
+                    StringAttr::new(api_version.to_string()),
+                );
+                self.push(op)
             }
             Op::ConstantF32(value) => self.constant_f32(&result.dims, value.to_vec()),
             Op::ConstantI32(value) => self.constant_i32(&result.dims, value.to_vec()),
@@ -233,7 +274,7 @@ impl IrGraph {
                 };
                 self.select_typed(*mask, *on_true, *on_false, result)
             }
-            Op::If { .. } => return None,
+            Op::If { .. } | Op::MultiResult { .. } => return None,
             Op::Reduce {
                 kind: Reduction::Sum,
                 axes,

@@ -56,7 +56,8 @@ pub(crate) fn infer(op: &Op, types: &[DType]) -> Result<DType> {
         ),
         // Structured conditionals are built by the region-aware ProgramIr API;
         // their result dtype comes from matching branch results, not operands.
-        Op::If { .. } => (false, DType::F32),
+        Op::If { .. } | Op::MultiResult { .. } => (false, DType::F32),
+        Op::CustomCall { result_dtype, .. } => (!types.is_empty(), *result_dtype),
         Op::Binary(Binary::Add | Binary::Sub | Binary::Mul | Binary::Maximum | Binary::Minimum) => {
             (
                 types.len() == 2 && all(first) && first != DType::BF16,

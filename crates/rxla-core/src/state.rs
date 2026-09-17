@@ -238,6 +238,29 @@ impl StateGraph {
         validate_slot(&self.owner, self.slots.len(), slot)?;
         Ok(self.slots[slot.index].clone())
     }
+    /// Snapshot the current symbolic versions for structured effect handlers.
+    #[doc(hidden)]
+    pub fn symbolic_state_versions(&self) -> Vec<Tensor> {
+        self.slots.clone()
+    }
+
+    /// Replace symbolic versions without recording another state-write node.
+    /// Used after a structured region has already produced the merged versions.
+    #[doc(hidden)]
+    pub fn replace_symbolic_state_versions(&mut self, versions: &[Tensor]) -> Result<()> {
+        if versions.len() != self.slots.len()
+            || versions.iter().zip(&self.slots).any(|(next, current)| {
+                !next.same_trace(current)
+                    || next.shape() != current.shape()
+                    || next.dtype() != current.dtype()
+            })
+        {
+            return Err(err("symbolic state versions do not match the state graph"));
+        }
+        self.slots.clone_from_slice(versions);
+        Ok(())
+    }
+
     pub fn write(&mut self, slot: &StateSlot, value: &Tensor) -> Result<()> {
         self.record_updates(&[(slot, value.clone())])
     }
@@ -530,6 +553,12 @@ pub struct PreparedStateGraph {
     types: Vec<TensorType>,
 }
 impl PreparedStateGraph {
+    /// Inspect the verified backend-neutral transition, including hidden state
+    /// result roots, without compiling or loading a runtime plugin.
+    pub fn lowered_program(&self) -> &LoweredProgram {
+        &self.lowered
+    }
+
     /// Inspect a visible result before compilation. Hidden state update roots
     /// are excluded; inspect those with state_type/state_layout instead.
     pub fn output_spec(&self, index: usize) -> Option<OutputSpec<'_>> {

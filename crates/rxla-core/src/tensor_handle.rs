@@ -288,6 +288,79 @@ unsafe impl TensorElement for bf16 {
     const DTYPE: DType = DType::BF16;
 }
 
+/// Description of a single-result backend custom call.
+///
+/// The default API version is XLA typed FFI (`4`). A call remains part of the
+/// ordinary lazy tensor trace and can be captured inside structured regions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustomCall {
+    target: String,
+    backend_config: String,
+    has_side_effect: bool,
+    api_version: i32,
+}
+
+impl CustomCall {
+    pub fn typed_ffi(target: impl Into<String>) -> Result<Self> {
+        let target = target.into();
+        if target.is_empty() {
+            return Err(Error::EmptyCustomCallTarget);
+        }
+        Ok(Self {
+            target,
+            backend_config: String::new(),
+            has_side_effect: false,
+            api_version: 4,
+        })
+    }
+
+    pub fn backend_config(mut self, config: impl Into<String>) -> Self {
+        self.backend_config = config.into();
+        self
+    }
+
+    pub fn has_side_effect(mut self, has_side_effect: bool) -> Self {
+        self.has_side_effect = has_side_effect;
+        self
+    }
+
+    pub fn api_version(mut self, api_version: i32) -> Self {
+        self.api_version = api_version;
+        self
+    }
+
+    /// Append this external operation to a lazy tensor trace.
+    ///
+    /// # Safety
+    ///
+    /// The registered XLA handler must obey the declared operand and result
+    /// shapes and dtypes, initialize the complete result buffer, and honor its
+    /// selected custom-call ABI. Violating that contract can cause memory
+    /// corruption in the backend process.
+    pub unsafe fn call(
+        &self,
+        operands: &[&Tensor],
+        result_shape: &[i64],
+        result_dtype: DType,
+    ) -> Result<Tensor> {
+        let first = operands.first().ok_or(Error::EmptyCustomCallOperands)?;
+        if operands.iter().any(|operand| !first.same_trace(operand)) {
+            return Err(Error::CustomCallTraceMismatch);
+        }
+        first.graph().node(
+            Op::CustomCall {
+                target: self.target.clone(),
+                backend_config: self.backend_config.clone(),
+                has_side_effect: self.has_side_effect,
+                api_version: self.api_version,
+                result_dtype,
+            },
+            operands.iter().map(|operand| operand.node_id()).collect(),
+            result_shape,
+        )
+    }
+}
+
 /// Builder for a materialized host Tensor in the current lazy program.
 pub struct TensorBuilder {
     shape: Shape,
@@ -640,6 +713,42 @@ impl Tensor {
         Else: FnOnce(&mut C) -> std::result::Result<Tensor, E>,
         E: From<Error>,
     {
+        Self::cond_many_with(
+            predicate,
+            context,
+            |context| then_branch(context).map(|value| vec![value]),
+            |context| else_branch(context).map(|value| vec![value]),
+        )
+        .map(|mut values| values.remove(0))
+    }
+
+    /// Multi-result structured conditional. Result arity and each result's
+    /// shape/dtype must agree between branches; heterogeneous result tensors
+    /// are supported without packing them into one artificial tensor.
+    pub fn cond_many<Then, Else>(
+        predicate: &Tensor,
+        then_branch: Then,
+        else_branch: Else,
+    ) -> Result<Vec<Tensor>>
+    where
+        Then: FnOnce() -> Result<Vec<Tensor>>,
+        Else: FnOnce() -> Result<Vec<Tensor>>,
+    {
+        Self::cond_many_with(predicate, &mut (), |_| then_branch(), |_| else_branch())
+    }
+
+    /// Context-carrying form of [`Self::cond_many`].
+    pub fn cond_many_with<C, Then, Else, E>(
+        predicate: &Tensor,
+        context: &mut C,
+        then_branch: Then,
+        else_branch: Else,
+    ) -> std::result::Result<Vec<Tensor>, E>
+    where
+        Then: FnOnce(&mut C) -> std::result::Result<Vec<Tensor>, E>,
+        Else: FnOnce(&mut C) -> std::result::Result<Vec<Tensor>, E>,
+        E: From<Error>,
+    {
         if predicate.dtype() != DType::I32 || !predicate.shape().is_empty() {
             return Err(Error::InvalidConditionalPredicate.into());
         }
@@ -648,26 +757,48 @@ impl Tensor {
         let on_true = then_branch(context)?;
         let else_marker = graph.region_marker()?;
         let on_false = else_branch(context)?;
-        if !predicate.same_trace(&on_true) || !predicate.same_trace(&on_false) {
-            return Err(Error::ConditionalTraceMismatch.into());
-        }
-        if on_true.shape() != on_false.shape() || on_true.dtype() != on_false.dtype() {
-            return Err(Error::ConditionalResultMismatch {
-                then_shape: on_true.shape().to_vec(),
-                then_dtype: on_true.dtype(),
-                else_shape: on_false.shape().to_vec(),
-                else_dtype: on_false.dtype(),
+        if on_true.len() != on_false.len() {
+            return Err(Error::ConditionalResultCount {
+                then_count: on_true.len(),
+                else_count: on_false.len(),
             }
             .into());
         }
+        if on_true.is_empty() {
+            return Err(Error::ConditionalResultCount {
+                then_count: 0,
+                else_count: 0,
+            }
+            .into());
+        }
+        if on_true
+            .iter()
+            .chain(&on_false)
+            .any(|value| !predicate.same_trace(value))
+        {
+            return Err(Error::ConditionalTraceMismatch.into());
+        }
+        for (index, (on_true, on_false)) in on_true.iter().zip(&on_false).enumerate() {
+            if on_true.shape() != on_false.shape() || on_true.dtype() != on_false.dtype() {
+                return Err(Error::ConditionalResultMismatch {
+                    index,
+                    then_shape: on_true.shape().to_vec(),
+                    then_dtype: on_true.dtype(),
+                    else_shape: on_false.shape().to_vec(),
+                    else_dtype: on_false.dtype(),
+                }
+                .into());
+            }
+        }
+        let types = on_true.iter().map(Tensor::ty).collect::<Vec<_>>();
         graph
             .conditional(
                 predicate.node_id(),
                 then_marker,
-                on_true.node_id(),
+                &on_true.iter().map(Tensor::node_id).collect::<Vec<_>>(),
                 else_marker,
-                on_false.node_id(),
-                on_true.ty(),
+                &on_false.iter().map(Tensor::node_id).collect::<Vec<_>>(),
+                &types,
             )
             .map_err(E::from)
     }

@@ -3,6 +3,14 @@
 use super::*;
 use cranelift_entity::{PrimaryMap, entity_impl};
 
+fn join_ids(values: &[SsaId]) -> String {
+    values
+        .iter()
+        .map(|value| value.index().to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Pliron state owned by a graph that is being built directly by the frontend.
 /// SSA handles never escape this owner or outlive its Context.
 #[derive(Default)]
@@ -53,21 +61,35 @@ impl ProgramIr {
         self.values.len()
     }
 
-    /// Build a single-result structured conditional from two already-built
+    /// Build a structured conditional from two already-built
     /// root ranges. The ranges are moved, not cloned, into the corresponding
     /// branch regions; values before each marker remain legal captures.
     pub fn append_conditional(
         &mut self,
         predicate: SsaId,
         then_marker: usize,
-        then_value: SsaId,
+        then_values: &[SsaId],
         else_marker: usize,
-        else_value: SsaId,
-        result: &TensorType,
-    ) -> Result<SsaId> {
+        else_values: &[SsaId],
+        results: &[TensorType],
+    ) -> Result<Vec<SsaId>> {
         let predicate = self.value(predicate)?;
-        let then_value_raw = self.value(then_value)?;
-        let else_value_raw = self.value(else_value)?;
+        if results.is_empty()
+            || then_values.len() != results.len()
+            || else_values.len() != results.len()
+        {
+            return Err(IrError::InvalidValue {
+                operation: "building conditional results",
+            });
+        }
+        let then_values_raw = then_values
+            .iter()
+            .map(|&value| self.value(value))
+            .collect::<Result<Vec<_>>>()?;
+        let else_values_raw = else_values
+            .iter()
+            .map(|&value| self.value(value))
+            .collect::<Result<Vec<_>>>()?;
         let then_end = else_marker;
         let else_end = self.values.len();
         if then_marker > then_end || then_end > else_end {
@@ -76,28 +98,25 @@ impl ProgramIr {
             });
         }
 
-        let result_type = self.graph.tensor_type(&result.dims, result.dtype);
+        let result_types = results
+            .iter()
+            .map(|result| self.graph.tensor_type(&result.dims, result.dtype))
+            .collect();
         let conditional = <IfOp as PlironOp>::from_operation(Operation::new(
             &mut self.graph.ctx,
             IfOp::get_concrete_op_info(),
-            vec![result_type],
+            result_types,
             vec![predicate],
             vec![],
             2,
         ));
         conditional.set_attr_then_marker(&self.graph.ctx, StringAttr::new(then_marker.to_string()));
-        conditional.set_attr_then_value(
-            &self.graph.ctx,
-            StringAttr::new(then_value.index().to_string()),
-        );
+        conditional.set_attr_then_value(&self.graph.ctx, StringAttr::new(join_ids(then_values)));
         conditional.set_attr_else_marker(&self.graph.ctx, StringAttr::new(else_marker.to_string()));
-        conditional.set_attr_else_value(
-            &self.graph.ctx,
-            StringAttr::new(else_value.index().to_string()),
-        );
+        conditional.set_attr_else_value(&self.graph.ctx, StringAttr::new(join_ids(else_values)));
         for (region_index, (start, end, yielded)) in [
-            (then_marker, then_end, then_value_raw),
-            (else_marker, else_end, else_value_raw),
+            (then_marker, then_end, then_values_raw),
+            (else_marker, else_end, else_values_raw),
         ]
         .into_iter()
         .enumerate()
@@ -143,7 +162,7 @@ impl ProgramIr {
                 &mut self.graph.ctx,
                 YieldOp::get_concrete_op_info(),
                 vec![],
-                vec![yielded],
+                yielded,
                 vec![],
                 0,
             ));
@@ -151,8 +170,12 @@ impl ProgramIr {
                 .get_operation()
                 .insert_at_back(block, &self.graph.ctx);
         }
-        let value = self.graph.push_results(conditional)[0];
-        Ok(self.values.push(value))
+        Ok(self
+            .graph
+            .push_results(conditional)
+            .into_iter()
+            .map(|value| self.values.push(value))
+            .collect())
     }
 
     #[doc(hidden)]

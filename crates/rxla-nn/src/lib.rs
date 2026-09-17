@@ -516,10 +516,54 @@ impl Cx {
         Then: FnOnce(&mut Cx) -> Result<Tensor>,
         Else: FnOnce(&mut Cx) -> Result<Tensor>,
     {
+        self.cond_many(
+            predicate,
+            |cx| then_branch(cx).map(|value| vec![value]),
+            |cx| else_branch(cx).map(|value| vec![value]),
+        )
+        .map(|mut values| values.remove(0))
+    }
+
+    /// Multi-result conditional that also treats resident state versions as
+    /// hidden region results. Each branch starts from the same state snapshot;
+    /// the selected versions become visible to subsequent model operations.
+    pub fn cond_many<Then, Else>(
+        &mut self,
+        predicate: &Tensor,
+        then_branch: Then,
+        else_branch: Else,
+    ) -> Result<Vec<Tensor>>
+    where
+        Then: FnOnce(&mut Cx) -> Result<Vec<Tensor>>,
+        Else: FnOnce(&mut Cx) -> Result<Vec<Tensor>>,
+    {
+        let initial_state = self.graph.symbolic_state_versions();
+        let mut visible_results = None;
         self.conditional_depth += 1;
-        let result = Tensor::cond_with(predicate, self, then_branch, else_branch);
+        let result: Result<Vec<Tensor>> = Tensor::cond_many_with(
+            predicate,
+            self,
+            |cx| {
+                let mut outputs = then_branch(cx)?;
+                visible_results = Some(outputs.len());
+                outputs.extend(cx.graph.symbolic_state_versions());
+                cx.graph.replace_symbolic_state_versions(&initial_state)?;
+                Ok(outputs)
+            },
+            |cx| {
+                let mut outputs = else_branch(cx)?;
+                outputs.extend(cx.graph.symbolic_state_versions());
+                cx.graph.replace_symbolic_state_versions(&initial_state)?;
+                Ok(outputs)
+            },
+        );
         self.conditional_depth -= 1;
-        result
+        self.graph.replace_symbolic_state_versions(&initial_state)?;
+        let mut outputs = result?;
+        let visible_results = visible_results.unwrap_or(0);
+        let merged_state = outputs.split_off(visible_results);
+        self.graph.replace_symbolic_state_versions(&merged_state)?;
+        Ok(outputs)
     }
 
     /// Enter several lexical path segments with one RAII guard.
@@ -739,12 +783,6 @@ impl State {
 
     pub fn write(&self, cx: &mut Cx, value: &Tensor) -> Result<()> {
         cx.validate_state(self)?;
-        ensure!(
-            cx.conditional_depth == 0,
-            ConditionalEffectSnafu {
-                effect: "state mutation"
-            }
-        );
         Ok(cx.graph.write(&self.slot, value)?)
     }
 
@@ -1134,7 +1172,7 @@ mod tests {
 
     #[test]
     fn model_conditional_hoists_branch_parameters_into_the_abi() {
-        let applied = Model::new(|cx: &mut Cx| {
+        let applied = Model::new(|cx: &mut Cx| -> Result<Tensor> {
             let predicate = cx.input_dtype(&[], DType::I32)?;
             cx.cond(
                 &predicate,
@@ -1152,32 +1190,33 @@ mod tests {
     }
 
     #[test]
-    fn model_conditional_rejects_unmodelled_state_mutation() {
-        let result = Model::new(|cx: &mut Cx| {
+    fn model_conditional_merges_state_versions_as_hidden_results() {
+        let applied = Model::new(|cx: &mut Cx| -> Result<Tensor> {
             let state = cx.state("counter", &[], DType::F32)?;
             let value = state.read(cx)?;
             let predicate = cx.input_dtype(&[], DType::I32)?;
-            cx.cond(
+            let visible = cx.cond(
                 &predicate,
                 |cx| {
-                    state.write(cx, &value.add_scalar(1.0)?)?;
-                    Ok(value.clone())
+                    let next = value.add_scalar(1.0)?;
+                    state.write(cx, &next)?;
+                    Ok(next)
                 },
-                |_| Ok(value.clone()),
-            )
+                |cx| {
+                    let next = value.add_scalar(-1.0)?;
+                    state.write(cx, &next)?;
+                    Ok(next)
+                },
+            )?;
+            Ok(visible.add(&state.read(cx)?)?)
         })
-        .trace();
-        let error = match result {
-            Ok(_) => panic!("conditional state mutation should fail"),
-            Err(error) => error,
-        };
+        .trace()
+        .unwrap();
 
-        assert!(matches!(
-            error,
-            Error::ConditionalEffect {
-                effect: "state mutation"
-            }
-        ));
+        let prepared = applied.prepare_stateful().unwrap();
+        let mlir = std::str::from_utf8(prepared.lowered_program().code()).unwrap();
+        assert!(mlir.contains("stablehlo.if"));
+        assert!(mlir.contains("tensor<f32>, tensor<f32>"));
     }
 
     #[test]

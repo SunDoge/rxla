@@ -135,6 +135,37 @@ impl Verify for IfOp {
     }
 }
 
+impl Verify for CustomCallOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let Some(target) = self.get_attr_custom_call_target(ctx) else {
+            return pliron::verify_err_noloc!("rxla.custom_call requires a target");
+        };
+        if target.as_str().is_empty() {
+            return pliron::verify_err_noloc!("rxla.custom_call target must not be empty");
+        }
+        let Some(side_effect) = self.get_attr_custom_call_has_side_effect(ctx) else {
+            return pliron::verify_err_noloc!("rxla.custom_call requires a side-effect flag");
+        };
+        if side_effect.as_str().parse::<bool>().is_err() {
+            return pliron::verify_err_noloc!(
+                "rxla.custom_call side-effect flag must be true or false"
+            );
+        }
+        let Some(api_version) = self.get_attr_custom_call_api_version(ctx) else {
+            return pliron::verify_err_noloc!("rxla.custom_call requires an API version");
+        };
+        if api_version.as_str().parse::<i32>().is_err() {
+            return pliron::verify_err_noloc!(
+                "rxla.custom_call API version must be an i32 integer"
+            );
+        }
+        if self.get_attr_custom_call_backend_config(ctx).is_none() {
+            return pliron::verify_err_noloc!("rxla.custom_call requires backend config");
+        }
+        Ok(())
+    }
+}
+
 impl Verify for ConstantOp {
     fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
         let Some(value) = self.get_attr_value(ctx) else {

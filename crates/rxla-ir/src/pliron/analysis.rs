@@ -35,9 +35,28 @@ impl SemanticProgram {
 
     pub fn lower(&self, target: LoweringTarget) -> Result<StableHloProgram> {
         let mut ir = ProgramIr::default();
-        for node in &self.nodes {
+        for (index, node) in self.nodes.iter().enumerate() {
+            if let Op::MultiResult {
+                owner,
+                index: result_index,
+            } = node.op
+            {
+                let id = SsaId::from_index(index);
+                let value = ir.values.get(id).copied().ok_or(IrError::InvalidValue {
+                    operation: "reconstructing a multi-result operation",
+                })?;
+                if owner + result_index != index
+                    || result_index == 0
+                    || ir.graph.value_type(value)? != node.ty
+                {
+                    return Err(IrError::InvalidValue {
+                        operation: "reconstructing multi-result metadata",
+                    });
+                }
+                continue;
+            }
             let id = ir.append(&node.op, &node.operands, &node.ty)?;
-            debug_assert_eq!(id.index(), ir.values.len() - 1);
+            debug_assert_eq!(id.index(), index);
         }
         ir.stablehlo_program_for(&self.outputs, self.preserve_all_inputs, target)
     }
@@ -49,6 +68,30 @@ impl ProgramIr {
         self.values
             .iter()
             .map(|(id, &value)| {
+                let operation = value.defining_op().ok_or(IrError::InvalidValue {
+                    operation: "projecting Pliron semantics",
+                })?;
+                if Operation::is_op::<IfOp>(operation, &self.graph.ctx) {
+                    let results = operation
+                        .deref(&self.graph.ctx)
+                        .results()
+                        .collect::<Vec<_>>();
+                    let result_index = results.iter().position(|&result| result == value).ok_or(
+                        IrError::InvalidValue {
+                            operation: "projecting a conditional result",
+                        },
+                    )?;
+                    if result_index != 0 {
+                        return Ok(SemanticNode {
+                            op: Op::MultiResult {
+                                owner: id.index() - result_index,
+                                index: result_index,
+                            },
+                            operands: Vec::new(),
+                            ty: self.graph.value_type(value)?,
+                        });
+                    }
+                }
                 Ok(SemanticNode {
                     op: self.graph.semantic_op(value)?,
                     operands: self.operand_ids(id)?,
@@ -172,11 +215,79 @@ impl IrGraph {
                         .map_err(|_| IrError::MalformedAttribute { attribute: $name })?
                 };
             }
+            fn parse_values(value: &str) -> std::result::Result<Vec<usize>, IrError> {
+                value
+                    .split(',')
+                    .map(|value| {
+                        value.parse().map_err(|_| IrError::MalformedAttribute {
+                            attribute: "if yielded values",
+                        })
+                    })
+                    .collect()
+            }
+            let operation = value.get_operation().deref(&self.ctx);
             return Ok(Op::If {
                 then_marker: parse!(get_attr_then_marker, "if then marker"),
-                then_value: parse!(get_attr_then_value, "if then value"),
+                then_values: parse_values(
+                    value
+                        .get_attr_then_value(&self.ctx)
+                        .ok_or(IrError::MalformedAttribute {
+                            attribute: "if then values",
+                        })?
+                        .as_str(),
+                )?,
                 else_marker: parse!(get_attr_else_marker, "if else marker"),
-                else_value: parse!(get_attr_else_value, "if else value"),
+                else_values: parse_values(
+                    value
+                        .get_attr_else_value(&self.ctx)
+                        .ok_or(IrError::MalformedAttribute {
+                            attribute: "if else values",
+                        })?
+                        .as_str(),
+                )?,
+                result_types: operation
+                    .results()
+                    .map(|result| self.value_type(result))
+                    .collect::<Result<Vec<_>>>()?,
+            });
+        }
+        if let Some(custom) = op.downcast_ref::<CustomCallOp>() {
+            let target = required_attr!(custom, get_attr_custom_call_target, "custom call target")
+                .as_str()
+                .to_owned();
+            let backend_config = required_attr!(
+                custom,
+                get_attr_custom_call_backend_config,
+                "custom call backend config"
+            )
+            .as_str()
+            .to_owned();
+            let has_side_effect = required_attr!(
+                custom,
+                get_attr_custom_call_has_side_effect,
+                "custom call side-effect flag"
+            )
+            .as_str()
+            .parse()
+            .map_err(|_| IrError::MalformedAttribute {
+                attribute: "custom call side-effect flag",
+            })?;
+            let api_version = required_attr!(
+                custom,
+                get_attr_custom_call_api_version,
+                "custom call API version"
+            )
+            .as_str()
+            .parse()
+            .map_err(|_| IrError::MalformedAttribute {
+                attribute: "custom call API version",
+            })?;
+            return Ok(Op::CustomCall {
+                target,
+                backend_config,
+                has_side_effect,
+                api_version,
+                result_dtype: self.value_type(value)?.dtype,
             });
         }
         if let Some(constant) = op.downcast_ref::<ConstantOp>() {

@@ -87,13 +87,36 @@ pub(super) fn sdy_mesh(index: usize, mesh: &Mesh) -> String {
     )
 }
 
-fn escape_mlir_string(value: &str) -> String {
+pub(super) fn escape_mlir_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 pub(super) fn reachable_values(ctx: &Context, outputs: &[Value]) -> Result<HashSet<Value>> {
     let mut reachable = HashSet::new();
     let mut worklist = outputs.to_vec();
+    for operation in outputs
+        .first()
+        .and_then(|value| value.defining_op())
+        .and_then(|operation| operation.deref(ctx).get_parent_op(ctx))
+        .into_iter()
+        .flat_map(|module| {
+            module
+                .deref(ctx)
+                .get_region(0)
+                .deref(ctx)
+                .iter(ctx)
+                .flat_map(|block| block.deref(ctx).iter(ctx))
+        })
+    {
+        if let Some(custom) =
+            Operation::get_op_dyn(operation, ctx).downcast_ref::<StableCustomCallOp>()
+            && custom
+                .get_attr_stable_custom_call_has_side_effect(ctx)
+                .is_some_and(|value| value.as_str() == "true")
+        {
+            worklist.extend(operation.deref(ctx).results());
+        }
+    }
     while let Some(value) = worklist.pop() {
         if !reachable.insert(value) {
             continue;

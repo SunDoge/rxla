@@ -131,6 +131,20 @@ pub(super) struct ExportOp;
 pub(super) struct StableIfOp;
 
 #[pliron_op(
+    name = "stablehlo.custom_call",
+    format,
+    interfaces = [OneResultInterface],
+    attributes = (
+        stable_custom_call_target: StringAttr,
+        stable_custom_call_backend_config: StringAttr,
+        stable_custom_call_has_side_effect: StringAttr,
+        stable_custom_call_api_version: StringAttr
+    ),
+    verifier = "succ"
+)]
+pub(super) struct StableCustomCallOp;
+
+#[pliron_op(
     name = "stablehlo.return",
     format,
     interfaces = [NResultsInterface<0>, IsTerminatorInterface],

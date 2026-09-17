@@ -217,14 +217,28 @@ pub enum Error {
     #[snafu(display("conditional branches must belong to the predicate trace"))]
     ConditionalTraceMismatch,
     #[snafu(display(
-        "conditional branch results differ: then is {then_shape:?} {then_dtype:?}, else is {else_shape:?} {else_dtype:?}"
+        "conditional branch result counts differ: then has {then_count}, else has {else_count}"
+    ))]
+    ConditionalResultCount {
+        then_count: usize,
+        else_count: usize,
+    },
+    #[snafu(display(
+        "conditional branch result {index} differs: then is {then_shape:?} {then_dtype:?}, else is {else_shape:?} {else_dtype:?}"
     ))]
     ConditionalResultMismatch {
+        index: usize,
         then_shape: Vec<i64>,
         then_dtype: DType,
         else_shape: Vec<i64>,
         else_dtype: DType,
     },
+    #[snafu(display("custom call target must not be empty"))]
+    EmptyCustomCallTarget,
+    #[snafu(display("a tensor custom call requires at least one tensor operand"))]
+    EmptyCustomCallOperands,
+    #[snafu(display("all custom call operands must belong to one trace"))]
+    CustomCallTraceMismatch,
 }
 
 /// Result type shared by tensor construction, transformation and execution APIs.
@@ -238,7 +252,7 @@ pub use frontend::{
     RuntimeBuilder, TensorFunction, Tracer,
 };
 pub use tensor_handle::{
-    Storage, StorageError, StorageKind, StorageResult, TensorBuildError, TensorBuilder,
+    CustomCall, Storage, StorageError, StorageKind, StorageResult, TensorBuildError, TensorBuilder,
     TensorDescriptor, TensorDownloadError, TensorElement, TensorLayout,
 };
 fn err(message: impl Into<String>) -> Error {
@@ -299,24 +313,28 @@ impl Graph {
         &self,
         predicate: rxla_ir::SsaId,
         then_marker: usize,
-        then_value: rxla_ir::SsaId,
+        then_values: &[rxla_ir::SsaId],
         else_marker: usize,
-        else_value: rxla_ir::SsaId,
-        ty: TensorType,
-    ) -> Result<Tensor> {
-        let id = self
+        else_values: &[rxla_ir::SsaId],
+        types: &[TensorType],
+    ) -> Result<Vec<Tensor>> {
+        let ids = self
             .0
             .lock()
             .map_err(|_| Error::GraphLockPoisoned)?
             .append_conditional(
                 predicate,
                 then_marker,
-                then_value,
+                then_values,
                 else_marker,
-                else_value,
-                &ty,
+                else_values,
+                types,
             )?;
-        Ok(Tensor::symbolic(self.clone(), id, &ty.dims, ty.dtype))
+        Ok(ids
+            .into_iter()
+            .zip(types)
+            .map(|(id, ty)| Tensor::symbolic(self.clone(), id, &ty.dims, ty.dtype))
+            .collect())
     }
 
     fn set_sharding(&self, id: rxla_ir::SsaId, sharding: Sharding) -> Result<()> {

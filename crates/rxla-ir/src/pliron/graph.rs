@@ -76,6 +76,16 @@ impl IrGraph {
     pub(super) fn reachable_values(&self, outputs: &[Value]) -> Result<HashSet<Value>> {
         let mut reachable = HashSet::new();
         let mut worklist = outputs.to_vec();
+        for operation in self.operations() {
+            if let Some(custom) =
+                Operation::get_op_dyn(operation, &self.ctx).downcast_ref::<CustomCallOp>()
+                && custom
+                    .get_attr_custom_call_has_side_effect(&self.ctx)
+                    .is_some_and(|value| value.as_str() == "true")
+            {
+                worklist.extend(operation.deref(&self.ctx).results());
+            }
+        }
         while let Some(value) = worklist.pop() {
             if !reachable.insert(value) {
                 continue;

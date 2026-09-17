@@ -1509,6 +1509,28 @@ mod tests {
     }
 
     #[test]
+    fn structured_tensor_conditional_preserves_heterogeneous_results() {
+        let tracer = Tracer::new();
+        let predicate = tracer.input_i32(&[]).unwrap();
+        let left = tracer.input(&[2]).unwrap();
+        let right = tracer.input(&[2]).unwrap();
+        let then_index = tracer.input_i32(&[1]).unwrap();
+        let else_index = tracer.input_i32(&[1]).unwrap();
+        let outputs = Tensor::cond_many(
+            &predicate,
+            || Ok(vec![left.add_scalar(1.0)?, then_index]),
+            || Ok(vec![right.mul_scalar(2.0)?, else_index]),
+        )
+        .unwrap();
+
+        let program = tracer.program(outputs).unwrap();
+        let mlir = str::from_utf8(program.lowered.code()).unwrap();
+        assert_eq!(program.output_count(), 2);
+        assert!(mlir.contains("stablehlo.if"));
+        assert!(mlir.contains("tensor<2xf32>, tensor<1xi32>"));
+    }
+
+    #[test]
     fn structured_tensor_conditional_checks_branch_metadata() {
         let tracer = Tracer::new();
         let predicate = tracer.input_i32(&[]).unwrap();
@@ -1523,6 +1545,41 @@ mod tests {
             error,
             crate::Error::ConditionalResultMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn typed_custom_call_survives_semantic_lowering() {
+        let tracer = Tracer::new();
+        let input = tracer.input(&[4]).unwrap();
+        let call = crate::CustomCall::typed_ffi("rxla.test.identity")
+            .unwrap()
+            .backend_config("opaque=1");
+        // SAFETY: this test only lowers the declared ABI and never dispatches
+        // an external handler.
+        let output = unsafe { call.call(&[&input], &[4], DType::F32) }.unwrap();
+
+        let program = tracer.program(vec![output]).unwrap();
+        let mlir = str::from_utf8(program.lowered.code()).unwrap();
+        assert!(mlir.contains("\"stablehlo.custom_call\""));
+        assert!(mlir.contains("call_target_name = \"rxla.test.identity\""));
+        assert!(mlir.contains("backend_config = \"opaque=1\""));
+        assert!(mlir.contains("api_version = 4 : i32"));
+    }
+
+    #[test]
+    fn side_effecting_custom_call_is_not_pruned_with_its_result() {
+        let tracer = Tracer::new();
+        let input = tracer.input(&[4]).unwrap();
+        let call = crate::CustomCall::typed_ffi("rxla.test.observe")
+            .unwrap()
+            .has_side_effect(true);
+        // SAFETY: lowering only; no handler is dispatched by this test.
+        let _unused = unsafe { call.call(&[&input], &[4], DType::F32) }.unwrap();
+
+        let program = tracer.program(vec![input]).unwrap();
+        let mlir = str::from_utf8(program.lowered.code()).unwrap();
+        assert!(mlir.contains("call_target_name = \"rxla.test.observe\""));
+        assert!(mlir.contains("has_side_effect = true"));
     }
 
     #[test]

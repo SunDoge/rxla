@@ -4924,3 +4924,25 @@ channels per group. Use transpose for NCHW/OIHW model data. Bias and activation
 are separate tensor operations; no inference-only fused API is required.
 Current validation is CPU correctness, not a convolution performance benchmark
 or proof of complete YOLO/model-import support.
+
+`CustomCall::typed_ffi(name)` is the explicit backend-extension boundary. It
+records a single-result `stablehlo.custom_call` with XLA typed-FFI API version 4;
+opaque backend config, side-effect declaration and legacy API-version override
+remain explicit builder choices. `call` is unsafe because RXLA can verify the
+IR contract but cannot prove that an externally registered CPU/CUDA handler
+obeys the declared buffer shapes, dtypes and ABI. All operands must share one
+lazy trace, and output shape/dtype are part of the recorded semantic IR, so
+semantic snapshots and structured regions preserve the call. This is the route
+for kernels such as FlashAttention and specialized KV-cache operations; handler
+registration and plugin packaging deliberately remain outside `rxla-core`.
+
+Structured conditionals are native multi-result SSA operations. `Tensor::cond`
+is the single-result convenience API; `Tensor::cond_many` preserves heterogeneous
+result shapes and dtypes in one `stablehlo.if`, with semantic snapshots using
+result aliases rather than duplicating the operation. `Cx::cond` additionally
+threads every existing resident-state version as a hidden region result: both
+branches start from the same snapshot and only the selected branch's versions
+become visible afterward. State declaration and RNG stream advancement inside a
+conditional remain rejected because they require separate schema and RNG-effect
+merge semantics. This multi-result foundation is also required for loop-carried
+index, user carry and output buffers in a future native `while`/`scan`.

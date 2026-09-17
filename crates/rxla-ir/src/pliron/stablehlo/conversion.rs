@@ -76,6 +76,44 @@ impl DialectConversion for RxlaToStableHlo {
             rewriter.replace_operation(ctx, op, target.get_operation());
             return Ok(());
         }
+        if let Some(source) = source.as_ref().downcast_ref::<CustomCallOp>() {
+            let target = <StableCustomCallOp as PlironOp>::from_operation(Operation::new(
+                ctx,
+                StableCustomCallOp::get_concrete_op_info(),
+                result_types,
+                operands,
+                vec![],
+                0,
+            ));
+            target.set_attr_stable_custom_call_target(
+                ctx,
+                source.get_attr_custom_call_target(ctx).unwrap().clone(),
+            );
+            target.set_attr_stable_custom_call_backend_config(
+                ctx,
+                source
+                    .get_attr_custom_call_backend_config(ctx)
+                    .unwrap()
+                    .clone(),
+            );
+            target.set_attr_stable_custom_call_has_side_effect(
+                ctx,
+                source
+                    .get_attr_custom_call_has_side_effect(ctx)
+                    .unwrap()
+                    .clone(),
+            );
+            target.set_attr_stable_custom_call_api_version(
+                ctx,
+                source
+                    .get_attr_custom_call_api_version(ctx)
+                    .unwrap()
+                    .clone(),
+            );
+            rewriter.insert_operation(ctx, target.get_operation());
+            rewriter.replace_operation(ctx, op, target.get_operation());
+            return Ok(());
+        }
         macro_rules! replace {
             ($target:ty) => {{
                 let target = <$target as PlironOp>::from_operation(Operation::new(
@@ -633,6 +671,7 @@ pub(super) fn supports_source_operation(op: &dyn PlironOp) -> bool {
         || op.is::<StateWriteOp>()
         || op.is::<IfOp>()
         || op.is::<YieldOp>()
+        || op.is::<CustomCallOp>()
         || op.is::<ConstantOp>()
         || op.is::<IotaOp>()
         || op.is::<IntegerBinaryOp>()

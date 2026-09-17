@@ -280,9 +280,24 @@ pub enum Op {
     /// canonical SSA order and are moved into regions during construction.
     If {
         then_marker: usize,
-        then_value: usize,
+        then_values: Vec<usize>,
         else_marker: usize,
-        else_value: usize,
+        else_values: Vec<usize>,
+        result_types: Vec<TensorType>,
+    },
+    /// Semantic placeholder for a non-leading result already created by the
+    /// multi-result operation at `owner`.
+    MultiResult {
+        owner: usize,
+        index: usize,
+    },
+    /// A backend-registered XLA FFI call with one tensor result.
+    CustomCall {
+        target: String,
+        backend_config: String,
+        has_side_effect: bool,
+        api_version: i32,
+        result_dtype: DType,
     },
     ArgMax {
         axis: usize,
