@@ -8,6 +8,7 @@ pub(crate) fn infer(op: &Op, types: &[DType]) -> Result<DType> {
     let (valid, output) = match op {
         Op::ConstantF32(_) => (types.is_empty(), DType::F32),
         Op::ConstantI32(_) | Op::Iota { .. } => (types.is_empty(), DType::I32),
+        Op::GetDimensionSize { .. } => (types.len() == 1, DType::I32),
         Op::IndexToFloat => (types == [DType::I32], DType::F32),
         Op::Bf16ToFloat => (types == [DType::BF16], DType::F32),
         Op::Convert { dtype } => (

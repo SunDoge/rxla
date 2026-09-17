@@ -166,6 +166,26 @@ impl Verify for CustomCallOp {
     }
 }
 
+impl Verify for GetDimensionSizeOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let operation = self.get_operation().deref(ctx);
+        let input = value_type(operation.get_operand(0), ctx)?;
+        let result = value_type(operation.get_result(0), ctx)?;
+        let Some(axis) = self.get_attr_dimension_size_axis(ctx) else {
+            return pliron::verify_err_noloc!("rxla.get_dimension_size requires a dimension axis");
+        };
+        if axis.value() >= input.dims.len() {
+            return pliron::verify_err_noloc!(
+                "rxla.get_dimension_size axis must be within the input rank"
+            );
+        }
+        if result.dtype != DType::I32 || !result.dims.is_empty() {
+            return pliron::verify_err_noloc!("rxla.get_dimension_size result must be scalar I32");
+        }
+        Ok(())
+    }
+}
+
 impl Verify for ConstantOp {
     fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
         let Some(value) = self.get_attr_value(ctx) else {

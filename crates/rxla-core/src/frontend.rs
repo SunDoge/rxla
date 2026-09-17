@@ -1531,6 +1531,41 @@ mod tests {
     }
 
     #[test]
+    fn runtime_shape_values_remain_in_control_flow_ir() {
+        let tracer = Tracer::new();
+        let input = tracer.input(&[2, 3]).unwrap();
+        assert_eq!(input.static_dim(0), Some(2));
+        assert_eq!(input.static_dim(2), None);
+        let rows = input.dim(0).unwrap();
+        let output = Tensor::cond(&rows, || input.add_scalar(1.0), || input.neg()).unwrap();
+        let shape = input.shape_tensor().unwrap();
+
+        let program = tracer.program(vec![output, shape]).unwrap();
+        let mlir = str::from_utf8(program.lowered.code()).unwrap();
+        assert_eq!(program.output_spec(1).unwrap().shape, [2]);
+        assert_eq!(program.output_spec(1).unwrap().dtype, DType::I32);
+        assert_eq!(mlir.matches("stablehlo.get_dimension_size").count(), 3);
+        assert!(mlir.contains("stablehlo.if"));
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
+    fn runtime_shape_values_compile_and_execute_on_xla_cpu() {
+        let tracer = Tracer::new();
+        let input = tracer.input(&[2, 3]).unwrap();
+        let program = tracer.program(vec![input.shape_tensor().unwrap()]).unwrap();
+        let client = unsafe {
+            Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
+        }
+        .unwrap();
+        let buffer = client.buffer(&[2, 3], &[0.0; 6]).unwrap();
+        let mut runtime = Runtime::new(client).unwrap();
+        let outputs = program.run_buffers(&mut runtime, &[&buffer]).unwrap();
+
+        assert_eq!(outputs[0].to_vec::<i32>().unwrap(), [2, 3]);
+    }
+
+    #[test]
     fn structured_tensor_conditional_checks_branch_metadata() {
         let tracer = Tracer::new();
         let predicate = tracer.input_i32(&[]).unwrap();

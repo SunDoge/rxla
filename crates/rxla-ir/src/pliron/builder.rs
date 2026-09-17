@@ -117,6 +117,13 @@ impl IrGraph {
             Op::ConstantF32(value) => self.constant_f32(&result.dims, value.to_vec()),
             Op::ConstantI32(value) => self.constant_i32(&result.dims, value.to_vec()),
             Op::Iota { axis } => self.iota_typed(result, *axis),
+            Op::GetDimensionSize { axis } => {
+                let [input] = operands else { return None };
+                let ty = self.tensor_type(&[], DType::I32);
+                let op = construct_op!(GetDimensionSizeOp, &mut self.ctx, vec![ty], vec![*input]);
+                op.set_attr_dimension_size_axis(&self.ctx, AxisAttr::new(*axis));
+                self.push(op)
+            }
             Op::IntegerBinary(operation) => {
                 let [lhs, rhs] = operands else { return None };
                 self.integer_binary_typed(*lhs, *rhs, result, *operation)

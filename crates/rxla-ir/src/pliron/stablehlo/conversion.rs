@@ -114,6 +114,23 @@ impl DialectConversion for RxlaToStableHlo {
             rewriter.replace_operation(ctx, op, target.get_operation());
             return Ok(());
         }
+        if let Some(source) = source.as_ref().downcast_ref::<GetDimensionSizeOp>() {
+            let target = <StableGetDimensionSizeOp as PlironOp>::from_operation(Operation::new(
+                ctx,
+                StableGetDimensionSizeOp::get_concrete_op_info(),
+                result_types,
+                operands,
+                vec![],
+                0,
+            ));
+            target.set_attr_stable_dimension_size_axis(
+                ctx,
+                source.get_attr_dimension_size_axis(ctx).unwrap().clone(),
+            );
+            rewriter.insert_operation(ctx, target.get_operation());
+            rewriter.replace_operation(ctx, op, target.get_operation());
+            return Ok(());
+        }
         macro_rules! replace {
             ($target:ty) => {{
                 let target = <$target as PlironOp>::from_operation(Operation::new(
@@ -674,6 +691,7 @@ pub(super) fn supports_source_operation(op: &dyn PlironOp) -> bool {
         || op.is::<CustomCallOp>()
         || op.is::<ConstantOp>()
         || op.is::<IotaOp>()
+        || op.is::<GetDimensionSizeOp>()
         || op.is::<IntegerBinaryOp>()
         || op.is::<AttentionOp>()
         || op.is::<ConvertOp>()

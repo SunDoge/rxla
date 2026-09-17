@@ -4946,3 +4946,13 @@ become visible afterward. State declaration and RNG stream advancement inside a
 conditional remain rejected because they require separate schema and RNG-effect
 merge semantics. This multi-result foundation is also required for loop-carried
 index, user carry and output buffers in a future native `while`/`scan`.
+
+Tensor rank and axis selection remain compile-time metadata, while dimension
+sizes can be requested as runtime SSA values. `Tensor::static_dim(axis)` performs
+an optional metadata query; `Tensor::dim(axis)` emits
+`stablehlo.get_dimension_size` and returns a scalar I32 Tensor, and
+`shape_tensor()` concatenates those values into a rank-one I32 Tensor. Such
+values can feed structured `cond` and later `while` operations. This does not yet
+expose unbounded dynamic input types: XLA does not generally support unbounded
+dynamism, so bounded dimensions need an explicit upper-bound type rather than
+overloading raw `-1` dimensions before they are admitted at the public API.

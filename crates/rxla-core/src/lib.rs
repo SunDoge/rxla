@@ -212,6 +212,12 @@ pub enum Error {
     PrunedExecutionInput { index: usize },
     #[snafu(display("invalid tensor operation: {message}"))]
     InvalidArgument { message: String },
+    #[snafu(display("{operation} axis {axis} is out of range for a rank-{rank} tensor"))]
+    AxisOutOfRange {
+        operation: &'static str,
+        axis: usize,
+        rank: usize,
+    },
     #[snafu(display("conditional predicate must be a scalar I32 tensor"))]
     InvalidConditionalPredicate,
     #[snafu(display("conditional branches must belong to the predicate trace"))]

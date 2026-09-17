@@ -235,6 +235,14 @@ pub(super) struct ConstantOp;
 )]
 pub(super) struct IotaOp;
 
+#[pliron_op(
+    name = "rxla.get_dimension_size",
+    format = "$0 ` ` attr($dimension_size_axis, $AxisAttr) ` : ` type($0)",
+    interfaces = [OneOpdInterface, OneResultInterface],
+    attributes = (dimension_size_axis: AxisAttr)
+)]
+pub(super) struct GetDimensionSizeOp;
+
 /// Structured conditional with one I32 scalar predicate, arbitrary result
 /// arity, and exactly two single-block regions. Branch results are carried by
 /// their `rxla.yield` terminators, never as parent operands: nested values do

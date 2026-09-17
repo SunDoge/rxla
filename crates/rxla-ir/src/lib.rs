@@ -225,6 +225,9 @@ pub enum Op {
     Iota {
         axis: usize,
     },
+    GetDimensionSize {
+        axis: usize,
+    },
     Unary(Unary),
     Relu,
     Softplus,

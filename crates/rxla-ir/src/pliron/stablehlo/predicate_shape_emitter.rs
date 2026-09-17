@@ -113,6 +113,18 @@ pub(super) fn emit_predicate_or_shape(emission: &mut OperationEmission<'_>) -> R
             emission.name, emission.operands[0], emission.ty
         )
         .unwrap();
+    } else if let Some(dimension) = op.as_ref().downcast_ref::<StableGetDimensionSizeOp>() {
+        let source = stablehlo_type(&value_type(ctx, operation.get_operand(0)))?;
+        let axis = dimension
+            .get_attr_stable_dimension_size_axis(ctx)
+            .unwrap()
+            .value();
+        writeln!(
+            emission.body,
+            "    {} = \"stablehlo.get_dimension_size\"({}) {{dimension = {axis} : i64}} : ({source}) -> {}",
+            emission.name, emission.operands[0], emission.ty
+        )
+        .unwrap();
     } else {
         return Ok(false);
     }

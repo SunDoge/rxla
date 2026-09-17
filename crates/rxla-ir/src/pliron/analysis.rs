@@ -338,6 +338,12 @@ impl IrGraph {
                 axis: required_attr!(value, get_attr_iota_axis, "iota axis").value(),
             });
         }
+        if let Some(value) = op.downcast_ref::<GetDimensionSizeOp>() {
+            return Ok(Op::GetDimensionSize {
+                axis: required_attr!(value, get_attr_dimension_size_axis, "dimension-size axis")
+                    .value(),
+            });
+        }
         if let Some(value) = op.downcast_ref::<IntegerBinaryOp>() {
             return Ok(Op::IntegerBinary(
                 required_attr!(value, get_attr_integer_binary, "integer binary operation").value(),

@@ -180,6 +180,15 @@ pub(super) struct StableConstantOp;
 pub(super) struct StableIotaOp;
 
 #[pliron_op(
+    name = "stablehlo.get_dimension_size",
+    format,
+    interfaces = [OneOpdInterface, OneResultInterface],
+    attributes = (stable_dimension_size_axis: AxisAttr),
+    verifier = "succ"
+)]
+pub(super) struct StableGetDimensionSizeOp;
+
+#[pliron_op(
     name = "stablehlo.broadcast_in_dim",
     format,
     interfaces = [OneOpdInterface, OneResultInterface],
