@@ -160,11 +160,23 @@ impl Tensor {
         if q.len() < 2 || k.len() < 2 || v.len() < 2 {
             return Err(err("attention requires rank >= 2 Q/K/V"));
         }
+        if self.dtype() != DType::F32
+            || key.dtype() != DType::F32
+            || value.dtype() != DType::F32
+            || mask.is_some_and(|mask| mask.dtype() != DType::F32)
+        {
+            return Err(err("attention requires F32 Q/K/V and mask tensors"));
+        }
+        let query_type = self.ty();
+        let key_type = key.ty();
+        let value_type = value.ty();
         let depth = q[q.len() - 1];
         if depth <= 0
             || k[k.len() - 1] != depth
-            || k[k.len() - 2] <= 0
+            || key_type.bound(k.len() - 1) != query_type.bound(q.len() - 1)
+            || k[k.len() - 2] == 0
             || k[k.len() - 2] != v[v.len() - 2]
+            || key_type.bound(k.len() - 2) != value_type.bound(v.len() - 2)
         {
             return Err(err(
                 "attention requires matching positive Q/K depth and K/V length",
@@ -180,34 +192,62 @@ impl Tensor {
             return Err(err("attention scale must be finite"));
         }
         let batch_rank = (q.len() - 2).max(k.len() - 2).max(v.len() - 2);
-        let mut batch = vec![1; batch_rank];
-        for shape in [q, k, v] {
-            for (axis, &dimension) in shape[..shape.len() - 2].iter().enumerate() {
-                let target = &mut batch[batch_rank - (shape.len() - 2) + axis];
-                if *target == 1 {
-                    *target = dimension;
-                } else if dimension != 1 && dimension != *target {
+        let mut batch_dims = vec![1; batch_rank];
+        let mut batch_bounds = vec![-1; batch_rank];
+        for operand in [&query_type, &key_type, &value_type] {
+            let operand_batch_rank = operand.dims.len() - 2;
+            let offset = batch_rank - operand_batch_rank;
+            for axis in 0..operand_batch_rank {
+                let target_axis = offset + axis;
+                let dimension = operand.dims[axis];
+                let bound = operand.bound(axis).unwrap_or(-1);
+                if batch_dims[target_axis] == 1 {
+                    batch_dims[target_axis] = dimension;
+                    batch_bounds[target_axis] = bound;
+                } else if dimension != 1
+                    && (dimension != batch_dims[target_axis] || bound != batch_bounds[target_axis])
+                {
                     return Err(err("attention batch dimensions cannot broadcast"));
                 }
             }
         }
-        let broadcast_operand = |tensor: &Tensor, rows: i64, columns: i64| {
-            let mut shape = batch.clone();
-            shape.extend_from_slice(&[rows, columns]);
-            tensor.broadcast_to(&shape)
+        let broadcast_operand = |tensor: &Tensor, rows_axis: usize, columns_axis: usize| {
+            let source = tensor.ty();
+            let mut dims = batch_dims.clone();
+            dims.extend([source.dims[rows_axis], source.dims[columns_axis]]);
+            let mut bounds = batch_bounds.clone();
+            bounds.extend([
+                source.bound(rows_axis).unwrap_or(-1),
+                source.bound(columns_axis).unwrap_or(-1),
+            ]);
+            tensor.broadcast_to_type(&inferred_tensor_type(dims, DType::F32, bounds))
         };
-        let query = broadcast_operand(self, q[q.len() - 2], depth)?;
-        let key = broadcast_operand(key, k[k.len() - 2], depth)?;
-        let value = broadcast_operand(value, v[v.len() - 2], v[v.len() - 1])?;
-        let mut score_shape = batch.clone();
-        score_shape.extend_from_slice(&[q[q.len() - 2], k[k.len() - 2]]);
+        let query = broadcast_operand(self, q.len() - 2, q.len() - 1)?;
+        let key = broadcast_operand(key, k.len() - 2, k.len() - 1)?;
+        let value = broadcast_operand(value, v.len() - 2, v.len() - 1)?;
+        let mut score_dims = batch_dims.clone();
+        score_dims.extend([q[q.len() - 2], k[k.len() - 2]]);
+        let mut score_bounds = batch_bounds.clone();
+        score_bounds.extend([
+            query_type.bound(q.len() - 2).unwrap_or(-1),
+            key_type.bound(k.len() - 2).unwrap_or(-1),
+        ]);
+        let score_type = inferred_tensor_type(score_dims, DType::F32, score_bounds);
         let mut operands = vec![query.node_id(), key.node_id(), value.node_id()];
         if let Some(mask) = mask {
-            operands.push(mask.broadcast_to(&score_shape)?.node_id());
+            operands.push(mask.broadcast_to_type(&score_type)?.node_id());
         }
-        let mut output = batch;
-        output.extend_from_slice(&[q[q.len() - 2], v[v.len() - 1]]);
-        self.graph()
-            .node(rxla_ir::Op::Attention { scale }, operands, &output)
+        let mut output_dims = batch_dims;
+        output_dims.extend([q[q.len() - 2], v[v.len() - 1]]);
+        let mut output_bounds = batch_bounds;
+        output_bounds.extend([
+            query_type.bound(q.len() - 2).unwrap_or(-1),
+            value_type.bound(v.len() - 1).unwrap_or(-1),
+        ]);
+        self.graph().node_typed(
+            rxla_ir::Op::Attention { scale },
+            operands,
+            inferred_tensor_type(output_dims, DType::F32, output_bounds),
+        )
     }
 }

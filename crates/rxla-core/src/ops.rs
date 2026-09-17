@@ -401,6 +401,32 @@ impl Tensor {
         self.graph()
             .node_typed(Op::Broadcast { axes }, vec![self.node_id()], target.ty())
     }
+
+    pub(crate) fn broadcast_to_type(&self, target: &TensorType) -> Result<Self> {
+        if target.dtype != self.dtype() {
+            return Err(err("broadcast must preserve dtype"));
+        }
+        if target.dims.len() < self.ndim() {
+            return Err(err("broadcast target rank is too small"));
+        }
+        let offset = target.dims.len() - self.ndim();
+        let axes = (offset..target.dims.len()).collect::<Vec<_>>();
+        let source = self.ty();
+        for (input_axis, &output_axis) in axes.iter().enumerate() {
+            let source_size = source.dims[input_axis];
+            if source_size != 1
+                && (source_size != target.dims[output_axis]
+                    || source.bound(input_axis) != target.bound(output_axis))
+            {
+                return Err(err("incompatible bounded broadcast dimension"));
+            }
+        }
+        if source == *target {
+            return Ok(self.clone());
+        }
+        self.graph()
+            .node_typed(Op::Broadcast { axes }, vec![self.node_id()], target.clone())
+    }
     pub fn broadcast_in_dim(&self, dims: &[i64], axes: &[usize]) -> Result<Self> {
         if axes.len() != self.shape.len() || axes.windows(2).any(|w| w[0] >= w[1]) {
             return Err(err(

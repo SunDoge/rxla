@@ -321,21 +321,47 @@ impl Verify for AttentionOp {
         let rank = query.dims.len();
         if query.dims[..rank - 2] != key.dims[..rank - 2]
             || query.dims[..rank - 2] != value.dims[..rank - 2]
-            || !compatible_dimension(query.dims[rank - 1], key.dims[rank - 1])
-            || !compatible_dimension(key.dims[rank - 2], value.dims[rank - 2])
+            || (0..rank - 2).any(|axis| {
+                query.bound(axis) != key.bound(axis) || query.bound(axis) != value.bound(axis)
+            })
+            || query.dims[rank - 1] <= 0
+            || query.dims[rank - 1] != key.dims[rank - 1]
+            || query.bound(rank - 1) != key.bound(rank - 1)
+            || key.dims[rank - 2] == 0
+            || key.dims[rank - 2] != value.dims[rank - 2]
+            || key.bound(rank - 2) != value.bound(rank - 2)
         {
             return pliron::verify_err_noloc!("rxla.attention has incompatible Q/K/V shapes");
         }
         let mut expected_result = query.dims.clone();
         expected_result[rank - 1] = value.dims[rank - 1];
-        if result.dims != expected_result {
+        let mut expected_result_bounds = query.dynamic_bounds.clone();
+        if expected_result_bounds.is_empty() {
+            expected_result_bounds.resize(rank, -1);
+        }
+        expected_result_bounds[rank - 1] = value.bound(rank - 1).unwrap_or(-1);
+        if expected_result_bounds.iter().all(|&bound| bound == -1) {
+            expected_result_bounds.clear();
+        }
+        if result.dims != expected_result || result.dynamic_bounds != expected_result_bounds {
             return pliron::verify_err_noloc!("rxla.attention result shape is inconsistent");
         }
         if operation.get_num_operands() == 4 {
             let mask = value_type(operation.get_operand(3), ctx)?;
             let mut expected_mask = query.dims.clone();
             expected_mask[rank - 1] = key.dims[rank - 2];
-            if mask.dtype != DType::F32 || mask.dims != expected_mask {
+            let mut expected_mask_bounds = query.dynamic_bounds.clone();
+            if expected_mask_bounds.is_empty() {
+                expected_mask_bounds.resize(rank, -1);
+            }
+            expected_mask_bounds[rank - 1] = key.bound(rank - 2).unwrap_or(-1);
+            if expected_mask_bounds.iter().all(|&bound| bound == -1) {
+                expected_mask_bounds.clear();
+            }
+            if mask.dtype != DType::F32
+                || mask.dims != expected_mask
+                || mask.dynamic_bounds != expected_mask_bounds
+            {
                 return pliron::verify_err_noloc!(
                     "rxla.attention mask must match the broadcast score shape"
                 );

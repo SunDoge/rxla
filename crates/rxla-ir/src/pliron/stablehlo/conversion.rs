@@ -368,6 +368,15 @@ impl DialectConversion for RxlaToStableHlo {
                 )
                 .into()
             };
+            let replace_bound = |ty: &mut TensorType, axis: usize, bound: Option<i64>| {
+                if ty.dynamic_bounds.is_empty() {
+                    ty.dynamic_bounds.resize(ty.dims.len(), -1);
+                }
+                ty.dynamic_bounds[axis] = bound.unwrap_or(-1);
+                if ty.dynamic_bounds.iter().all(|&value| value == -1) {
+                    ty.dynamic_bounds.clear();
+                }
+            };
             macro_rules! insert {
                 ($kind:ty, $ty:expr, $operands:expr) => {{
                     let target = <$kind as PlironOp>::from_operation(Operation::new(
@@ -390,17 +399,20 @@ impl DialectConversion for RxlaToStableHlo {
             let rank = query_type.dims.len();
             let mut output_type = query_type.clone();
             output_type.dims[rank - 1] = value_type.dims[rank - 1];
+            replace_bound(&mut output_type, rank - 1, value_type.bound(rank - 1));
             let batch_rank = rank - 2;
             let mut key_permutation = (0..rank).collect::<Vec<_>>();
             key_permutation.swap(rank - 2, rank - 1);
-            let mut transposed_key_type = key_type.clone();
-            transposed_key_type.dims.swap(rank - 2, rank - 1);
+            let transposed_key_type = key_type
+                .permuted(&key_permutation)
+                .expect("verified attention key permutation");
             let (transpose, transposed_key) =
                 insert!(StableTransposeOp, transposed_key_type, vec![*key]);
             transpose.set_attr_stable_permutation(ctx, AxesAttr::new(&key_permutation));
 
             let mut score_type = query_type.clone();
             score_type.dims[rank - 1] = key_type.dims[rank - 2];
+            replace_bound(&mut score_type, rank - 1, key_type.bound(rank - 2));
             let (first_dot, scores) = insert!(
                 StableDotGeneralOp,
                 score_type.clone(),
@@ -438,10 +450,12 @@ impl DialectConversion for RxlaToStableHlo {
             }
 
             let axis = rank - 1;
-            let mut reduced_type = score_type.clone();
-            reduced_type.dims.remove(axis);
-            let mut keepdim_type = score_type.clone();
-            keepdim_type.dims[axis] = 1;
+            let reduced_type = score_type
+                .reduced(&[axis], false)
+                .expect("verified attention reduction axis");
+            let keepdim_type = score_type
+                .reduced(&[axis], true)
+                .expect("verified attention reduction axis");
             let (maximum, maximum_value) =
                 insert!(StableReduceMaximumOp, reduced_type.clone(), vec![scores]);
             maximum.set_attr_stable_maximum_axes(ctx, AxesAttr::new(&[axis]));

@@ -110,6 +110,87 @@ fn concatenate_and_stack_infer_bounds_from_all_operands() {
 }
 
 #[test]
+fn attention_preserves_bounded_batch_and_sequence_axes() {
+    let tracer = Tracer::new();
+    let query = tracer
+        .input_shape(
+            &[
+                Dim::Bounded { upper: 4 },
+                Dim::Static(2),
+                Dim::Bounded { upper: 8 },
+                Dim::Static(64),
+            ],
+            DType::F32,
+        )
+        .unwrap();
+    let key = tracer
+        .input_shape(
+            &[
+                Dim::Static(1),
+                Dim::Static(2),
+                Dim::Bounded { upper: 16 },
+                Dim::Static(64),
+            ],
+            DType::F32,
+        )
+        .unwrap();
+    let value = tracer
+        .input_shape(
+            &[
+                Dim::Static(1),
+                Dim::Static(2),
+                Dim::Bounded { upper: 16 },
+                Dim::Static(32),
+            ],
+            DType::F32,
+        )
+        .unwrap();
+    let mask = tracer
+        .input_shape(
+            &[Dim::Bounded { upper: 8 }, Dim::Bounded { upper: 16 }],
+            DType::F32,
+        )
+        .unwrap();
+
+    let output = query
+        .scaled_dot_product_attention(&key, &value, Some(&mask), None)
+        .unwrap();
+    assert_eq!(output.shape(), [-1, 2, -1, 32]);
+    assert_eq!(output.dim_bound(0), Some(4));
+    assert_eq!(output.dim_bound(2), Some(8));
+
+    let code = std::str::from_utf8(
+        tracer
+            .program(vec![output])
+            .unwrap()
+            .lowered_program()
+            .code(),
+    )
+    .unwrap()
+    .to_owned();
+    assert!(code.contains("tensor<?x2x?x32xf32, #stablehlo.bounds<4, ?, 8, ?>>"));
+    assert!(code.contains("tensor<?x2x?x?xf32, #stablehlo.bounds<4, ?, 8, 16>>"));
+    assert_eq!(code.matches("stablehlo.dot_general").count(), 2);
+
+    let incompatible_key = tracer
+        .input_shape(
+            &[
+                Dim::Static(1),
+                Dim::Static(2),
+                Dim::Bounded { upper: 12 },
+                Dim::Static(64),
+            ],
+            DType::F32,
+        )
+        .unwrap();
+    assert!(
+        query
+            .scaled_dot_product_attention(&incompatible_key, &value, None, None)
+            .is_err()
+    );
+}
+
+#[test]
 fn vision_ops_preserve_a_bounded_batch_axis() {
     let tracer = Tracer::new();
     let input = tracer

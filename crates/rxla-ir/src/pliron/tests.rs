@@ -661,6 +661,21 @@ fn shape_operation_verifiers_reject_invalid_transformed_ir() {
     matmul.set_attr_batch_rank(&graph.ctx, BatchRankAttr::new(0));
     assert!(verify_op(&matmul, &graph.ctx).is_err());
 
+    let query = graph.parameter(&[2, 3, 4]);
+    let key = graph.parameter(&[2, 5, 4]);
+    let value = graph.parameter(&[2, 5, 6]);
+    let result = graph.tensor_type(&[2, 3, 7], DType::F32);
+    let attention = AttentionOp::from_operation(Operation::new(
+        &mut graph.ctx,
+        AttentionOp::get_concrete_op_info(),
+        vec![result],
+        vec![query, key, value],
+        vec![],
+        0,
+    ));
+    attention.set_attr_attention_scale(&graph.ctx, AttentionScaleAttr::new(0.5));
+    assert!(verify_op(&attention, &graph.ctx).is_err());
+
     let result = graph.tensor_type(&[2, 3], DType::F32);
     let iota = IotaOp::from_operation(Operation::new(
         &mut graph.ctx,

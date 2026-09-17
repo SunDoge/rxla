@@ -4994,6 +4994,17 @@ the final squeeze are typed singleton insertion/removal operations. The Pliron
 matmul verifier checks batch rank, dtype, contracting dimensions, result axes
 and all associated bounds instead of trusting an asserted result shape.
 
+Scaled dot-product attention follows the same typed broadcasting rules. Its
+batch axes, query length, KV length, value width, score tensor and additive mask
+retain bounded-dynamic metadata; non-singleton shared axes must agree in both
+logical dimension and upper bound. Portable lowering carries those bounds
+through K transpose, both dot products, and the reshape/reduce/broadcast steps
+of softmax. The attention verifier independently derives the exact score-mask
+and result types, including bounds. The optional CUDA cuDNN custom-call path
+remains restricted to fully static rank-four shapes, so bounded attention uses
+the portable StableHLO decomposition rather than embedding invalid dynamic
+dimensions in cuDNN backend configuration.
+
 This is currently an IR and compilation feature, not a promise that every PJRT
 plugin can construct and execute bounded-dynamic buffers. The development ZML
 CPU plugin compiles an identity signature, but ordinary elementwise compilation
