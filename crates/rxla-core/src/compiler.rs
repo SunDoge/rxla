@@ -129,6 +129,61 @@ pub struct CacheLimits {
     pub max_entries: usize,
     pub max_key_bytes: usize,
 }
+
+/// A typed value for an XLA `env_option_overrides` compile option.
+///
+/// Option names and their availability belong to the loaded PJRT plugin. This
+/// type deliberately represents values without pretending that experimental
+/// backend options are stable RXLA API.
+#[derive(Clone, Debug, PartialEq)]
+pub enum XlaOptionValue {
+    String(String),
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+}
+
+impl From<String> for XlaOptionValue {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for XlaOptionValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.into())
+    }
+}
+
+impl From<bool> for XlaOptionValue {
+    fn from(value: bool) -> Self {
+        Self::Bool(value)
+    }
+}
+
+impl From<i64> for XlaOptionValue {
+    fn from(value: i64) -> Self {
+        Self::Int(value)
+    }
+}
+
+impl From<f64> for XlaOptionValue {
+    fn from(value: f64) -> Self {
+        Self::Float(value)
+    }
+}
+
+impl XlaOptionValue {
+    fn into_proto(self) -> OptionOverrideProto {
+        let value = match self {
+            Self::String(value) => option_override_proto::Value::StringField(value),
+            Self::Bool(value) => option_override_proto::Value::BoolField(value),
+            Self::Int(value) => option_override_proto::Value::IntField(value),
+            Self::Float(value) => option_override_proto::Value::DoubleField(value),
+        };
+        OptionOverrideProto { value: Some(value) }
+    }
+}
 impl Default for CacheLimits {
     fn default() -> Self {
         Self {
@@ -227,28 +282,34 @@ impl Compiler {
         self
     }
 
+    /// Set a backend compile option without changing process-global
+    /// `XLA_FLAGS`. The option is included in executable cache keys.
+    ///
+    /// XLA option names are plugin-version-specific. Prefer RXLA's named
+    /// methods for established options and use this escape hatch for controlled
+    /// experiments or deployment configuration.
+    pub fn with_xla_option(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<XlaOptionValue>,
+    ) -> Self {
+        self.xla_option_overrides
+            .insert(name.into(), value.into().into_proto());
+        self
+    }
+
     /// Disable XLA GPU command-buffer lowering for this compiler.
     /// This is encoded in PJRT compile options and does not mutate `XLA_FLAGS`;
     /// a fresh compiler without this override uses the plugin's default policy.
     pub fn without_cuda_command_buffers(mut self) -> Self {
-        self.xla_option_overrides.insert(
-            "xla_gpu_enable_command_buffer".into(),
-            OptionOverrideProto {
-                value: Some(option_override_proto::Value::StringField(String::new())),
-            },
-        );
+        self = self.with_xla_option("xla_gpu_enable_command_buffer", "");
         self
     }
 
     /// Select XLA's experimental second-generation GEMM fusion pass on CUDA.
     /// Backend availability and behavior follow the loaded PJRT plugin.
     pub fn with_experimental_cuda_gemm_fusion_v2(mut self, enabled: bool) -> Self {
-        self.xla_option_overrides.insert(
-            "xla_gpu_experimental_gemm_fusion_v2".into(),
-            OptionOverrideProto {
-                value: Some(option_override_proto::Value::BoolField(enabled)),
-            },
-        );
+        self = self.with_xla_option("xla_gpu_experimental_gemm_fusion_v2", enabled);
         self
     }
 

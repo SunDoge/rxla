@@ -9,7 +9,7 @@ treated as general backend performance guarantees.
 - NVIDIA GeForce RTX 5080
 - CUDA 13 PJRT plugin from the locked JAX environment
 - cuDNN 9.24
-- input: one zero-filled `1024 x 1024` RGB image
+- input: one deterministic nonzero `1024 x 1024` RGB image
 - checkpoint: official SAM 2.1 Hiera-small weights
 - two warmups and ten timed executions
 
@@ -21,9 +21,11 @@ treated as general backend performance guarantees.
 | RXLA, compute demotion only | F16 | 15.626 s | 10.690 ms | 10.761 ms | 11.005 ms |
 | RXLA, native F16 parameter ABI | F16 | 14.854 s | 8.038 ms | 8.096 ms | 8.424 ms |
 | RXLA, F32 reductions + direct launches + GEMM fusion v2 | F16 | 14.555 s | 7.412 ms | 7.417 ms | 7.688 ms |
+| RXLA, patterned input recheck (20 runs) | F16 | 15.181 s | 7.509 ms | 7.494 ms | 7.806 ms |
 | PyTorch eager | F32 | n/a | 24.266 ms | 24.251 ms | 24.456 ms |
 | `torch.compile` default | F32 | 10.758 s | 22.723 ms | 22.707 ms | 22.838 ms |
 | `torch.compile` default | F16 autocast | 12.569 s | 6.039 ms | 5.972 ms | 6.234 ms |
+| `torch.compile` patterned input recheck (20 runs) | F16 autocast | 12.665 s | 6.000 ms | 5.979 ms | 6.097 ms |
 
 The native F16 parameter ABI is important: converting the F32 checkpoint once
 while loading removes roughly 176 MiB of parameter casts from every execution.
@@ -32,7 +34,8 @@ latency by 3.84x over the original F32 run. RXLA remains 33.1% slower than the
 equivalent non-autotuned PyTorch F16 result, so this is progress rather than a
 parity claim.
 
-The later target-aware configuration narrows that gap to 22.7%. It is supplied
+The later target-aware configuration narrows that gap substantially. In the
+current same-input 20-run recheck RXLA is 25.2% slower. It is supplied
 through PJRT `CompileOptionsProto.env_option_overrides`, not process-global
 `XLA_FLAGS`: `--direct-launches` disables command buffers and
 `--gemm-fusion-v2` opts into the experimental XLA pass. The latter is kept
@@ -91,6 +94,24 @@ uv run python benchmarks/sam2_hiera_torch.py \
   --mode compile --precision f16 --warmup 2 --iterations 10
 ```
 
-An Nsight Systems capture was attempted with 2026.3.2, but it contained target
-metadata and no CUDA activity tables. No kernel attribution is claimed from
-that capture; the remaining gap needs a working CUPTI trace or XLA GPU profile.
+## Kernel attribution
+
+Nsight Systems 2026.5.1 successfully captured both implementations. Compile
+and autotuning activity was excluded: RXLA rows start after the last XLA
+redzone kernel, while the PyTorch capture consists of the initial execution,
+five warmups and 50 timed executions. Profiler wall times are inflated, so the
+useful comparison is GPU kernel time per execution.
+
+| Implementation | GPU kernel time | Kernels/run | GEMM | Fused attention/softmax | Layout/other |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| RXLA | 7.181 ms | 303 | 4.842 ms | 1.395 ms | 0.944 ms |
+| `torch.compile` | 5.699 ms | 289 | 2.941 ms | 1.480 ms | 1.278 ms |
+
+RXLA's standalone Triton softmax kernels account for only 0.191 ms/run. The
+main gap is that PyTorch FlashAttention covers all 16 Hiera blocks, whereas
+RXLA currently sends only three long-sequence blocks to cuDNN FMHA. The 13
+window-attention blocks lower to two GEMMs plus softmax, explaining the extra
+26 GEMM launches and most of the 1.48 ms kernel-time gap. Lowering the cuDNN
+threshold to include 196-token windows was measured and rejected because it
+increased end-to-end latency; a suitable short-attention fusion/kernel is the
+next optimization target.

@@ -1,6 +1,6 @@
 //! Rust tensor programs represented in Pliron and compiled through PJRT.
 pub use batch_norm_state::{BatchNormState, BatchNormUpdate};
-pub use compiler::{CacheLimits, CacheStats, Compiler, LoweredProgram};
+pub use compiler::{CacheLimits, CacheStats, Compiler, LoweredProgram, XlaOptionValue};
 pub use dlpark;
 pub use half::{bf16, f16};
 pub use kv_cache::{KvCache, KvCacheUpdate};
