@@ -20,7 +20,6 @@ use attributes::{sharding_attr_key, supported_dtype};
 use dialect::*;
 
 use crate::{IrError, PlanningFacts, Result, Sharding, ShardingConstraint};
-#[cfg(test)]
 use pliron::basic_block::BasicBlock;
 use pliron::{
     builtin::{

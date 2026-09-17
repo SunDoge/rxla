@@ -239,7 +239,17 @@ pub(super) struct IotaOp;
 /// arity, and exactly two single-block regions. Branch results are carried by
 /// their `rxla.yield` terminators, never as parent operands: nested values do
 /// not dominate their enclosing operation.
-#[pliron_op(name = "rxla.if", format, interfaces = [OneOpdInterface])]
+#[pliron_op(
+    name = "rxla.if",
+    format,
+    interfaces = [OneOpdInterface],
+    attributes = (
+        then_marker: StringAttr,
+        then_value: StringAttr,
+        else_marker: StringAttr,
+        else_value: StringAttr
+    )
+)]
 pub(super) struct IfOp;
 
 /// Terminates an `rxla.if` branch with its yielded values.

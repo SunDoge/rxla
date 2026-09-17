@@ -1,6 +1,27 @@
 use super::*;
 impl ProgramIr {
     pub fn append(&mut self, op: &Op, operand_ids: &[SsaId], result: &TensorType) -> Result<SsaId> {
+        if let Op::If {
+            then_marker,
+            then_value,
+            else_marker,
+            else_value,
+        } = *op
+        {
+            let [predicate] = operand_ids else {
+                return Err(IrError::InvalidValue {
+                    operation: "building a conditional predicate",
+                });
+            };
+            return self.append_conditional(
+                *predicate,
+                then_marker,
+                SsaId::from_index(then_value),
+                else_marker,
+                SsaId::from_index(else_value),
+                result,
+            );
+        }
         let operands = operand_ids
             .iter()
             .map(|&id| self.values.get(id).copied())
@@ -212,6 +233,7 @@ impl IrGraph {
                 };
                 self.select_typed(*mask, *on_true, *on_false, result)
             }
+            Op::If { .. } => return None,
             Op::Reduce {
                 kind: Reduction::Sum,
                 axes,

@@ -276,6 +276,14 @@ pub enum Op {
     IsFiniteMask,
     CompareMask(Comparison),
     Select,
+    /// Structured conditional. Branch operation ranges precede this node in
+    /// canonical SSA order and are moved into regions during construction.
+    If {
+        then_marker: usize,
+        then_value: usize,
+        else_marker: usize,
+        else_value: usize,
+    },
     ArgMax {
         axis: usize,
     },

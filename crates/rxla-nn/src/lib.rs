@@ -116,6 +116,8 @@ pub enum Error {
     },
     #[snafu(display("state handle belongs to another model trace"))]
     ForeignState,
+    #[snafu(display("{effect} is not supported inside a conditional branch yet"))]
+    ConditionalEffect { effect: &'static str },
     #[snafu(display("{operation} requires a stateless model"))]
     StatefulOperation { operation: &'static str },
     #[snafu(display("resident parameter {path:?} must be initialized through a session"))]
@@ -281,6 +283,7 @@ pub struct Cx {
     states: BTreeMap<String, StateDeclaration>,
     rngs: BTreeMap<String, RngStream>,
     resident_parameters: BTreeMap<String, StateSlot>,
+    conditional_depth: usize,
 }
 
 /// A temporary lexical effect scope.
@@ -366,6 +369,7 @@ impl Cx {
             states: BTreeMap::new(),
             rngs: BTreeMap::new(),
             resident_parameters: BTreeMap::new(),
+            conditional_depth: 0,
         }
     }
 
@@ -499,6 +503,25 @@ impl Cx {
         self.scope_path([collection.to_owned(), index.to_string()])
     }
 
+    /// Build a structured conditional while threading this model's parameter
+    /// effect context through both branches. Parameters declared in either
+    /// branch are hoisted into the model ABI and captured by the branch region.
+    pub fn cond<Then, Else>(
+        &mut self,
+        predicate: &Tensor,
+        then_branch: Then,
+        else_branch: Else,
+    ) -> Result<Tensor>
+    where
+        Then: FnOnce(&mut Cx) -> Result<Tensor>,
+        Else: FnOnce(&mut Cx) -> Result<Tensor>,
+    {
+        self.conditional_depth += 1;
+        let result = Tensor::cond_with(predicate, self, then_branch, else_branch);
+        self.conditional_depth -= 1;
+        result
+    }
+
     /// Enter several lexical path segments with one RAII guard.
     pub fn scope_path<I, S>(&mut self, segments: I) -> Result<Scope<'_>>
     where
@@ -559,6 +582,12 @@ impl Cx {
         dtype: DType,
         initializer: Initializer,
     ) -> Result<State> {
+        ensure!(
+            self.conditional_depth == 0,
+            ConditionalEffectSnafu {
+                effect: "state declaration"
+            }
+        );
         validate_name(name)?;
         let path = self.path(name);
         initializer.validate(&path, shape, dtype)?;
@@ -595,6 +624,10 @@ impl Cx {
 
     /// Borrow a named Threefry stream. Repeated calls continue the same stream.
     pub fn rng(&mut self, name: &str) -> Result<Rng<'_>> {
+        ensure!(
+            self.conditional_depth == 0,
+            ConditionalEffectSnafu { effect: "RNG" }
+        );
         validate_name(name)?;
         let path = self.path(name);
         if !self.rngs.contains_key(&path) {
@@ -706,6 +739,12 @@ impl State {
 
     pub fn write(&self, cx: &mut Cx, value: &Tensor) -> Result<()> {
         cx.validate_state(self)?;
+        ensure!(
+            cx.conditional_depth == 0,
+            ConditionalEffectSnafu {
+                effect: "state mutation"
+            }
+        );
         Ok(cx.graph.write(&self.slot, value)?)
     }
 
@@ -1091,6 +1130,54 @@ mod tests {
 
         assert!(schema.get("blocks.17.weight").is_some());
         assert!(schema.get("root").is_some());
+    }
+
+    #[test]
+    fn model_conditional_hoists_branch_parameters_into_the_abi() {
+        let applied = Model::new(|cx: &mut Cx| {
+            let predicate = cx.input_dtype(&[], DType::I32)?;
+            cx.cond(
+                &predicate,
+                |cx| cx.scope("positive")?.param("weight", &[2]),
+                |cx| cx.scope("negative")?.param("weight", &[2]),
+            )
+        })
+        .trace()
+        .unwrap();
+
+        assert_eq!(applied.outputs()[0].shape(), [2]);
+        assert!(applied.schema().get("positive.weight").is_some());
+        assert!(applied.schema().get("negative.weight").is_some());
+        assert_eq!(applied.prepare().unwrap().input_count(), 3);
+    }
+
+    #[test]
+    fn model_conditional_rejects_unmodelled_state_mutation() {
+        let result = Model::new(|cx: &mut Cx| {
+            let state = cx.state("counter", &[], DType::F32)?;
+            let value = state.read(cx)?;
+            let predicate = cx.input_dtype(&[], DType::I32)?;
+            cx.cond(
+                &predicate,
+                |cx| {
+                    state.write(cx, &value.add_scalar(1.0)?)?;
+                    Ok(value.clone())
+                },
+                |_| Ok(value.clone()),
+            )
+        })
+        .trace();
+        let error = match result {
+            Ok(_) => panic!("conditional state mutation should fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            Error::ConditionalEffect {
+                effect: "state mutation"
+            }
+        ));
     }
 
     #[test]

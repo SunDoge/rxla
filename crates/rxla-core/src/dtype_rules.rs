@@ -54,6 +54,9 @@ pub(crate) fn infer(op: &Op, types: &[DType]) -> Result<DType> {
             types.len() == 3 && types[0] == DType::F32 && types[1] == types[2],
             types.get(1).copied().unwrap_or(DType::F32),
         ),
+        // Structured conditionals are built by the region-aware ProgramIr API;
+        // their result dtype comes from matching branch results, not operands.
+        Op::If { .. } => (false, DType::F32),
         Op::Binary(Binary::Add | Binary::Sub | Binary::Mul | Binary::Maximum | Binary::Minimum) => {
             (
                 types.len() == 2 && all(first) && first != DType::BF16,

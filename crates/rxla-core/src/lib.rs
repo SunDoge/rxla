@@ -212,6 +212,19 @@ pub enum Error {
     PrunedExecutionInput { index: usize },
     #[snafu(display("invalid tensor operation: {message}"))]
     InvalidArgument { message: String },
+    #[snafu(display("conditional predicate must be a scalar I32 tensor"))]
+    InvalidConditionalPredicate,
+    #[snafu(display("conditional branches must belong to the predicate trace"))]
+    ConditionalTraceMismatch,
+    #[snafu(display(
+        "conditional branch results differ: then is {then_shape:?} {then_dtype:?}, else is {else_shape:?} {else_dtype:?}"
+    ))]
+    ConditionalResultMismatch {
+        then_shape: Vec<i64>,
+        then_dtype: DType,
+        else_shape: Vec<i64>,
+        else_dtype: DType,
+    },
 }
 
 /// Result type shared by tensor construction, transformation and execution APIs.
@@ -274,6 +287,38 @@ fn elements(dims: &[i64]) -> Result<usize> {
         .ok_or_else(|| err("invalid or overflowing shape"))
 }
 impl Graph {
+    fn region_marker(&self) -> Result<usize> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| Error::GraphLockPoisoned)?
+            .region_marker())
+    }
+
+    fn conditional(
+        &self,
+        predicate: rxla_ir::SsaId,
+        then_marker: usize,
+        then_value: rxla_ir::SsaId,
+        else_marker: usize,
+        else_value: rxla_ir::SsaId,
+        ty: TensorType,
+    ) -> Result<Tensor> {
+        let id = self
+            .0
+            .lock()
+            .map_err(|_| Error::GraphLockPoisoned)?
+            .append_conditional(
+                predicate,
+                then_marker,
+                then_value,
+                else_marker,
+                else_value,
+                &ty,
+            )?;
+        Ok(Tensor::symbolic(self.clone(), id, &ty.dims, ty.dtype))
+    }
+
     fn set_sharding(&self, id: rxla_ir::SsaId, sharding: Sharding) -> Result<()> {
         let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         if graph.value_type(id).is_err() {

@@ -161,6 +161,24 @@ impl IrGraph {
                     })?,
             });
         }
+        if let Some(value) = op.downcast_ref::<IfOp>() {
+            macro_rules! parse {
+                ($getter:ident, $name:literal) => {
+                    value
+                        .$getter(&self.ctx)
+                        .ok_or(IrError::MalformedAttribute { attribute: $name })?
+                        .as_str()
+                        .parse::<usize>()
+                        .map_err(|_| IrError::MalformedAttribute { attribute: $name })?
+                };
+            }
+            return Ok(Op::If {
+                then_marker: parse!(get_attr_then_marker, "if then marker"),
+                then_value: parse!(get_attr_then_value, "if then value"),
+                else_marker: parse!(get_attr_else_marker, "if else marker"),
+                else_value: parse!(get_attr_else_value, "if else value"),
+            });
+        }
         if let Some(constant) = op.downcast_ref::<ConstantOp>() {
             let bytes = constant
                 .get_attr_value(&self.ctx)

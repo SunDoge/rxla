@@ -611,6 +611,67 @@ impl Deref for Tensor {
 }
 
 impl Tensor {
+    /// Build a lazy structured conditional. Only the selected branch executes;
+    /// branch operations are represented as StableHLO regions rather than as
+    /// eagerly computed operands of a `select`.
+    pub fn cond<Then, Else>(
+        predicate: &Tensor,
+        then_branch: Then,
+        else_branch: Else,
+    ) -> Result<Tensor>
+    where
+        Then: FnOnce() -> Result<Tensor>,
+        Else: FnOnce() -> Result<Tensor>,
+    {
+        Self::cond_with(predicate, &mut (), |_| then_branch(), |_| else_branch())
+    }
+
+    /// Context-carrying form of [`Self::cond`]. This permits effect interpreters
+    /// such as `rxla-nn` to thread one explicit context through both branch
+    /// builders without closures competing to capture one mutable borrow.
+    pub fn cond_with<C, Then, Else, E>(
+        predicate: &Tensor,
+        context: &mut C,
+        then_branch: Then,
+        else_branch: Else,
+    ) -> std::result::Result<Tensor, E>
+    where
+        Then: FnOnce(&mut C) -> std::result::Result<Tensor, E>,
+        Else: FnOnce(&mut C) -> std::result::Result<Tensor, E>,
+        E: From<Error>,
+    {
+        if predicate.dtype() != DType::I32 || !predicate.shape().is_empty() {
+            return Err(Error::InvalidConditionalPredicate.into());
+        }
+        let graph = predicate.graph().clone();
+        let then_marker = graph.region_marker()?;
+        let on_true = then_branch(context)?;
+        let else_marker = graph.region_marker()?;
+        let on_false = else_branch(context)?;
+        if !predicate.same_trace(&on_true) || !predicate.same_trace(&on_false) {
+            return Err(Error::ConditionalTraceMismatch.into());
+        }
+        if on_true.shape() != on_false.shape() || on_true.dtype() != on_false.dtype() {
+            return Err(Error::ConditionalResultMismatch {
+                then_shape: on_true.shape().to_vec(),
+                then_dtype: on_true.dtype(),
+                else_shape: on_false.shape().to_vec(),
+                else_dtype: on_false.dtype(),
+            }
+            .into());
+        }
+        graph
+            .conditional(
+                predicate.node_id(),
+                then_marker,
+                on_true.node_id(),
+                else_marker,
+                on_false.node_id(),
+                on_true.ty(),
+            )
+            .map_err(E::from)
+    }
+
     pub(crate) fn begin_evaluation(outputs: &[Tensor]) -> Result<EvaluationLease> {
         let first = outputs.first().ok_or(Error::EmptyEvaluationLease)?;
         let trace = first.trace_value()?;

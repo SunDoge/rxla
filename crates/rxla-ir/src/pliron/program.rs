@@ -47,6 +47,114 @@ pub struct StableHloProgram {
 }
 
 impl ProgramIr {
+    /// Marker used by structured-region builders to identify newly appended
+    /// root operations before they are moved into a region.
+    pub fn region_marker(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Build a single-result structured conditional from two already-built
+    /// root ranges. The ranges are moved, not cloned, into the corresponding
+    /// branch regions; values before each marker remain legal captures.
+    pub fn append_conditional(
+        &mut self,
+        predicate: SsaId,
+        then_marker: usize,
+        then_value: SsaId,
+        else_marker: usize,
+        else_value: SsaId,
+        result: &TensorType,
+    ) -> Result<SsaId> {
+        let predicate = self.value(predicate)?;
+        let then_value_raw = self.value(then_value)?;
+        let else_value_raw = self.value(else_value)?;
+        let then_end = else_marker;
+        let else_end = self.values.len();
+        if then_marker > then_end || then_end > else_end {
+            return Err(IrError::InvalidValue {
+                operation: "building conditional regions",
+            });
+        }
+
+        let result_type = self.graph.tensor_type(&result.dims, result.dtype);
+        let conditional = <IfOp as PlironOp>::from_operation(Operation::new(
+            &mut self.graph.ctx,
+            IfOp::get_concrete_op_info(),
+            vec![result_type],
+            vec![predicate],
+            vec![],
+            2,
+        ));
+        conditional.set_attr_then_marker(&self.graph.ctx, StringAttr::new(then_marker.to_string()));
+        conditional.set_attr_then_value(
+            &self.graph.ctx,
+            StringAttr::new(then_value.index().to_string()),
+        );
+        conditional.set_attr_else_marker(&self.graph.ctx, StringAttr::new(else_marker.to_string()));
+        conditional.set_attr_else_value(
+            &self.graph.ctx,
+            StringAttr::new(else_value.index().to_string()),
+        );
+        for (region_index, (start, end, yielded)) in [
+            (then_marker, then_end, then_value_raw),
+            (else_marker, else_end, else_value_raw),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = self.graph.module.get_body(&self.graph.ctx, 0);
+            let block = BasicBlock::new(&mut self.graph.ctx, None, vec![]);
+            block.insert_at_back(
+                conditional
+                    .get_operation()
+                    .deref(&self.graph.ctx)
+                    .get_region(region_index),
+                &self.graph.ctx,
+            );
+            let mut operations = Vec::new();
+            for index in start..end {
+                let value = self.value(SsaId::from_index(index))?;
+                let operation = value.defining_op().ok_or(IrError::InvalidValue {
+                    operation: "moving a conditional branch into its region",
+                })?;
+                // A nested structured operation has already moved its own
+                // branch operations. Move only the nested operation itself;
+                // pulling its internals back out would violate region
+                // dominance and leave its yields referring outside the region.
+                if operation.deref(&self.graph.ctx).get_parent_block() != Some(root) {
+                    continue;
+                }
+                if operations.last().copied() != Some(operation) {
+                    operations.push(operation);
+                }
+            }
+            for operation in operations {
+                let op = Operation::get_op_dyn(operation, &self.graph.ctx);
+                if op.as_ref().is::<ParameterOp>() || op.as_ref().is::<StateInputOp>() {
+                    // Effect declarations belong to the function ABI. Region
+                    // operations capture their values instead of nesting the
+                    // declarations inside one branch.
+                    continue;
+                }
+                operation.unlink(&self.graph.ctx);
+                operation.insert_at_back(block, &self.graph.ctx);
+            }
+            let yield_op = <YieldOp as PlironOp>::from_operation(Operation::new(
+                &mut self.graph.ctx,
+                YieldOp::get_concrete_op_info(),
+                vec![],
+                vec![yielded],
+                vec![],
+                0,
+            ));
+            yield_op
+                .get_operation()
+                .insert_at_back(block, &self.graph.ctx);
+        }
+        let value = self.graph.push_results(conditional)[0];
+        Ok(self.values.push(value))
+    }
+
     #[doc(hidden)]
     pub fn len(&self) -> usize {
         self.values.len()

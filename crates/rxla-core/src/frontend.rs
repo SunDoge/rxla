@@ -1475,6 +1475,57 @@ mod tests {
     }
 
     #[test]
+    fn structured_tensor_conditional_lowers_to_stablehlo_regions() {
+        let tracer = Tracer::new();
+        let predicate = tracer.input_i32(&[]).unwrap();
+        let left = tracer.input(&[2]).unwrap();
+        let right = tracer.input(&[2]).unwrap();
+        let output = Tensor::cond(&predicate, || left.add(&left), || right.mul(&right)).unwrap();
+
+        let program = tracer.program(vec![output]).unwrap();
+        let mlir = str::from_utf8(program.lowered.code()).unwrap();
+        assert!(mlir.contains("stablehlo.if"));
+        assert!(mlir.contains("stablehlo.add"));
+        assert!(mlir.contains("stablehlo.multiply"));
+        assert_eq!(program.input_count(), 3);
+    }
+
+    #[test]
+    fn structured_tensor_conditionals_can_be_nested() {
+        let tracer = Tracer::new();
+        let outer = tracer.input_i32(&[]).unwrap();
+        let inner = tracer.input_i32(&[]).unwrap();
+        let value = tracer.input(&[2]).unwrap();
+        let output = Tensor::cond(
+            &outer,
+            || Tensor::cond(&inner, || value.add_scalar(1.0), || value.neg()),
+            || value.mul_scalar(2.0),
+        )
+        .unwrap();
+
+        let program = tracer.program(vec![output]).unwrap();
+        let mlir = str::from_utf8(program.lowered.code()).unwrap();
+        assert_eq!(mlir.matches("stablehlo.if").count(), 2);
+    }
+
+    #[test]
+    fn structured_tensor_conditional_checks_branch_metadata() {
+        let tracer = Tracer::new();
+        let predicate = tracer.input_i32(&[]).unwrap();
+        let left = tracer.input(&[2]).unwrap();
+        let right = tracer.input(&[3]).unwrap();
+        let error = match Tensor::cond(&predicate, || Ok(left), || Ok(right)) {
+            Ok(_) => panic!("mismatched branch metadata should fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            crate::Error::ConditionalResultMismatch { .. }
+        ));
+    }
+
+    #[test]
     fn attention_forward_stays_native_pliron() {
         let tracer = Tracer::new();
         let query = tracer.input(&[2, 3, 4]).unwrap();
