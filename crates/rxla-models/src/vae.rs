@@ -18,6 +18,7 @@ pub struct AutoencoderKlDecoderConfig {
     norm_groups: i64,
     norm_epsilon: f32,
     scaling_factor: f32,
+    parameter_dtype: DType,
 }
 
 impl AutoencoderKlDecoderConfig {
@@ -30,6 +31,7 @@ impl AutoencoderKlDecoderConfig {
             norm_groups: 32,
             norm_epsilon: 1e-6,
             scaling_factor: 0.18215,
+            parameter_dtype: DType::F32,
         }
     }
 
@@ -42,6 +44,21 @@ impl AutoencoderKlDecoderConfig {
             norm_groups: 32,
             norm_epsilon: 1e-6,
             scaling_factor: 0.18215,
+            parameter_dtype: DType::F32,
+        }
+    }
+
+    /// FLUX.2 AutoencoderKL decoder topology and checkpoint storage policy.
+    pub fn flux2() -> Self {
+        Self {
+            latent_channels: 32,
+            output_channels: 3,
+            block_channels: vec![128, 256, 512, 512],
+            layers_per_block: 2,
+            norm_groups: 32,
+            norm_epsilon: 1e-6,
+            scaling_factor: 1.0,
+            parameter_dtype: DType::BF16,
         }
     }
 
@@ -55,6 +72,7 @@ impl AutoencoderKlDecoderConfig {
             || self.norm_epsilon <= 0.0
             || !self.scaling_factor.is_finite()
             || self.scaling_factor <= 0.0
+            || !matches!(self.parameter_dtype, DType::BF16 | DType::F32)
             || self
                 .block_channels
                 .iter()
@@ -150,6 +168,7 @@ pub fn autoencoder_kl_decoder(
     config: &AutoencoderKlDecoderConfig,
 ) -> Result<Tensor> {
     config.validate()?;
+    let cx = cx.with_parameter_storage_dtype(config.parameter_dtype)?;
     if latent.shape().len() != 4 || latent.shape()[3] != config.latent_channels {
         return Err(Error::InvalidModel {
             kind: ModelDefinitionError::InvalidVaeLatentShape,
@@ -231,6 +250,54 @@ pub fn autoencoder_kl_decoder(
         .apply(&normalized.silu()?)?)
 }
 
+/// Decode FLUX.2 image tokens into an NHWC image.
+///
+/// Transformer tokens are a flattened `[height, width, 128]` grid. The
+/// checkpoint's running statistics invert latent normalization before the
+/// 2×2 patch channels are rearranged into a 32-channel VAE latent.
+pub fn flux2_autoencoder_decoder(
+    cx: Cx,
+    tokens: &Tensor,
+    height: i64,
+    width: i64,
+) -> Result<Tensor> {
+    let [batch, sequence, channels] = tokens.shape() else {
+        return Err(Error::InvalidModel {
+            kind: ModelDefinitionError::InvalidFlux2VaeTokens,
+        });
+    };
+    if tokens.dtype() != DType::F32
+        || height <= 0
+        || width <= 0
+        || *sequence != height * width
+        || *channels != 128
+    {
+        return Err(Error::InvalidModel {
+            kind: ModelDefinitionError::InvalidFlux2VaeTokens,
+        });
+    }
+    let cx = cx.with_parameter_storage_dtype(DType::BF16)?;
+    let grid = tokens.reshape(&[*batch, height, width, 128])?;
+    let bn = cx.scope("bn")?;
+    let mean = bn.param("running_mean", &[128])?;
+    let variance = bn.param("running_var", &[128])?;
+    let scale = variance.add_scalar(1e-4)?.sqrt()?;
+    let normalized_shape = [1, 1, 1, 128];
+    let mean = mean
+        .reshape(&normalized_shape)?
+        .broadcast_to(grid.shape())?;
+    let scale = scale
+        .reshape(&normalized_shape)?
+        .broadcast_to(grid.shape())?;
+    let latent = grid
+        .mul(&scale)?
+        .add(&mean)?
+        .reshape(&[*batch, height, width, 32, 2, 2])?
+        .transpose(&[0, 1, 4, 2, 5, 3])?
+        .reshape(&[*batch, height * 2, width * 2, 32])?;
+    autoencoder_kl_decoder(cx, &latent, &AutoencoderKlDecoderConfig::flux2())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +331,35 @@ mod tests {
         .trace()
         .unwrap();
         assert_eq!(model.outputs()[0].shape(), [1, 64, 64, 3]);
+    }
+
+    #[test]
+    fn flux2_tokens_decode_to_sixteen_times_larger_image() {
+        let model = Model::new(|cx: Cx| {
+            let tokens = cx.input(&[1, 12, 128])?;
+            flux2_autoencoder_decoder(cx, &tokens, 3, 4)
+        })
+        .trace()
+        .unwrap();
+        assert_eq!(model.outputs()[0].shape(), [1, 48, 64, 3]);
+        assert_eq!(
+            model.schema().get("bn.running_mean").unwrap().shape(),
+            [128]
+        );
+        assert_eq!(
+            model
+                .schema()
+                .get("decoder.conv_in.weight")
+                .unwrap()
+                .shape(),
+            [512, 32, 3, 3]
+        );
+        assert!(
+            model
+                .schema()
+                .parameters()
+                .iter()
+                .all(|parameter| parameter.storage_dtype() == DType::BF16)
+        );
     }
 }

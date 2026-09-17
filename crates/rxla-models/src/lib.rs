@@ -50,6 +50,8 @@ pub enum ModelDefinitionError {
     InvalidVaeAttentionInput,
     #[snafu(display("VAE decoder latent shape does not match its configuration"))]
     InvalidVaeLatentShape,
+    #[snafu(display("FLUX.2 VAE tokens do not match the requested image grid"))]
+    InvalidFlux2VaeTokens,
     #[snafu(display("VAE configuration has no block channels"))]
     MissingVaeBlockChannels,
     #[snafu(display("TAESD decoder expects NHWC input with four latent channels"))]
@@ -110,7 +112,7 @@ pub use unet::{UnetConfig, unet};
 mod clip;
 pub use clip::{ClipTextConfig, clip_text_encoder};
 mod vae;
-pub use vae::{AutoencoderKlDecoderConfig, autoencoder_kl_decoder};
+pub use vae::{AutoencoderKlDecoderConfig, autoencoder_kl_decoder, flux2_autoencoder_decoder};
 mod scheduler;
 pub use scheduler::{PndmSampleSource, PndmScheduler, PndmStep};
 mod taesd;

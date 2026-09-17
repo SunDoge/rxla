@@ -223,3 +223,17 @@ for about `1.55 s` before text encoding and VAE decoding. Inputs were zeroed,
 so this proves checkpoint compatibility and executable memory fit, not image
 quality. The compiler emitted extensive register-spill warnings; BF16-native
 compute and attention/kernel work remain performance targets.
+
+The accompanying FLUX.2 VAE adapter reuses RXLA's Diffusers-compatible decoder
+after applying the checkpoint's inverse BatchNorm and 2×2 latent-patch
+rearrangement. Validate or execute it independently with:
+
+```sh
+cargo run -p rxla-safetensors --features model --example flux2_vae_bench -- \
+  /path/to/vae/diffusion_pytorch_model.safetensors \
+  --plugin "$PJRT_CUDA_PLUGIN_PATH"
+```
+
+All 142 required decoder/statistics tensors from the official checkpoint match
+directly. A 2×2 token-grid smoke test produced a 32×32 RGB tensor on the RTX
+5080, compiling in `3.39 s` and executing synchronously in `14.23 ms`.
