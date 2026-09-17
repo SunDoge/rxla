@@ -10,7 +10,9 @@ use rayon::prelude::*;
 use rxla_core::{
     Buffer, CacheLimits, Client, Compiler, Conv2dOptions, DType, PendingHostUpload, Runtime, Tensor,
 };
-use rxla_nn::{BatchNorm, Cx, Linear, Model, ModelInput, Result as NnResult, TensorApply};
+use rxla_nn::{
+    BatchNorm, Conv2d, Cx, Linear, Model, ModelInput, Result as NnResult, TensorApply, path,
+};
 use rxla_train::{DataRng, apply_model_sgd};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -137,40 +139,29 @@ fn gcd(mut lhs: usize, mut rhs: usize) -> usize {
     lhs
 }
 
-fn basic_block(
-    cx: Cx,
-    input: &Tensor,
-    stage_index: usize,
-    block_index: usize,
-    channels: i64,
-    stride: i64,
-) -> NnResult<Tensor> {
-    let stage = cx.scope(format!("stage{stage_index}"))?;
-    let block = stage.scope(format!("block{block_index}"))?;
-    let convolution = Conv2dOptions {
-        strides: [stride, stride],
-        padding: [[1, 1], [1, 1]],
-        ..Default::default()
-    };
-    let hidden = block
-        .scope("conv1")?
-        .conv2d(channels, [3, 3])
-        .options(convolution)
-        .bias(false)
-        .apply(input)?;
-    let hidden = hidden
-        .apply(&block.named_layer("bn1", BatchNorm::new())?)?
-        .relu()?;
-    let hidden = block
-        .scope("conv2")?
-        .conv2d(channels, [3, 3])
-        .options(Conv2dOptions {
-            padding: [[1, 1], [1, 1]],
-            ..Default::default()
-        })
-        .bias(false)
-        .apply(&hidden)?;
-    let hidden = hidden.apply(&block.named_layer("bn2", BatchNorm::new())?)?;
+fn basic_block(cx: Cx, input: &Tensor, channels: i64, stride: i64) -> NnResult<Tensor> {
+    let conv1 = path!(cx / "conv1")?.layer(
+        Conv2d::new(channels, [3, 3])
+            .options(Conv2dOptions {
+                strides: [stride, stride],
+                padding: [[1, 1], [1, 1]],
+                ..Default::default()
+            })
+            .bias(false),
+    );
+    let bn1 = path!(cx / "bn1")?.layer(BatchNorm::new());
+    let conv2 = path!(cx / "conv2")?.layer(
+        Conv2d::new(channels, [3, 3])
+            .options(Conv2dOptions {
+                padding: [[1, 1], [1, 1]],
+                ..Default::default()
+            })
+            .bias(false),
+    );
+    let bn2 = path!(cx / "bn2")?.layer(BatchNorm::new());
+
+    let hidden = input.apply(&conv1)?.apply(&bn1)?.relu()?;
+    let hidden = hidden.apply(&conv2)?.apply(&bn2)?;
     let residual = if stride == 1 {
         input.clone()
     } else {
@@ -185,27 +176,29 @@ fn basic_block(
 }
 
 fn classifier(cx: Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor)> {
-    let mut hidden = cx
-        .scope("stem_conv")?
-        .conv2d(16, [3, 3])
-        .options(Conv2dOptions {
-            padding: [[1, 1], [1, 1]],
-            ..Default::default()
-        })
-        .bias(false)
-        .apply(&images)?;
-    hidden = hidden
-        .apply(&cx.named_layer("stem_bn", BatchNorm::new())?)?
-        .relu()?;
+    let stem_conv = path!(cx / "conv1")?.layer(
+        Conv2d::new(16, [3, 3])
+            .options(Conv2dOptions {
+                padding: [[1, 1], [1, 1]],
+                ..Default::default()
+            })
+            .bias(false),
+    );
+    let stem_bn = path!(cx / "bn1")?.layer(BatchNorm::new());
+    let head = path!(cx / "fc")?.layer(Linear::new(CLASSES));
+
+    let mut hidden = images.apply(&stem_conv)?.apply(&stem_bn)?.relu()?;
     for stage in 0..3 {
         let channels = 16 << stage;
         for block in 0..3 {
             let stride = if stage != 0 && block == 0 { 2 } else { 1 };
-            hidden = basic_block(cx.clone(), &hidden, stage, block, channels, stride)?;
+            let stage_name = format!("layer{}", stage + 1);
+            let block_cx = path!(cx / stage_name / block)?;
+            hidden = basic_block(block_cx, &hidden, channels, stride)?;
         }
     }
     let features = hidden.mean(&[1, 2], false)?;
-    let logits = features.apply(&cx.named_layer("head", Linear::new(CLASSES))?)?;
+    let logits = features.apply(&head)?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;
@@ -383,12 +376,17 @@ mod tests {
             .parameters()
             .iter()
             .filter(|parameter| {
-                parameter.path().ends_with("conv.weight")
-                    || parameter.path().contains(".conv1.weight")
-                    || parameter.path().contains(".conv2.weight")
+                parameter.path().ends_with("conv1.weight")
+                    || parameter.path().ends_with("conv2.weight")
             })
             .count();
         assert_eq!(convolution_weights, 19);
+        assert!(
+            schema
+                .parameters()
+                .iter()
+                .any(|parameter| parameter.path() == "layer2.0.conv1.weight")
+        );
         assert_eq!(schema.states().len(), 38);
         assert_eq!(model.outputs()[0].shape(), []);
         assert_eq!(model.outputs()[1].shape(), [4, CLASSES]);

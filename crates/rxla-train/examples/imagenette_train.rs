@@ -495,14 +495,15 @@ mod tests {
         let convolution_count = schema
             .parameters()
             .iter()
-            .filter(|parameter| {
-                parameter.path().ends_with("conv.weight")
-                    || parameter.path().contains("_conv.weight")
-                    || parameter.path().contains(".conv1.weight")
-                    || parameter.path().contains(".conv2.weight")
-            })
+            .filter(|parameter| parameter.shape().len() == 4)
             .count();
         assert_eq!(convolution_count, 20); // 17 main-path + 3 projection convolutions.
+        assert!(
+            schema
+                .parameters()
+                .iter()
+                .any(|parameter| parameter.path() == "layer4.0.downsample.0.weight")
+        );
         assert_eq!(model.outputs()[1].shape(), [2, CLASSES]);
         assert_eq!(schema.states().len(), 44); // 20 BatchNorm pairs + four RNG words.
         assert!(
