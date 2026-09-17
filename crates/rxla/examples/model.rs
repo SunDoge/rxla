@@ -4,8 +4,8 @@ use rxla::{
 };
 
 fn apply(cx: &mut Cx, input: Tensor) -> Result<Tensor> {
-    let hidden = Linear::new(256).apply(cx, "hidden", &input)?.relu()?;
-    Linear::new(10).apply(cx, "head", &hidden)
+    let hidden = cx.apply("hidden", Linear::new(256), &input)?.relu()?;
+    cx.apply("head", Linear::new(10), &hidden)
 }
 
 fn main() -> Result<()> {

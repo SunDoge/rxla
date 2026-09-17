@@ -20,8 +20,8 @@ mod initializer;
 pub use initializer::Initializer;
 mod layers;
 pub use layers::{
-    BatchNorm, Conv2d, Embedding, GroupNorm, ImageLayout, LayerNorm, Linear, QuantizedLinear,
-    RmsNorm,
+    BatchNorm, Conv2d, Embedding, GroupNorm, ImageLayout, Layer, LayerNorm, Linear,
+    QuantizedLinear, RmsNorm,
 };
 mod outputs;
 pub use outputs::{ModelOutputValues, ModelOutputs};
@@ -39,6 +39,15 @@ pub use selection::{ParameterId, ParameterSelection};
 pub struct Model<F, I = NoModelInputs> {
     apply: F,
     inputs: I,
+    mode: ExecutionMode,
+}
+
+/// Execution semantics selected once for a complete model trace.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExecutionMode {
+    Training,
+    #[default]
+    Inference,
 }
 
 /// Marker used by model functions that declare any inputs themselves.
@@ -164,6 +173,7 @@ impl<F> Model<F, NoModelInputs> {
         Self {
             apply,
             inputs: NoModelInputs,
+            mode: ExecutionMode::Inference,
         }
     }
 
@@ -172,7 +182,20 @@ impl<F> Model<F, NoModelInputs> {
         Model {
             apply: self.apply,
             inputs,
+            mode: self.mode,
         }
+    }
+}
+
+impl<F, I> Model<F, I> {
+    pub fn training(mut self) -> Self {
+        self.mode = ExecutionMode::Training;
+        self
+    }
+
+    pub fn inference(mut self) -> Self {
+        self.mode = ExecutionMode::Inference;
+        self
     }
 }
 
@@ -190,7 +213,7 @@ where
     where
         F: ModelHandler<I, Marker>,
     {
-        trace_once(|cx| self.apply.invoke(cx, &self.inputs))
+        trace_once_mode(self.mode, |cx| self.apply.invoke(cx, &self.inputs))
     }
 
     /// Trace typed inputs once with every parameter stored as resident state.
@@ -203,7 +226,7 @@ where
     where
         F: ModelHandler<I, Marker>,
     {
-        let applied = trace_once_resident_all(|cx| self.apply.invoke(cx, &self.inputs))?;
+        let applied = trace_once_resident_all(self.mode, |cx| self.apply.invoke(cx, &self.inputs))?;
         let selection = applied.schema().select_all();
         Ok((selection, applied))
     }
@@ -219,7 +242,8 @@ where
     where
         F: ModelHandler<I, Marker>,
     {
-        let applied = trace_once_resident_under(scope, |cx| self.apply.invoke(cx, &self.inputs))?;
+        let applied =
+            trace_once_resident_under(scope, self.mode, |cx| self.apply.invoke(cx, &self.inputs))?;
         let selection = applied.schema().select_under(scope);
         Ok((selection, applied))
     }
@@ -240,8 +264,9 @@ where
             .parameters()
             .map(|(_, parameter)| parameter.path().to_owned())
             .collect();
-        let mut applied =
-            trace_once_resident_selected(paths, |cx| self.apply.invoke(cx, &self.inputs))?;
+        let mut applied = trace_once_resident_selected(paths, self.mode, |cx| {
+            self.apply.invoke(cx, &self.inputs)
+        })?;
         if applied.schema() != selection.schema() {
             return Err(<F as ModelHandler<I, Marker>>::Error::from(
                 Error::ModelSchemaMismatch,
@@ -284,6 +309,7 @@ pub struct Cx {
     rngs: BTreeMap<String, RngStream>,
     resident_parameters: BTreeMap<String, StateSlot>,
     conditional_depth: usize,
+    mode: ExecutionMode,
 }
 
 /// A temporary lexical effect scope.
@@ -343,23 +369,24 @@ pub struct Rng<'a> {
 }
 
 impl Cx {
+    #[cfg(test)]
     fn init() -> Self {
-        Self::init_with_residency(InitResidency::None)
+        Self::init_with_residency(InitResidency::None, ExecutionMode::Training)
     }
 
-    fn init_resident_all() -> Self {
-        Self::init_with_residency(InitResidency::All)
+    fn init_resident_all(mode: ExecutionMode) -> Self {
+        Self::init_with_residency(InitResidency::All, mode)
     }
 
-    fn init_resident_under(scope: &str) -> Self {
-        Self::init_with_residency(InitResidency::Under(scope.to_owned()))
+    fn init_resident_under(scope: &str, mode: ExecutionMode) -> Self {
+        Self::init_with_residency(InitResidency::Under(scope.to_owned()), mode)
     }
 
-    fn init_resident_selected(paths: BTreeSet<String>) -> Self {
-        Self::init_with_residency(InitResidency::Selected(paths))
+    fn init_resident_selected(paths: BTreeSet<String>, mode: ExecutionMode) -> Self {
+        Self::init_with_residency(InitResidency::Selected(paths), mode)
     }
 
-    fn init_with_residency(residency: InitResidency) -> Self {
+    fn init_with_residency(residency: InitResidency, mode: ExecutionMode) -> Self {
         Self {
             graph: StateGraph::default(),
             scope: Vec::new(),
@@ -370,7 +397,12 @@ impl Cx {
             rngs: BTreeMap::new(),
             resident_parameters: BTreeMap::new(),
             conditional_depth: 0,
+            mode,
         }
+    }
+
+    pub fn mode(&self) -> ExecutionMode {
+        self.mode
     }
 
     /// Declare/read an F32 parameter at the current lexical scope.
@@ -963,6 +995,7 @@ fn apply<T: ModelOutputs>(
     Ok(applied)
 }
 
+#[cfg(test)]
 fn trace_once<T, E>(
     body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
 ) -> std::result::Result<AppliedModel, E>
@@ -973,36 +1006,50 @@ where
     trace_once_with(Cx::init(), body)
 }
 
-fn trace_once_resident_all<T, E>(
+fn trace_once_mode<T, E>(
+    mode: ExecutionMode,
     body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
 ) -> std::result::Result<AppliedModel, E>
 where
     T: ModelOutputs,
     E: From<Error>,
 {
-    trace_once_with(Cx::init_resident_all(), body)
+    trace_once_with(Cx::init_with_residency(InitResidency::None, mode), body)
+}
+
+fn trace_once_resident_all<T, E>(
+    mode: ExecutionMode,
+    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+) -> std::result::Result<AppliedModel, E>
+where
+    T: ModelOutputs,
+    E: From<Error>,
+{
+    trace_once_with(Cx::init_resident_all(mode), body)
 }
 
 fn trace_once_resident_under<T, E>(
     scope: &str,
+    mode: ExecutionMode,
     body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
 ) -> std::result::Result<AppliedModel, E>
 where
     T: ModelOutputs,
     E: From<Error>,
 {
-    trace_once_with(Cx::init_resident_under(scope), body)
+    trace_once_with(Cx::init_resident_under(scope, mode), body)
 }
 
 fn trace_once_resident_selected<T, E>(
     paths: BTreeSet<String>,
+    mode: ExecutionMode,
     body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
 ) -> std::result::Result<AppliedModel, E>
 where
     T: ModelOutputs,
     E: From<Error>,
 {
-    trace_once_with(Cx::init_resident_selected(paths), body)
+    trace_once_with(Cx::init_resident_selected(paths, mode), body)
 }
 
 fn trace_once_with<T, E>(
@@ -1034,6 +1081,29 @@ mod tests {
     use super::*;
     use rxla_core::{Buffer, CacheLimits, Client, ClientOptions, Compiler, Conv2dOptions};
     use std::cell::Cell;
+
+    #[test]
+    fn model_execution_mode_is_selected_once_for_the_trace() {
+        let training_seen = Cell::new(None);
+        Model::new(|cx: &mut Cx| -> Result<Tensor> {
+            training_seen.set(Some(cx.mode()));
+            cx.input(&[1])
+        })
+        .training()
+        .trace()
+        .unwrap();
+        assert_eq!(training_seen.get(), Some(ExecutionMode::Training));
+
+        let inference_seen = Cell::new(None);
+        Model::new(|cx: &mut Cx| -> Result<Tensor> {
+            inference_seen.set(Some(cx.mode()));
+            cx.input(&[1])
+        })
+        .inference()
+        .trace()
+        .unwrap();
+        assert_eq!(inference_seen.get(), Some(ExecutionMode::Inference));
+    }
 
     fn classifier(cx: &mut Cx) -> Result<Tensor> {
         let input = cx.input(&[2, 4])?;

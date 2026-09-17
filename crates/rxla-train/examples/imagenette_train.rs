@@ -6,7 +6,10 @@ use rayon::prelude::*;
 use rxla_core::{
     CacheLimits, Client, Compiler, Conv2dOptions, DType, PendingHostUpload, Pool2dOptions, Tensor,
 };
-use rxla_nn::{AppliedModel, Cx, Model, ModelInput, Result as NnResult};
+use rxla_nn::{
+    AppliedModel, BatchNorm, Conv2d, Cx, ExecutionMode, Linear, Model, ModelInput,
+    Result as NnResult,
+};
 use rxla_train::{BoundedPipeline, DataRng, PipelineResult, apply_model_sgd};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -213,67 +216,52 @@ fn basic_block(
     block_index: usize,
     channels: i64,
     stride: i64,
-    training: bool,
 ) -> NnResult<Tensor> {
     let mut stage = cx.scope(format!("stage{stage_index}"))?;
     let mut block = stage.scope(format!("block{block_index}"))?;
-    let hidden = block
-        .scope("conv1")?
-        .conv2d(channels, [3, 3])
-        .options(Conv2dOptions {
-            strides: [stride, stride],
-            padding: [[1, 1], [1, 1]],
-            ..Default::default()
-        })
-        .bias(false)
-        .apply(input)?;
-    let hidden = block
-        .scope("bn1")?
-        .batch_norm()
-        .training(training)
-        .apply(&hidden)?
-        .relu()?;
-    let hidden = block
-        .scope("conv2")?
-        .conv2d(channels, [3, 3])
-        .options(Conv2dOptions {
-            padding: [[1, 1], [1, 1]],
-            ..Default::default()
-        })
-        .bias(false)
-        .apply(&hidden)?;
-    let hidden = block
-        .scope("bn2")?
-        .batch_norm()
-        .training(training)
-        .apply(&hidden)?;
+    let hidden = block.apply(
+        "conv1",
+        Conv2d::new(channels, [3, 3])
+            .options(Conv2dOptions {
+                strides: [stride, stride],
+                padding: [[1, 1], [1, 1]],
+                ..Default::default()
+            })
+            .bias(false),
+        input,
+    )?;
+    let hidden = block.apply("bn1", BatchNorm::new(), &hidden)?.relu()?;
+    let hidden = block.apply(
+        "conv2",
+        Conv2d::new(channels, [3, 3])
+            .options(Conv2dOptions {
+                padding: [[1, 1], [1, 1]],
+                ..Default::default()
+            })
+            .bias(false),
+        &hidden,
+    )?;
+    let hidden = block.apply("bn2", BatchNorm::new(), &hidden)?;
     let residual = if input.shape()[3] == channels && stride == 1 {
         input.clone()
     } else {
-        let projected = block
-            .scope("shortcut_conv")?
-            .conv2d(channels, [1, 1])
-            .options(Conv2dOptions {
-                strides: [stride, stride],
-                ..Default::default()
-            })
-            .bias(false)
-            .apply(input)?;
-        block
-            .scope("shortcut_bn")?
-            .batch_norm()
-            .training(training)
-            .apply(&projected)?
+        let projected = block.apply(
+            "shortcut_conv",
+            Conv2d::new(channels, [1, 1])
+                .options(Conv2dOptions {
+                    strides: [stride, stride],
+                    ..Default::default()
+                })
+                .bias(false),
+            input,
+        )?;
+        block.apply("shortcut_bn", BatchNorm::new(), &projected)?
     };
     Ok(hidden.add(&residual)?.relu()?)
 }
 
-fn resnet18(
-    cx: &mut Cx,
-    images: Tensor,
-    labels: Tensor,
-    training: bool,
-) -> NnResult<(Tensor, Tensor, Tensor)> {
+fn resnet18(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor, Tensor)> {
+    let training = cx.mode() == ExecutionMode::Training;
     let batch_size = images.shape()[0];
     let mut augmentation_rng = cx.rng("augmentation")?;
     let flips =
@@ -283,21 +271,19 @@ fn resnet18(
         .broadcast_to(images.shape())?
         .select(&images.flip_left_right()?, &images)?
         .normalize_nhwc(&[0.485, 0.456, 0.406], &[0.229, 0.224, 0.225])?;
-    let mut hidden = cx
-        .scope("stem_conv")?
-        .conv2d(64, [7, 7])
-        .options(Conv2dOptions {
-            strides: [2, 2],
-            padding: [[3, 3], [3, 3]],
-            ..Default::default()
-        })
-        .bias(false)
-        .apply(&images)?;
+    let mut hidden = cx.apply(
+        "stem_conv",
+        Conv2d::new(64, [7, 7])
+            .options(Conv2dOptions {
+                strides: [2, 2],
+                padding: [[3, 3], [3, 3]],
+                ..Default::default()
+            })
+            .bias(false),
+        &images,
+    )?;
     hidden = cx
-        .scope("stem_bn")?
-        .batch_norm()
-        .training(training)
-        .apply(&hidden)?
+        .apply("stem_bn", BatchNorm::new(), &hidden)?
         .relu()?
         .avg_pool2d(
             Pool2dOptions {
@@ -310,11 +296,11 @@ fn resnet18(
     for (stage, channels) in [64, 128, 256, 512].into_iter().enumerate() {
         for block in 0..2 {
             let stride = if stage != 0 && block == 0 { 2 } else { 1 };
-            hidden = basic_block(cx, &hidden, stage, block, channels, stride, training)?;
+            hidden = basic_block(cx, &hidden, stage, block, channels, stride)?;
         }
     }
     let features = hidden.mean(&[1, 2], false)?;
-    let logits = cx.scope("head")?.linear(CLASSES).apply(&features)?;
+    let logits = cx.apply("head", Linear::new(CLASSES), &features)?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;
@@ -324,22 +310,6 @@ fn resnet18(
         .mul(&labels.le_mask(&predicted)?)?
         .sum(&[0], false)?;
     Ok((loss, logits, correct))
-}
-
-fn resnet18_train(
-    cx: &mut Cx,
-    images: Tensor,
-    labels: Tensor,
-) -> NnResult<(Tensor, Tensor, Tensor)> {
-    resnet18(cx, images, labels, true)
-}
-
-fn resnet18_infer(
-    cx: &mut Cx,
-    images: Tensor,
-    labels: Tensor,
-) -> NnResult<(Tensor, Tensor, Tensor)> {
-    resnet18(cx, images, labels, false)
 }
 
 fn resnet18_inputs(batch_size: i64) -> (ModelInput, ModelInput) {
@@ -418,7 +388,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let gpu = unsafe { Client::load(&args.gpu_plugin) }?;
     let batch_size = args.batch_size;
-    let definition = Model::new(resnet18_train).inputs(resnet18_inputs(batch_size));
+    let definition = Model::new(resnet18)
+        .inputs(resnet18_inputs(batch_size))
+        .training();
     let (trainable, mut model) = definition.trace_resident_all()?;
     let metrics = Tensor::stack(&[model.outputs()[0].clone(), model.outputs()[2].clone()], 0)?;
     let loss = model.outputs()[0].clone();
@@ -479,8 +451,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         phases.print(batch_size);
     }
 
-    let inference = Model::new(resnet18_infer)
+    let inference = Model::new(resnet18)
         .inputs(resnet18_inputs(batch_size))
+        .inference()
         .trace_resident(&trainable)?;
     let inference_metrics = Tensor::stack(
         &[
@@ -521,8 +494,9 @@ mod tests {
 
     #[test]
     fn resnet18_schema_has_eighteen_convolutions_and_stateful_norms() {
-        let model = Model::new(resnet18_train)
+        let model = Model::new(resnet18)
             .inputs(resnet18_inputs(2))
+            .training()
             .trace()
             .unwrap();
         let schema = model.schema();

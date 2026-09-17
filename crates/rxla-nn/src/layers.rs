@@ -14,6 +14,11 @@ pub enum ImageLayout {
     Nhwc,
 }
 
+/// A stateless layer configuration interpreted inside a named effect scope.
+pub trait Layer {
+    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor>;
+}
+
 /// A named embedding lookup with an inferred output shape.
 #[must_use = "layer builders do nothing until apply is called"]
 pub struct Embedding {
@@ -199,8 +204,6 @@ pub struct BatchNorm {
     #[setters(generate)]
     momentum: f32,
     #[setters(generate)]
-    training: bool,
-    #[setters(generate)]
     layout: ImageLayout,
 }
 
@@ -209,19 +212,19 @@ impl BatchNorm {
         Self {
             epsilon: 1e-5,
             momentum: 0.1,
-            training: true,
             layout: ImageLayout::Nhwc,
         }
     }
 
     pub fn apply(self, cx: &mut Cx, name: &str, input: &Tensor) -> Result<Tensor> {
+        let training = cx.mode() == ExecutionMode::Training;
         let mut scope = cx.scope(name)?;
         apply_batch_norm(
             &mut scope,
             input,
             self.epsilon,
             self.momentum,
-            self.training,
+            training,
             self.layout,
         )
     }
@@ -341,6 +344,119 @@ impl LayerNorm {
     }
 }
 
+impl Layer for Linear {
+    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+        apply_linear(cx, input, self.out_features, self.bias)
+    }
+}
+
+impl Layer for Conv2d {
+    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+        apply_conv2d(
+            cx,
+            input,
+            self.out_channels,
+            self.kernel,
+            self.options,
+            self.bias,
+            self.layout,
+        )
+    }
+}
+
+impl Layer for GroupNorm {
+    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+        apply_group_norm(
+            cx,
+            input,
+            self.groups,
+            self.epsilon,
+            self.affine,
+            self.layout,
+        )
+    }
+}
+
+impl Layer for BatchNorm {
+    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+        let training = cx.mode() == ExecutionMode::Training;
+        apply_batch_norm(
+            cx,
+            input,
+            self.epsilon,
+            self.momentum,
+            training,
+            self.layout,
+        )
+    }
+}
+
+impl Layer for LayerNorm {
+    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+        apply_layer_norm(cx, input, self.normalized_rank, self.epsilon, self.affine)
+    }
+}
+
+impl Layer for QuantizedLinear {
+    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+        apply_quantized_linear(cx, input, &self)
+    }
+}
+
+impl Layer for Embedding {
+    fn apply(self, cx: &mut Cx, indices: &Tensor) -> Result<Tensor> {
+        ensure!(
+            indices.dtype() == DType::I32 && self.vocabulary > 0 && self.width > 0,
+            InvalidLayerInputSnafu {
+                layer: "Embedding",
+                requirement: "I32 indices and positive vocabulary/width",
+            }
+        );
+        Ok(cx
+            .param_initialized(
+                "weight",
+                &[self.vocabulary, self.width],
+                Initializer::normal(0.0, 1.0),
+            )?
+            .take(indices, 0)?)
+    }
+}
+
+impl Layer for RmsNorm {
+    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+        ensure!(
+            input.dtype() == DType::F32 && !input.shape().is_empty(),
+            InvalidLayerInputSnafu {
+                layer: "RmsNorm",
+                requirement: "an F32 input with rank at least one",
+            }
+        );
+        let width = *input.shape().last().expect("rank checked above");
+        let weight = cx.param_initialized(
+            "weight",
+            &[width],
+            if self.zero_centered {
+                Initializer::zeros()
+            } else {
+                Initializer::ones()
+            },
+        )?;
+        let weight = if self.zero_centered {
+            weight.add_scalar(1.0)?
+        } else {
+            weight
+        };
+        Ok(input.rms_norm(&weight, self.epsilon)?)
+    }
+}
+
+impl Cx {
+    pub fn apply<L: Layer>(&mut self, name: &str, layer: L, input: &Tensor) -> Result<Tensor> {
+        let mut scope = self.scope(name)?;
+        layer.apply(&mut scope, input)
+    }
+}
+
 /// Compatibility adapter for the former scope-first spelling.
 /// New model code should construct a layer configuration and call
 /// `layer.apply(cx, name, input)` directly.
@@ -366,7 +482,7 @@ macro_rules! scoped_setters {
 scoped_setters!(Linear, bias: bool);
 scoped_setters!(Conv2d, options: Conv2dOptions, bias: bool, layout: ImageLayout);
 scoped_setters!(GroupNorm, epsilon: f32, affine: bool, layout: ImageLayout);
-scoped_setters!(BatchNorm, epsilon: f32, momentum: f32, training: bool, layout: ImageLayout);
+scoped_setters!(BatchNorm, epsilon: f32, momentum: f32, layout: ImageLayout);
 scoped_setters!(LayerNorm, epsilon: f32, affine: bool);
 scoped_setters!(RmsNorm, epsilon: f32, zero_centered: bool);
 
@@ -413,12 +529,13 @@ impl ScopedLayer<'_, GroupNorm> {
 
 impl ScopedLayer<'_, BatchNorm> {
     pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        let training = self.scope.mode() == ExecutionMode::Training;
         apply_batch_norm(
             &mut self.scope,
             input,
             self.layer.epsilon,
             self.layer.momentum,
-            self.layer.training,
+            training,
             self.layer.layout,
         )
     }
@@ -844,8 +961,8 @@ mod tests {
     fn layer_configs_apply_named_effects_without_a_builder_type() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 8])?;
-            let hidden = Linear::new(4).bias(false).apply(cx, "encoder", &input)?;
-            Linear::new(3).apply(cx, "head", &hidden)
+            let hidden = cx.apply("encoder", Linear::new(4).bias(false), &input)?;
+            cx.apply("head", Linear::new(3), &hidden)
         })
         .unwrap();
 
