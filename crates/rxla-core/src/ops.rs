@@ -402,26 +402,54 @@ impl Tensor {
             .node_typed(Op::Broadcast { axes }, vec![self.node_id()], target.ty())
     }
     pub fn broadcast_in_dim(&self, dims: &[i64], axes: &[usize]) -> Result<Self> {
-        elements(dims)?;
         if axes.len() != self.shape.len() || axes.windows(2).any(|w| w[0] >= w[1]) {
             return Err(err(
                 "broadcast axes must be strictly increasing and match input rank",
             ));
         }
-        for (&axis, &size) in axes.iter().zip(self.shape.iter()) {
-            if axis >= dims.len() || (size != 1 && size != dims[axis]) {
+        let mut bounds = vec![-1; dims.len()];
+        for (input_axis, (&output_axis, &size)) in axes.iter().zip(self.shape.iter()).enumerate() {
+            if output_axis >= dims.len() {
                 return Err(err("incompatible broadcast dimension"));
             }
+            if size == -1 {
+                if dims[output_axis] != -1 {
+                    return Err(err("a bounded dynamic broadcast axis must remain dynamic"));
+                }
+                bounds[output_axis] = self
+                    .ty()
+                    .bound(input_axis)
+                    .expect("dynamic tensor axis carries an upper bound");
+            } else if size != 1 && size != dims[output_axis] {
+                return Err(err("incompatible broadcast dimension"));
+            }
+        }
+        if dims
+            .iter()
+            .enumerate()
+            .any(|(axis, &dimension)| dimension < 0 && bounds[axis] < 0)
+        {
+            return Err(err(
+                "a new dynamic broadcast axis requires an explicit bounded target tensor",
+            ));
+        }
+        if bounds.iter().all(|&bound| bound == -1) {
+            elements(dims)?;
+            bounds.clear();
         }
         if dims == self.shape.as_ref() && axes.iter().copied().eq(0..dims.len()) {
             return Ok(self.clone());
         }
-        self.graph().node(
+        self.graph().node_typed(
             Op::Broadcast {
                 axes: axes.to_vec(),
             },
             vec![self.node_id()],
-            dims,
+            TensorType {
+                dims: dims.to_vec(),
+                dtype: self.dtype(),
+                dynamic_bounds: bounds,
+            },
         )
     }
     /// Reverse element order along explicit axes without changing shape.
@@ -445,18 +473,16 @@ impl Tensor {
     }
 
     pub fn transpose(&self, permutation: &[usize]) -> Result<Self> {
-        let mut sorted = permutation.to_vec();
-        sorted.sort_unstable();
-        if sorted != (0..self.shape.len()).collect::<Vec<_>>() {
-            return Err(err("invalid transpose permutation"));
-        }
-        let dims: Vec<_> = permutation.iter().map(|&i| self.shape[i]).collect();
-        self.graph().node(
+        let ty = self
+            .ty()
+            .permuted(permutation)
+            .ok_or_else(|| err("invalid transpose permutation"))?;
+        self.graph().node_typed(
             Op::Transpose {
                 permutation: permutation.to_vec(),
             },
             vec![self.node_id()],
-            &dims,
+            ty,
         )
     }
     fn reduce(&self, axes: &[usize], keepdims: bool, maximum: bool) -> Result<Self> {
@@ -469,14 +495,11 @@ impl Tensor {
         if axes.is_empty() {
             return Ok(self.clone());
         }
-        let dims: Vec<_> = self
-            .shape
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !sorted.contains(i))
-            .map(|(_, &d)| d)
-            .collect();
-        let output = self.graph().node(
+        let output_ty = self
+            .ty()
+            .reduced(&sorted, false)
+            .expect("validated reduction axes");
+        let output = self.graph().node_typed(
             Op::Reduce {
                 kind: if maximum {
                     Reduction::Maximum
@@ -486,17 +509,15 @@ impl Tensor {
                 axes: sorted.clone(),
             },
             vec![self.node_id()],
-            &dims,
+            output_ty,
         )?;
         if keepdims {
-            output.reshape(
-                &self
-                    .shape
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &d)| if sorted.contains(&i) { 1 } else { d })
-                    .collect::<Vec<_>>(),
-            )
+            let keepdims_ty = self
+                .ty()
+                .reduced(&sorted, true)
+                .expect("validated reduction axes");
+            self.graph()
+                .node_typed(Op::Reshape, vec![output.node_id()], keepdims_ty)
         } else {
             Ok(output)
         }

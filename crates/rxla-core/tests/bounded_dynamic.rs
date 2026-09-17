@@ -35,6 +35,52 @@ fn bounded_shape_survives_tensor_ir_and_elementwise_lowering() {
 }
 
 #[test]
+fn axis_transforms_keep_dynamic_bounds_attached_to_their_axes() {
+    let tracer = Tracer::new();
+    let input = tracer
+        .input_shape(
+            &[Dim::Bounded { upper: 8 }, Dim::Static(1), Dim::Static(4)],
+            DType::F32,
+        )
+        .unwrap();
+
+    let transposed = input.transpose(&[2, 0, 1]).unwrap();
+    assert_eq!(transposed.shape(), [4, -1, 1]);
+    assert_eq!(transposed.dim_bound(1), Some(8));
+
+    let squeezed = transposed.squeeze(2).unwrap();
+    assert_eq!(squeezed.shape(), [4, -1]);
+    assert_eq!(squeezed.dim_bound(1), Some(8));
+    let restored = squeezed.unsqueeze(0).unwrap();
+    assert_eq!(restored.shape(), [1, 4, -1]);
+    assert_eq!(restored.dim_bound(2), Some(8));
+    let broadcast = squeezed.broadcast_in_dim(&[2, 4, -1], &[1, 2]).unwrap();
+    assert_eq!(broadcast.shape(), [2, 4, -1]);
+    assert_eq!(broadcast.dim_bound(2), Some(8));
+    assert!(squeezed.broadcast_in_dim(&[-1, 4, -1], &[1, 2]).is_err());
+
+    let reduced = restored.sum(&[1], false).unwrap();
+    assert_eq!(reduced.shape(), [1, -1]);
+    assert_eq!(reduced.dim_bound(1), Some(8));
+    let keepdims = restored.sum(&[1], true).unwrap();
+    assert_eq!(keepdims.shape(), [1, 1, -1]);
+    assert_eq!(keepdims.dim_bound(2), Some(8));
+
+    let indices = restored.argmax(1, true).unwrap();
+    assert_eq!(indices.shape(), [1, 1, -1]);
+    assert_eq!(indices.dim_bound(2), Some(8));
+
+    let program = tracer
+        .program(vec![
+            transposed, squeezed, restored, broadcast, reduced, keepdims, indices,
+        ])
+        .unwrap();
+    let code = std::str::from_utf8(program.lowered_program().code()).unwrap();
+    assert!(code.contains("tensor<4x?x1xf32, #stablehlo.bounds<?, 8, ?>>"));
+    assert!(code.contains("tensor<1x1x?xi32, #stablehlo.bounds<?, ?, 8>>"));
+}
+
+#[test]
 #[ignore = "requires a trusted PJRT_CPU_PLUGIN_PATH"]
 fn xla_cpu_accepts_bounded_dynamic_stablehlo() {
     let tracer = Tracer::new();

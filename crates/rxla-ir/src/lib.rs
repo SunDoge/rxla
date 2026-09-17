@@ -160,6 +160,109 @@ impl TensorType {
             .copied()
             .filter(|&bound| bound >= 0)
     }
+
+    fn normalized_bounds(mut bounds: Vec<i64>) -> Vec<i64> {
+        if bounds.iter().all(|&bound| bound == -1) {
+            bounds.clear();
+        }
+        bounds
+    }
+
+    /// Reorder axes while keeping every dynamic upper bound attached to its axis.
+    pub fn permuted(&self, permutation: &[usize]) -> Option<Self> {
+        let mut sorted = permutation.to_vec();
+        sorted.sort_unstable();
+        if sorted != (0..self.dims.len()).collect::<Vec<_>>() {
+            return None;
+        }
+        let dims = permutation.iter().map(|&axis| self.dims[axis]).collect();
+        let dynamic_bounds = if self.dynamic_bounds.is_empty() {
+            Vec::new()
+        } else {
+            permutation
+                .iter()
+                .map(|&axis| self.dynamic_bounds[axis])
+                .collect()
+        };
+        Some(Self {
+            dims,
+            dtype: self.dtype,
+            dynamic_bounds,
+        })
+    }
+
+    /// Remove reduction axes, or replace them with static singleton axes.
+    pub fn reduced(&self, axes: &[usize], keepdims: bool) -> Option<Self> {
+        let mut sorted = axes.to_vec();
+        sorted.sort_unstable();
+        if sorted.iter().any(|&axis| axis >= self.dims.len())
+            || sorted.windows(2).any(|pair| pair[0] == pair[1])
+        {
+            return None;
+        }
+        let mut dims = Vec::with_capacity(if keepdims {
+            self.dims.len()
+        } else {
+            self.dims.len() - sorted.len()
+        });
+        let mut bounds = Vec::with_capacity(dims.capacity());
+        for (axis, &dimension) in self.dims.iter().enumerate() {
+            if sorted.binary_search(&axis).is_ok() {
+                if keepdims {
+                    dims.push(1);
+                    bounds.push(-1);
+                }
+            } else {
+                dims.push(dimension);
+                bounds.push(self.bound(axis).unwrap_or(-1));
+            }
+        }
+        Some(Self {
+            dims,
+            dtype: self.dtype,
+            dynamic_bounds: Self::normalized_bounds(bounds),
+        })
+    }
+
+    /// Insert one statically-sized axis without changing the other axes.
+    pub fn inserted_axis(&self, axis: usize, size: i64) -> Option<Self> {
+        if axis > self.dims.len() || size < 0 {
+            return None;
+        }
+        let mut dims = self.dims.clone();
+        dims.insert(axis, size);
+        let mut bounds = if self.dynamic_bounds.is_empty() {
+            vec![-1; self.dims.len()]
+        } else {
+            self.dynamic_bounds.clone()
+        };
+        bounds.insert(axis, -1);
+        Some(Self {
+            dims,
+            dtype: self.dtype,
+            dynamic_bounds: Self::normalized_bounds(bounds),
+        })
+    }
+
+    /// Remove one statically-sized axis, preserving the remaining bounds.
+    pub fn removed_axis(&self, axis: usize, expected_size: i64) -> Option<Self> {
+        if self.dims.get(axis) != Some(&expected_size) {
+            return None;
+        }
+        let mut dims = self.dims.clone();
+        dims.remove(axis);
+        let mut bounds = if self.dynamic_bounds.is_empty() {
+            vec![-1; self.dims.len()]
+        } else {
+            self.dynamic_bounds.clone()
+        };
+        bounds.remove(axis);
+        Some(Self {
+            dims,
+            dtype: self.dtype,
+            dynamic_bounds: Self::normalized_bounds(bounds),
+        })
+    }
 }
 
 /// Static half-open slice semantics retained as a typed Pliron attribute.

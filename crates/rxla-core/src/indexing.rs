@@ -306,17 +306,19 @@ impl Tensor {
         if axis >= self.shape.len() || self.shape[axis] <= 0 || self.shape[axis] > i32::MAX as i64 {
             return Err(err("argmax requires a nonempty axis with I32-sized length"));
         }
-        let mut dims = self.shape.to_vec();
-        dims.remove(axis);
-        let id = self.graph().push_node(
-            Op::ArgMax { axis },
-            vec![self.node_id()],
-            index_shape(&dims),
-        )?;
-        let value = Tensor::symbolic(self.graph().clone(), id, &dims, DType::I32);
+        let mut ty = self
+            .ty()
+            .reduced(&[axis], false)
+            .expect("validated argmax axis");
+        ty.dtype = DType::I32;
+        let id = self
+            .graph()
+            .push_node(Op::ArgMax { axis }, vec![self.node_id()], ty.clone())?;
+        let value = Tensor::symbolic_typed(self.graph().clone(), id, &ty);
         if keep_dims {
-            dims.insert(axis, 1);
-            value.reshape(&dims)
+            let keepdims_ty = ty.inserted_axis(axis, 1).expect("validated argmax axis");
+            self.graph()
+                .node_typed(Op::Reshape, vec![value.node_id()], keepdims_ty)
         } else {
             Ok(value)
         }
@@ -326,9 +328,12 @@ impl Tensor {
         if axis > self.shape.len() {
             return Err(err("unsqueeze axis out of range"));
         }
-        let mut dims = self.shape.to_vec();
-        dims.insert(axis, 1);
-        self.reshape(&dims)
+        let ty = self
+            .ty()
+            .inserted_axis(axis, 1)
+            .expect("validated insertion axis");
+        self.graph()
+            .node_typed(Op::Reshape, vec![self.node_id()], ty)
     }
     /// Remove one explicitly selected size-one axis. Other singleton axes are
     /// preserved; removing a non-singleton or absent axis is an error.
@@ -336,9 +341,12 @@ impl Tensor {
         if self.shape.get(axis) != Some(&1) {
             return Err(err("squeeze requires a valid size-one axis"));
         }
-        let mut dims = self.shape.to_vec();
-        dims.remove(axis);
-        self.reshape(&dims)
+        let ty = self
+            .ty()
+            .removed_axis(axis, 1)
+            .expect("validated singleton axis");
+        self.graph()
+            .node_typed(Op::Reshape, vec![self.node_id()], ty)
     }
     /// Join equal-shaped tensors along a new axis (0 through input rank).
     /// Unlike concatenate, this increases rank by one. Inputs must be nonempty

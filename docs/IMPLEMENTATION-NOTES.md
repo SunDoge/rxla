@@ -4963,7 +4963,12 @@ ranked-tensor type, semantic snapshots, cache/artifact metadata and emitted
 `#stablehlo.bounds`. `Tensor::dim_bound` and executable input/output specs expose
 them without confusing an upper bound with a runtime extent. Same-shape
 elementwise operations preserve bounds, and `broadcast_as` retains the target's
-bounded shape.
+bounded shape. Axis transforms are derived from `TensorType` rather than from a
+bare dimension vector: transpose permutes bounds, reduction drops or replaces
+reduced axes, singleton insertion/removal preserves the remaining axes, and
+`broadcast_in_dim` only admits dynamic axes whose bound can be traced to an
+input axis. A newly introduced dynamic broadcast axis requires `broadcast_as`
+with an explicitly bounded target instead of an unbounded `-1`.
 
 This is currently an IR and compilation feature, not a promise that every PJRT
 plugin can construct and execute bounded-dynamic buffers. The development ZML
