@@ -153,7 +153,7 @@ bound.
 ## F16 cuDNN attention result
 
 RXLA now preserves attention until target-aware compilation. The Stable
-Diffusion example explicitly enables `Compiler::with_f16_attention(true)`.
+Diffusion example explicitly enables `Compiler::with_cudnn_attention(true)`.
 On CUDA, only unmasked rank-four self-attention with equal query/key lengths of
 at least 512 and a supported head dimension is converted to F16 at the op
 boundary and lowered to `__cudnn$fmhaSoftmax`; short and cross attention remain

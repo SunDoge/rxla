@@ -23,6 +23,9 @@ struct Args {
     /// Internal CUDA compute precision; inputs and outputs remain F32.
     #[arg(long, value_enum, default_value_t = ComputePrecision::F16)]
     precision: ComputePrecision,
+    /// Explicitly lower eligible attention operations to cuDNN FMHA.
+    #[arg(long)]
+    cudnn_attention: bool,
     /// Write each final F32 stage to `<prefix>.stageN.f32` for oracle comparison.
     #[arg(long)]
     output_prefix: Option<PathBuf>,
@@ -74,6 +77,7 @@ fn run(args: Args) -> Result<()> {
         ComputePrecision::Bf16 => compiler.with_compute_dtype(rxla_core::DType::BF16),
         ComputePrecision::F16 => compiler.with_compute_dtype(rxla_core::DType::F16),
     };
+    let compiler = compiler.with_cudnn_attention(args.cudnn_attention);
     let compiler = if args.direct_launches {
         compiler.without_cuda_command_buffers()
     } else {

@@ -315,8 +315,8 @@ impl DialectConversion for RxlaToStableHlo {
             if matches!(
                 self.target,
                 LoweringTarget::CudaF16Attention
-                    | LoweringTarget::CudaF16Compute
-                    | LoweringTarget::CudaBf16Compute
+                    | LoweringTarget::CudaF16ComputeCudnnAttention
+                    | LoweringTarget::CudaBf16ComputeCudnnAttention
             ) && mask.is_none()
                 && source_result_type.dtype == DType::F32
                 && source_result_type.dims.len() == 4

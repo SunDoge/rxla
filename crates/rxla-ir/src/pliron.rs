@@ -66,6 +66,8 @@ pub enum LoweringTarget {
     CudaF16Attention,
     CudaF16Compute,
     CudaBf16Compute,
+    CudaF16ComputeCudnnAttention,
+    CudaBf16ComputeCudnnAttention,
 }
 pub use program::{ProgramIr, SsaId, StableHloProgram};
 

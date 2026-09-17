@@ -129,7 +129,9 @@ fn cuda_attention_matches_jax_cudnn_logical_abi() {
         .unwrap();
 
     let snapshot = SemanticProgram::capture(&program, &[attention], true).unwrap();
-    let lowered = snapshot.lower(LoweringTarget::CudaF16Compute).unwrap();
+    let lowered = snapshot
+        .lower(LoweringTarget::CudaF16ComputeCudnnAttention)
+        .unwrap();
     assert_eq!(lowered.code.matches("dims = [0, 2, 1, 3]").count(), 3);
     assert!(lowered.code.contains("@__cudnn$fmhaSoftmax"));
     assert!(
@@ -138,6 +140,23 @@ fn cuda_attention_matches_jax_cudnn_logical_abi() {
             .contains("result_layouts = [dense<[3, 1, 2, 0]>")
     );
     assert!(lowered.code.contains("tensor<1x512x2x64xf16>"));
+}
+
+#[test]
+fn compute_precision_does_not_force_an_attention_backend() {
+    let mut program = ProgramIr::default();
+    let ty = TensorType::static_shape(vec![1, 2, 512, 64], DType::F32);
+    let query = program.append(&Op::Parameter(0), &[], &ty).unwrap();
+    let key = program.append(&Op::Parameter(1), &[], &ty).unwrap();
+    let value = program.append(&Op::Parameter(2), &[], &ty).unwrap();
+    let attention = program
+        .append(&Op::Attention { scale: 0.125 }, &[query, key, value], &ty)
+        .unwrap();
+
+    let snapshot = SemanticProgram::capture(&program, &[attention], true).unwrap();
+    let lowered = snapshot.lower(LoweringTarget::CudaF16Compute).unwrap();
+    assert!(!lowered.code.contains("@__cudnn$fmhaSoftmax"));
+    assert_eq!(lowered.code.matches("stablehlo.dot_general").count(), 2);
 }
 
 #[test]

@@ -377,7 +377,7 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
 
     let client = unsafe { Client::load(&args.plugin) }?;
     let mut compiler =
-        Compiler::new(client.clone(), CacheLimits::default()).with_f16_attention(true);
+        Compiler::new(client.clone(), CacheLimits::default()).with_cudnn_attention(true);
     compiler = match args.precision {
         ComputePrecision::F32 => compiler,
         ComputePrecision::F16 => compiler.with_compute_dtype(rxla_core::DType::F16),

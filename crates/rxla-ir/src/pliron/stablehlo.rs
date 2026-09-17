@@ -131,40 +131,43 @@ impl IrGraph {
         Operation::get_op::<ModuleOp>(cloned, &self.ctx)
             .expect("cloned root is a module")
             .append_operation(&mut self.ctx, export.get_operation(), 0);
-        let result = (|| {
-            lower_to_stablehlo(&mut self.ctx, cloned, target).map_err(|error| {
-                IrError::Conversion {
+        let result =
+            (|| {
+                lower_to_stablehlo(&mut self.ctx, cloned, target).map_err(|error| {
+                    IrError::Conversion {
+                        message: error.to_string(),
+                    }
+                })?;
+                let cloned_module = Operation::get_op::<ModuleOp>(cloned, &self.ctx)
+                    .expect("cloned root is a module");
+                verify_op(&cloned_module, &self.ctx).map_err(|error| IrError::Verification {
+                    stage: "lowered StableHLO",
                     message: error.to_string(),
+                })?;
+                let lowered_outputs = export
+                    .get_operation()
+                    .deref(&self.ctx)
+                    .operands()
+                    .collect::<Vec<_>>();
+                if let Some(dtype) = match target {
+                    LoweringTarget::CudaF16Compute
+                    | LoweringTarget::CudaF16ComputeCudnnAttention => Some(DType::F16),
+                    LoweringTarget::CudaBf16Compute
+                    | LoweringTarget::CudaBf16ComputeCudnnAttention => Some(DType::BF16),
+                    _ => None,
+                } {
+                    demote_float_results(&self.ctx, cloned, dtype);
                 }
-            })?;
-            let cloned_module =
-                Operation::get_op::<ModuleOp>(cloned, &self.ctx).expect("cloned root is a module");
-            verify_op(&cloned_module, &self.ctx).map_err(|error| IrError::Verification {
-                stage: "lowered StableHLO",
-                message: error.to_string(),
-            })?;
-            let lowered_outputs = export
-                .get_operation()
-                .deref(&self.ctx)
-                .operands()
-                .collect::<Vec<_>>();
-            if let Some(dtype) = match target {
-                LoweringTarget::CudaF16Compute => Some(DType::F16),
-                LoweringTarget::CudaBf16Compute => Some(DType::BF16),
-                _ => None,
-            } {
-                demote_float_results(&self.ctx, cloned, dtype);
-            }
-            emitter::emit_module(
-                &self.ctx,
-                cloned,
-                &lowered_outputs,
-                preserve_all_inputs,
-                target,
-                &boundary_inputs,
-                &boundary_outputs,
-            )
-        })();
+                emitter::emit_module(
+                    &self.ctx,
+                    cloned,
+                    &lowered_outputs,
+                    preserve_all_inputs,
+                    target,
+                    &boundary_inputs,
+                    &boundary_outputs,
+                )
+            })();
         rewriter.erase_operation(&mut self.ctx, cloned);
         result
     }

@@ -230,7 +230,7 @@ pub struct Compiler {
     // Keys share storage with the map; oldest access is at the front.
     recency: VecDeque<Arc<[u8]>>,
     stats: CacheStats,
-    f16_attention: bool,
+    cudnn_attention: bool,
     compute_dtype: Option<DType>,
     xla_option_overrides: HashMap<String, OptionOverrideProto>,
     #[cfg(feature = "disk-cache")]
@@ -242,6 +242,12 @@ impl Compiler {
             return Ok(rxla_ir::LoweringTarget::Portable);
         }
         Ok(match self.compute_dtype {
+            Some(DType::F16) if self.cudnn_attention => {
+                rxla_ir::LoweringTarget::CudaF16ComputeCudnnAttention
+            }
+            Some(DType::BF16) if self.cudnn_attention => {
+                rxla_ir::LoweringTarget::CudaBf16ComputeCudnnAttention
+            }
             Some(DType::F16) => rxla_ir::LoweringTarget::CudaF16Compute,
             Some(DType::BF16) => rxla_ir::LoweringTarget::CudaBf16Compute,
             Some(dtype) => {
@@ -249,7 +255,7 @@ impl Compiler {
                     "compiler compute dtype must be F16 or BF16, got {dtype:?}"
                 )));
             }
-            None if self.f16_attention => rxla_ir::LoweringTarget::CudaF16Attention,
+            None if self.cudnn_attention => rxla_ir::LoweringTarget::CudaF16Attention,
             None => rxla_ir::LoweringTarget::Portable,
         })
     }
@@ -260,7 +266,7 @@ impl Compiler {
             entries: HashMap::new(),
             recency: VecDeque::new(),
             stats: CacheStats::default(),
-            f16_attention: false,
+            cudnn_attention: false,
             compute_dtype: None,
             xla_option_overrides: HashMap::new(),
             #[cfg(feature = "disk-cache")]
@@ -268,10 +274,11 @@ impl Compiler {
         }
     }
 
-    /// Allow eligible long-sequence attention to use F16 cuDNN FMHA on CUDA.
-    /// This is an explicit inference precision choice; the default remains F32.
-    pub fn with_f16_attention(mut self, enabled: bool) -> Self {
-        self.f16_attention = enabled;
+    /// Explicitly lower eligible attention to F16 cuDNN FMHA on CUDA.
+    /// Compute precision is configured independently; disabled keeps portable
+    /// StableHLO attention for XLA to optimize.
+    pub fn with_cudnn_attention(mut self, enabled: bool) -> Self {
+        self.cudnn_attention = enabled;
         self
     }
 

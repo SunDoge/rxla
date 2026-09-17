@@ -497,7 +497,10 @@ pub(super) fn emit_module(
         .collect::<String>();
     let low_precision = matches!(
         target,
-        LoweringTarget::CudaF16Compute | LoweringTarget::CudaBf16Compute
+        LoweringTarget::CudaF16Compute
+            | LoweringTarget::CudaBf16Compute
+            | LoweringTarget::CudaF16ComputeCudnnAttention
+            | LoweringTarget::CudaBf16ComputeCudnnAttention
     );
     let function = if low_precision {
         "private @main_compute"

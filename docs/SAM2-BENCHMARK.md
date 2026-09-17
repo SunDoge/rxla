@@ -80,7 +80,7 @@ cargo run -p rxla-safetensors --release --features model \
   --example sam2_hiera_bench -- \
   .venv/lib/python3.14/site-packages/jax_plugins/xla_cuda13/xla_cuda_plugin.so \
   /home/me/.cache/rxla/models/sam2.1_hiera_small.safetensors \
-  --precision f16 --direct-launches --gemm-fusion-v2 \
+  --precision f16 --cudnn-attention --direct-launches --gemm-fusion-v2 \
   --warmup 2 --iterations 10
 ```
 
@@ -155,6 +155,13 @@ those logical transposes into layout assignment. With the established
 long-sequence policy, the complete trunk measured 7.435 ms P50 versus the prior
 7.494 ms recheck. The 0.8% difference is small and should not be presented as a
 large speedup, but the custom-call ABI is no longer an RXLA-specific variant.
+
+Compute precision no longer selects an attention backend as a side effect.
+Without `--cudnn-attention`, F16 Hiera emits ordinary StableHLO and lets XLA
+optimize it; that path measured 8.245 ms P50 because XLA does not recover FMHA
+from the decomposed attention pattern. Explicit cuDNN measured 7.435 ms. The
+flag therefore records a deliberate target policy without contaminating the
+backend-independent attention IR or silently coupling it to F16 computation.
 
 Forcing cuDNN onto the individually favorable 49/64/196-token shapes was also
 tested and rejected: complete-trunk P50 regressed to 7.793 ms even though the

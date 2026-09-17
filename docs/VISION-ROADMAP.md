@@ -49,6 +49,18 @@ as attention, LoRA application, collectives, structured control flow, and state
 long enough to optimize them. StableHLO is a portable backend boundary rather
 than the only level at which RXLA can understand a model.
 
+The first compiler milestone is deliberately conservative: RXLA IR lowers to
+legal, verified and semantically equivalent StableHLO without speculative
+optimization. Operations with a direct StableHLO counterpart lower one for
+one. Higher-level operations such as attention use only the minimal mechanical
+legalization required when StableHLO has no corresponding first-class op.
+
+Target rewrites are a later, separate stage. cuDNN custom calls, Mosaic or
+external kernels, mixed-precision policies, fusion and layout specialization
+must be explicit compiler policies; none should occur merely because a compute
+dtype was selected. The portable lowering remains the correctness oracle,
+preserves XLA's optimization freedom and gives every rewrite the same baseline.
+
 The same model program should support separate transformation pipelines:
 
 ```text
