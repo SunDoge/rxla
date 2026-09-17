@@ -58,6 +58,13 @@ pub enum Error {
     NegativeParameterDimension { path: String },
     #[snafu(display("parameter dtype {dtype:?} is unsupported"))]
     UnsupportedParameterDType { dtype: DType },
+    #[snafu(display(
+        "parameter storage dtype {storage_dtype:?} cannot be converted to compute dtype {compute_dtype:?}"
+    ))]
+    UnsupportedParameterDTypeConversion {
+        storage_dtype: DType,
+        compute_dtype: DType,
+    },
     #[snafu(display("resident parameter {path:?} has no session initializer"))]
     MissingResidentParameterInitializer { path: String },
     #[snafu(display(
@@ -382,7 +389,36 @@ impl Cx {
     /// BF16 storage exposed as F32 computation values, and raw U8 storage for
     /// explicitly dequantized inference layers. Other dtypes are rejected.
     pub fn param_dtype(&mut self, name: &str, shape: &[i64], dtype: DType) -> Result<Tensor> {
-        self.param_dtype_initialized(name, shape, dtype, None)
+        let compute_dtype = match dtype {
+            DType::F16 | DType::BF16 => DType::F32,
+            _ => dtype,
+        };
+        self.param_with_dtypes_impl(name, shape, dtype, compute_dtype, None)
+    }
+
+    /// Declare/read a parameter with independent checkpoint and computation
+    /// element types. Any conversion is represented explicitly in the IR.
+    pub fn param_with_dtypes(
+        &mut self,
+        name: &str,
+        shape: &[i64],
+        storage_dtype: DType,
+        compute_dtype: DType,
+    ) -> Result<Tensor> {
+        self.param_with_dtypes_impl(name, shape, storage_dtype, compute_dtype, None)
+    }
+
+    /// Declare/read a mixed-precision parameter with an initialization policy
+    /// applied in its checkpoint storage type.
+    pub fn param_with_dtypes_initialized(
+        &mut self,
+        name: &str,
+        shape: &[i64],
+        storage_dtype: DType,
+        compute_dtype: DType,
+        initializer: Initializer,
+    ) -> Result<Tensor> {
+        self.param_with_dtypes_impl(name, shape, storage_dtype, compute_dtype, Some(initializer))
     }
 
     fn param_dtype_initialized(
@@ -392,6 +428,21 @@ impl Cx {
         dtype: DType,
         initializer: Option<Initializer>,
     ) -> Result<Tensor> {
+        let compute_dtype = match dtype {
+            DType::F16 | DType::BF16 => DType::F32,
+            _ => dtype,
+        };
+        self.param_with_dtypes_impl(name, shape, dtype, compute_dtype, initializer)
+    }
+
+    fn param_with_dtypes_impl(
+        &mut self,
+        name: &str,
+        shape: &[i64],
+        storage_dtype: DType,
+        compute_dtype: DType,
+        initializer: Option<Initializer>,
+    ) -> Result<Tensor> {
         validate_name(name)?;
         let path = self.path(name);
         ensure!(
@@ -399,12 +450,13 @@ impl Cx {
             NegativeParameterDimensionSnafu { path }
         );
         if let Some(initializer) = initializer {
-            initializer.validate(&path, shape, dtype)?;
+            initializer.validate(&path, shape, storage_dtype)?;
         }
         let requested = ParameterSpec {
             path: path.clone(),
             shape: shape.to_vec(),
-            dtype,
+            storage_dtype,
+            compute_dtype,
             initializer,
         };
         let (graph, schema, parameter_values, residency, resident_parameters) = (
@@ -422,11 +474,12 @@ impl Cx {
                 .clone());
         }
         let value = if residency.contains(&path) {
-            let (value, slot) = resident_parameter_tensor(graph, &path, shape, dtype)?;
+            let (value, slot) =
+                resident_parameter_tensor(graph, &path, shape, storage_dtype, compute_dtype)?;
             resident_parameters.insert(path.clone(), slot);
             value
         } else {
-            parameter_tensor(graph, shape, dtype)?
+            parameter_tensor(graph, shape, storage_dtype, compute_dtype)?
         };
         schema.push_parameter(requested);
         parameter_values.insert(path, value.clone());
@@ -436,6 +489,13 @@ impl Cx {
     /// Enter a lexical parameter/effect scope without a closure.
     pub fn scope(&mut self, name: impl Into<String>) -> Result<Scope<'_>> {
         self.scope_path([name])
+    }
+
+    /// Enter a repeated block path such as `blocks.17` without formatting it at
+    /// every model call site.
+    pub fn scope_index(&mut self, collection: &str, index: usize) -> Result<Scope<'_>> {
+        validate_name(collection)?;
+        self.scope_path([collection.to_owned(), index.to_string()])
     }
 
     /// Enter several lexical path segments with one RAII guard.
@@ -722,12 +782,18 @@ impl Rng<'_> {
     }
 }
 
-fn parameter_tensor(graph: &mut StateGraph, shape: &[i64], dtype: DType) -> Result<Tensor> {
-    match dtype {
-        DType::F32 => Ok(graph.input(shape)?),
-        DType::BF16 => Ok(graph.input_bf16_as_f32(shape)?),
-        DType::U8 => Ok(graph.input_with_dtype(shape, DType::U8)?),
-        _ => UnsupportedParameterDTypeSnafu { dtype }.fail(),
+fn parameter_tensor(
+    graph: &mut StateGraph,
+    shape: &[i64],
+    storage_dtype: DType,
+    compute_dtype: DType,
+) -> Result<Tensor> {
+    validate_parameter_dtypes(storage_dtype, compute_dtype)?;
+    let stored = graph.input_with_dtype(shape, storage_dtype)?;
+    if storage_dtype == compute_dtype {
+        Ok(stored)
+    } else {
+        Ok(stored.cast(compute_dtype)?)
     }
 }
 
@@ -735,16 +801,51 @@ fn resident_parameter_tensor(
     graph: &mut StateGraph,
     path: &str,
     shape: &[i64],
-    dtype: DType,
+    storage_dtype: DType,
+    compute_dtype: DType,
 ) -> Result<(Tensor, StateSlot)> {
-    let slot = graph.state_named(&format!("__parameter.{path}"), shape, dtype)?;
+    validate_parameter_dtypes(storage_dtype, compute_dtype)?;
+    let slot = graph.state_named(&format!("__parameter.{path}"), shape, storage_dtype)?;
     let stored = graph.read(&slot)?;
-    let value = match dtype {
-        DType::BF16 => stored.cast(DType::F32)?,
-        DType::F32 | DType::U8 => stored,
-        _ => return UnsupportedParameterDTypeSnafu { dtype }.fail(),
+    let value = if storage_dtype == compute_dtype {
+        stored
+    } else {
+        stored.cast(compute_dtype)?
     };
     Ok((value, slot))
+}
+
+fn validate_parameter_dtypes(storage_dtype: DType, compute_dtype: DType) -> Result<()> {
+    let storage_supported = matches!(
+        storage_dtype,
+        DType::U8 | DType::F16 | DType::BF16 | DType::F32
+    );
+    let compute_supported = matches!(
+        compute_dtype,
+        DType::U8 | DType::F16 | DType::BF16 | DType::F32
+    );
+    if !storage_supported {
+        return UnsupportedParameterDTypeSnafu {
+            dtype: storage_dtype,
+        }
+        .fail();
+    }
+    if !compute_supported {
+        return UnsupportedParameterDTypeSnafu {
+            dtype: compute_dtype,
+        }
+        .fail();
+    }
+    if storage_dtype != compute_dtype
+        && !matches!(compute_dtype, DType::F16 | DType::BF16 | DType::F32)
+    {
+        return UnsupportedParameterDTypeConversionSnafu {
+            storage_dtype,
+            compute_dtype,
+        }
+        .fail();
+    }
+    Ok(())
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -884,6 +985,27 @@ mod tests {
     }
 
     #[test]
+    fn parameter_schema_separates_checkpoint_and_compute_dtypes() {
+        let (schema, value) =
+            init(|cx| cx.param_with_dtypes("weight", &[2, 3], DType::F16, DType::F32)).unwrap();
+
+        let parameter = &schema.parameters()[0];
+        assert_eq!(parameter.storage_dtype(), DType::F16);
+        assert_eq!(parameter.compute_dtype(), DType::F32);
+        assert_eq!(value.dtype(), DType::F32);
+        assert_eq!(value.shape(), [2, 3]);
+
+        let error = match init(|cx| cx.param_with_dtypes("weight", &[2], DType::I32, DType::F32)) {
+            Ok(_) => panic!("unsupported storage dtype was accepted"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            Error::UnsupportedParameterDType { dtype: DType::I32 }
+        ));
+    }
+
+    #[test]
     fn ordinary_model_trace_invokes_the_apply_body_once() {
         let calls = Cell::new(0);
         let definition = Model::new(|cx: &mut Cx, input: Tensor| {
@@ -956,6 +1078,18 @@ mod tests {
         assert!(schema.get("encoder.0.weight").is_some());
         assert!(schema.get("root").is_some());
         assert!(schema.get("unused.root").is_none());
+    }
+
+    #[test]
+    fn indexed_scopes_build_stable_repeated_block_paths() {
+        let (schema, _) = init(|cx| {
+            cx.scope_index("blocks", 17)?.param("weight", &[2])?;
+            cx.param("root", &[1])
+        })
+        .unwrap();
+
+        assert!(schema.get("blocks.17.weight").is_some());
+        assert!(schema.get("root").is_some());
     }
 
     #[test]

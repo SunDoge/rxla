@@ -75,9 +75,12 @@ placement, synchronization, and release rules without becoming new Tensor types.
 Placement and memory space are not inferred from pointer accessibility. A PJRT
 buffer exposes owned device metadata and its backend-defined memory kind.
 
-`to_buffer(client)` explicitly packs/uploads host data; repeated calls on a host
-binding upload repeatedly. `to_device(client)` returns a resident bound Tensor
-for reuse. Its subsequent to_buffer calls clone the same native wrapper, without
+`to_buffer(client)` is the low-level PJRT boundary and explicitly packs/uploads
+host data; repeated calls on a host binding upload repeatedly. User code should
+prefer `Runtime::place(tensor)` or `runtime.on(device)?.place(tensor)`, which
+selects a device without exposing a PJRT client. `Tensor::to_device(client)`
+returns a resident bound Tensor for low-level reuse. Its subsequent to_buffer
+calls clone the same native wrapper, without
 another upload. Foreign-client resident data is rejected, never implicitly
 transferred. `Storage::upload(layout, client)` supports F32, I32 and BF16 raw host
 storage through the unified graph binding API. It packs directly into one

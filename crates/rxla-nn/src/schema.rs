@@ -24,7 +24,8 @@ fn next_schema_identity() -> u64 {
 pub struct ParameterSpec {
     pub(crate) path: String,
     pub(crate) shape: Vec<i64>,
-    pub(crate) dtype: DType,
+    pub(crate) storage_dtype: DType,
+    pub(crate) compute_dtype: DType,
     pub(crate) initializer: Option<Initializer>,
 }
 
@@ -38,7 +39,17 @@ impl ParameterSpec {
     }
 
     pub fn dtype(&self) -> DType {
-        self.dtype
+        self.storage_dtype
+    }
+
+    /// Element type required from a checkpoint or parameter initializer.
+    pub fn storage_dtype(&self) -> DType {
+        self.storage_dtype
+    }
+
+    /// Element type observed by tensor operations after an explicit conversion.
+    pub fn compute_dtype(&self) -> DType {
+        self.compute_dtype
     }
 
     pub fn initializer(&self) -> Option<Initializer> {

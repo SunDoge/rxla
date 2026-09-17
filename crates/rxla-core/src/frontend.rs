@@ -824,6 +824,30 @@ impl Runtime {
         Ok(())
     }
 
+    /// Materialize or transfer a tensor onto the runtime's default device.
+    /// Device selection stays at the runtime layer; callers need not handle a
+    /// backend-specific PJRT client.
+    pub fn place(&mut self, tensor: &Tensor) -> Result<Tensor> {
+        let device = self.default_device.clone();
+        self.place_on(&device, tensor)
+    }
+
+    fn place_on(&mut self, device: &Device, tensor: &Tensor) -> Result<Tensor> {
+        if !tensor.is_materialized() {
+            return self.eval_tensor_on(device, tensor);
+        }
+        let client = self.client_on(device)?.clone();
+        if let Some(buffer) = tensor.storage().and_then(crate::Storage::buffer) {
+            if buffer.belongs_to(&client) && buffer.device_index()? == device.ordinal() {
+                return Ok(tensor.clone());
+            }
+            return Tensor::materialized(
+                buffer.copy_to_device_via_host(&client, device.ordinal())?,
+            );
+        }
+        Tensor::materialized(tensor.to_buffer_on_device(&client, device.ordinal())?)
+    }
+
     pub fn on(&mut self, device: &Device) -> Result<DeviceRuntime<'_>> {
         self.client_on(device)?;
         Ok(DeviceRuntime {
@@ -1125,6 +1149,11 @@ impl DeviceRuntime<'_> {
             self.device.ordinal(),
             max_bytes,
         )?)
+    }
+
+    /// Materialize or transfer a tensor onto this device.
+    pub fn place(&mut self, tensor: &Tensor) -> Result<Tensor> {
+        self.runtime.place_on(&self.device, tensor)
     }
 
     pub fn compile(&mut self, program: &Program) -> Result<Arc<Executable>> {

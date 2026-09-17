@@ -1,5 +1,5 @@
 use crate::{Error, Result};
-use rxla_core::{Buffer, Client, DType, bf16};
+use rxla_core::{Buffer, Client, DType, bf16, f16};
 
 /// Deterministic initialization policy recorded with a parameter declaration.
 ///
@@ -109,6 +109,10 @@ impl Initializer {
         };
         match dtype {
             DType::F32 => Ok(client.buffer(shape, &values)?),
+            DType::F16 => Ok(client.buffer(
+                shape,
+                &values.into_iter().map(f16::from_f32).collect::<Vec<_>>(),
+            )?),
             DType::BF16 => Ok(client.buffer(
                 shape,
                 &values.into_iter().map(bf16::from_f32).collect::<Vec<_>>(),
@@ -168,7 +172,7 @@ impl Initializer {
             _ => {}
         }
         match dtype {
-            DType::F32 | DType::BF16 => {}
+            DType::F16 | DType::F32 | DType::BF16 => {}
             DType::I32 | DType::U8 if matches!(self, Self::Zeros | Self::Ones) => {}
             _ => {
                 return Err(invalid(&format!(

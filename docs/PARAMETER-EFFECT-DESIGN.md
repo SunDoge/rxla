@@ -281,7 +281,8 @@ valid for dynamic dispatch code such as a heterogeneous serving stage.
    scopes produce stable names such as `unet.down.0.attention.q.weight` without
    threading parameter structs through every function.
 2. A model trace freezes the full effect ABI and executable IR together:
-   ordered inputs (shape and dtype), parameter declarations (path, dtype and
+   ordered inputs (shape and dtype), parameter declarations (path, storage and
+   compute dtype, and
    shape), state and outputs. A compatible retrace requested by an existing
    selection must match the complete structure; missing, extra, reordered or
    incompatible effects fail with a structural-schema error. Initializer policy
