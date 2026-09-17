@@ -37,6 +37,18 @@ impl SchemaBuffers {
 }
 
 impl<R: Read + Seek> SafeTensors<R> {
+    /// Validate an exact path/shape/dtype match without reading tensor payloads
+    /// or requiring a PJRT client.
+    pub fn validate_parameter_schema(&self, schema: &ModelSchema) -> Result<()> {
+        let mapping = schema
+            .parameters()
+            .iter()
+            .map(|spec| (spec.path().to_owned(), spec.path().to_owned()))
+            .collect();
+        self.validate_parameter_schema_with_mapping(schema, &mapping)
+            .map(|_| ())
+    }
+
     /// Upload parameters whose checkpoint keys exactly match their effect-schema
     /// paths. This is the conventional safetensors layout for new RXLA models.
     pub fn load_parameter_schema(
@@ -61,6 +73,31 @@ impl<R: Read + Seek> SafeTensors<R> {
         schema: &ModelSchema,
         mapping: &HashMap<String, String>,
     ) -> Result<SchemaBuffers> {
+        let sources = self.validate_parameter_schema_with_mapping(schema, mapping)?;
+
+        let parameters = schema
+            .parameters()
+            .iter()
+            .zip(sources)
+            .map(|(spec, source)| {
+                let buffer = match spec.dtype() {
+                    DType::U8 => self.upload_u8(client, &source)?,
+                    DType::F32 => self.upload_f32(client, &source)?,
+                    DType::F16 => self.upload_f16(client, &source)?,
+                    DType::BF16 => self.upload_bf16_converted(client, &source)?,
+                    dtype => return Err(invalid(format!("unsupported parameter dtype {dtype:?}"))),
+                };
+                Ok((spec.path().to_owned(), buffer))
+            })
+            .collect::<Result<_>>()?;
+        Ok(SchemaBuffers { parameters })
+    }
+
+    fn validate_parameter_schema_with_mapping(
+        &self,
+        schema: &ModelSchema,
+        mapping: &HashMap<String, String>,
+    ) -> Result<Vec<String>> {
         let mut sources = Vec::with_capacity(schema.parameters().len());
         for spec in schema.parameters() {
             let source = mapping
@@ -99,21 +136,6 @@ impl<R: Read + Seek> SafeTensors<R> {
             ));
         }
 
-        let parameters = schema
-            .parameters()
-            .iter()
-            .zip(sources)
-            .map(|(spec, source)| {
-                let buffer = match spec.dtype() {
-                    DType::U8 => self.upload_u8(client, &source)?,
-                    DType::F32 => self.upload_f32(client, &source)?,
-                    DType::F16 => self.upload_f16(client, &source)?,
-                    DType::BF16 => self.upload_bf16_converted(client, &source)?,
-                    dtype => return Err(invalid(format!("unsupported parameter dtype {dtype:?}"))),
-                };
-                Ok((spec.path().to_owned(), buffer))
-            })
-            .collect::<Result<_>>()?;
-        Ok(SchemaBuffers { parameters })
+        Ok(sources)
     }
 }

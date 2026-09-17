@@ -199,3 +199,27 @@ September 18, 2026 results with F32 weights and inputs:
 These measurements validate numerical semantics rather than performance; the
 topology has 58,288 parameters. The full Klein 4B schema is separately traced
 in Rust tests as 149 tensors and 3,875,544,576 parameters.
+
+The full official `flux-2-klein-4b.safetensors` can be checked without reading
+payloads or loading a PJRT plugin, then optionally executed with realistic
+sequence lengths:
+
+```sh
+cargo run -p rxla-safetensors --features model --example flux2_bench -- \
+  /path/to/flux-2-klein-4b.safetensors
+
+cargo run -p rxla-safetensors --features model --example flux2_bench -- \
+  /path/to/flux-2-klein-4b.safetensors \
+  --plugin "$PJRT_CUDA_PLUGIN_PATH" \
+  --image-tokens 1024 --context-tokens 512 --warmup 1 --iterations 3
+```
+
+On September 18, 2026, the official 7.75 GB BF16 checkpoint matched all 149
+schema paths directly and ran on an RTX 5080 through JAX's CUDA 13 PJRT plugin.
+With XLA's 11.67 GiB allocator pool, loading took `65.05 s`, compilation took
+`42.32 s`, and one synchronized transformer evaluation averaged `388.28 ms`
+(`388.16 ms` median). Four distilled denoising evaluations therefore account
+for about `1.55 s` before text encoding and VAE decoding. Inputs were zeroed,
+so this proves checkpoint compatibility and executable memory fit, not image
+quality. The compiler emitted extensive register-spill warnings; BF16-native
+compute and attention/kernel work remain performance targets.
