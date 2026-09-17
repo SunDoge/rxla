@@ -8,7 +8,7 @@ impl Tensor {
     pub fn max_pool2d(&self, options: Pool2dOptions) -> Result<Self> {
         let output = self.pool2d_shape(options)?;
         self.graph()
-            .node(Op::MaxPool2d(options), vec![self.node_id()], &output)
+            .node_typed(Op::MaxPool2d(options), vec![self.node_id()], output)
     }
     /// NHWC average pooling with zero-valued padding and floor output sizes.
     /// With `count_include_pad`, divide by the full window area. Otherwise divide
@@ -21,9 +21,11 @@ impl Tensor {
     /// entirely padded, NaN-producing windows are undefined.
     pub fn avg_pool2d(&self, options: Pool2dOptions, count_include_pad: bool) -> Result<Self> {
         let output = self.pool2d_shape(options)?;
-        let sum = self
-            .graph()
-            .node(Op::SumPool2d(options), vec![self.node_id()], &output)?;
+        let sum = self.graph().node_typed(
+            Op::SumPool2d(options),
+            vec![self.node_id()],
+            output.clone(),
+        )?;
         if count_include_pad {
             return sum.mul_scalar(1. / (options.window[0] as f32 * options.window[1] as f32));
         }
@@ -38,9 +40,9 @@ impl Tensor {
         let counts = self.graph().node(
             Op::SumPool2d(options),
             vec![ones.node_id()],
-            &[1, output[1], output[2], 1],
+            &[1, output.dims[1], output.dims[2], 1],
         )?;
-        sum.div(&counts.broadcast_to(&output)?)
+        sum.div(&counts.broadcast_as(&sum)?)
     }
     pub(super) fn sum_pool2d_gradient(
         &self,
@@ -91,9 +93,14 @@ impl Tensor {
             .transpose(&[0, 2, 3, 1])
     }
 
-    fn pool2d_shape(&self, options: Pool2dOptions) -> Result<Vec<i64>> {
+    fn pool2d_shape(&self, options: Pool2dOptions) -> Result<TensorType> {
         if self.shape.len() != 4 {
             return Err(err("pool2d requires rank-four NHWC input"));
+        }
+        if self.shape[1..].iter().any(|&dimension| dimension < 0) {
+            return Err(err(
+                "pool2d currently supports dynamic batch dimensions only",
+            ));
         }
         let mut output = self.shape.to_vec();
         for axis in 0..2 {
@@ -115,6 +122,8 @@ impl Tensor {
                 (padded - window) / stride + 1
             };
         }
-        Ok(output)
+        let mut output_type = self.ty();
+        output_type.dims = output;
+        Ok(output_type)
     }
 }

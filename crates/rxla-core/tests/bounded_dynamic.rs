@@ -1,4 +1,7 @@
-use rxla_core::{CacheLimits, Client, Compiler, DType, Dim, Tensor, Tracer};
+use rxla_core::{
+    CacheLimits, Client, Compiler, Conv2dOptions, ConvTranspose2dOptions, DType, Dim,
+    Pool2dOptions, Tensor, Tracer,
+};
 
 #[test]
 fn bounded_shape_survives_tensor_ir_and_elementwise_lowering() {
@@ -104,6 +107,70 @@ fn concatenate_and_stack_infer_bounds_from_all_operands() {
     let code = std::str::from_utf8(program.lowered_program().code()).unwrap();
     assert!(code.contains("tensor<?x4xf32, #stablehlo.bounds<10, ?>>"));
     assert!(code.contains("tensor<2x?x4xf32, #stablehlo.bounds<?, 8, ?>>"));
+}
+
+#[test]
+fn vision_ops_preserve_a_bounded_batch_axis() {
+    let tracer = Tracer::new();
+    let input = tracer
+        .input_shape(
+            &[
+                Dim::Bounded { upper: 16 },
+                Dim::Static(8),
+                Dim::Static(8),
+                Dim::Static(3),
+            ],
+            DType::F32,
+        )
+        .unwrap();
+    let kernel = tracer.input(&[3, 3, 3, 4]).unwrap();
+    let convolution = input.conv2d(&kernel, Conv2dOptions::default()).unwrap();
+    assert_eq!(convolution.shape(), [-1, 6, 6, 4]);
+    assert_eq!(convolution.dim_bound(0), Some(16));
+
+    let max_pool = input.max_pool2d(Pool2dOptions::default()).unwrap();
+    let average_pool = input.avg_pool2d(Pool2dOptions::default(), false).unwrap();
+    for output in [&max_pool, &average_pool] {
+        assert_eq!(output.shape(), [-1, 4, 4, 3]);
+        assert_eq!(output.dim_bound(0), Some(16));
+    }
+
+    let transpose_kernel = tracer.input(&[3, 3, 4, 3]).unwrap();
+    let transposed = input
+        .conv_transpose2d(&transpose_kernel, ConvTranspose2dOptions::default())
+        .unwrap();
+    assert_eq!(transposed.shape(), [-1, 10, 10, 4]);
+    assert_eq!(transposed.dim_bound(0), Some(16));
+
+    let dynamic_spatial = tracer
+        .input_shape(
+            &[
+                Dim::Static(1),
+                Dim::Bounded { upper: 8 },
+                Dim::Static(8),
+                Dim::Static(3),
+            ],
+            DType::F32,
+        )
+        .unwrap();
+    assert!(
+        dynamic_spatial
+            .conv2d(&kernel, Conv2dOptions::default())
+            .is_err()
+    );
+    assert!(
+        dynamic_spatial
+            .max_pool2d(Pool2dOptions::default())
+            .is_err()
+    );
+
+    let program = tracer
+        .program(vec![convolution, max_pool, average_pool, transposed])
+        .unwrap();
+    let code = std::str::from_utf8(program.lowered_program().code()).unwrap();
+    assert!(code.contains("tensor<?x6x6x4xf32, #stablehlo.bounds<16, ?, ?, ?>>"));
+    assert!(code.contains("tensor<?x4x4x3xf32, #stablehlo.bounds<16, ?, ?, ?>>"));
+    assert!(code.contains("tensor<?x10x10x4xf32, #stablehlo.bounds<16, ?, ?, ?>>"));
 }
 
 #[test]

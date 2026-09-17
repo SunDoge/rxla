@@ -58,10 +58,12 @@ impl Tensor {
             output.push(size);
         }
         output.push(k[2]);
-        self.graph().node(
+        let mut output_type = self.ty();
+        output_type.dims = output;
+        self.graph().node_typed(
             Op::ConvTranspose2d(options),
             vec![self.node_id(), kernel.node_id()],
-            &output,
+            output_type,
         )
     }
 }

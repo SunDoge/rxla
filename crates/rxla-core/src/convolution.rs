@@ -39,6 +39,7 @@ impl Tensor {
             (k[0], k[1], k[2], k[3])
         };
         if options.groups <= 0
+            || x[1..].iter().any(|&d| d < 0)
             || x[3] <= 0
             || k.iter().any(|&d| d <= 0)
             || x[3] % options.groups != 0
@@ -75,14 +76,16 @@ impl Tensor {
             });
         }
         output.push(kernel_output);
-        self.graph().node(
+        let mut output_type = self.ty();
+        output_type.dims = output;
+        self.graph().node_typed(
             if oihw {
                 Op::Conv2dOihw(options)
             } else {
                 Op::Conv2d(options)
             },
             vec![self.node_id(), kernel.node_id()],
-            &output,
+            output_type,
         )
     }
 }

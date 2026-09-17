@@ -370,8 +370,7 @@ pub(super) struct AttentionOp;
     name = "rxla.conv2d",
     format = "$0 `, ` $1 ` ` attr($options, $Conv2dOptionsAttr) ` : ` type($0) `, ` type($1) ` -> ` type($2)",
     interfaces = [NOpdsInterface<2>, OneResultInterface],
-    attributes = (options: Conv2dOptionsAttr),
-    verifier = "succ"
+    attributes = (options: Conv2dOptionsAttr)
 )]
 pub(super) struct Conv2dOp;
 
@@ -379,8 +378,7 @@ pub(super) struct Conv2dOp;
     name = "rxla.conv2d_oihw",
     format = "$0 `, ` $1 ` ` attr($oihw_options, $Conv2dOptionsAttr) ` : ` type($0) `, ` type($1) ` -> ` type($2)",
     interfaces = [NOpdsInterface<2>, OneResultInterface],
-    attributes = (oihw_options: Conv2dOptionsAttr),
-    verifier = "succ"
+    attributes = (oihw_options: Conv2dOptionsAttr)
 )]
 pub(super) struct Conv2dOihwOp;
 
@@ -405,8 +403,7 @@ pub(super) struct ConvTranspose2dOp;
     name = "rxla.max_pool2d",
     format = "$0 ` ` attr($max_pool_options, $Pool2dOptionsAttr) ` : ` type($0) ` -> ` type($1)",
     interfaces = [OneOpdInterface, OneResultInterface],
-    attributes = (max_pool_options: Pool2dOptionsAttr),
-    verifier = "succ"
+    attributes = (max_pool_options: Pool2dOptionsAttr)
 )]
 pub(super) struct MaxPool2dOp;
 
@@ -414,8 +411,7 @@ pub(super) struct MaxPool2dOp;
     name = "rxla.sum_pool2d",
     format = "$0 ` ` attr($sum_pool_options, $Pool2dOptionsAttr) ` : ` type($0) ` -> ` type($1)",
     interfaces = [OneOpdInterface, OneResultInterface],
-    attributes = (sum_pool_options: Pool2dOptionsAttr),
-    verifier = "succ"
+    attributes = (sum_pool_options: Pool2dOptionsAttr)
 )]
 pub(super) struct SumPool2dOp;
 
@@ -665,8 +661,7 @@ pub(super) struct SelectOp;
     name = "rxla.reduce_sum",
     format = "$0 ` ` attr($reduction_axes, $AxesAttr) ` : ` type($0)",
     interfaces = [OneOpdInterface, OneResultInterface],
-    attributes = (reduction_axes: AxesAttr),
-    verifier = "succ"
+    attributes = (reduction_axes: AxesAttr)
 )]
 pub(super) struct ReduceSumOp;
 
@@ -674,8 +669,7 @@ pub(super) struct ReduceSumOp;
     name = "rxla.reduce_maximum",
     format = "$0 ` ` attr($maximum_axes, $AxesAttr) ` : ` type($0)",
     interfaces = [OneOpdInterface, OneResultInterface],
-    attributes = (maximum_axes: AxesAttr),
-    verifier = "succ"
+    attributes = (maximum_axes: AxesAttr)
 )]
 pub(super) struct ReduceMaximumOp;
 

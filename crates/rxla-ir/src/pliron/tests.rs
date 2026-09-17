@@ -621,6 +621,32 @@ fn shape_operation_verifiers_reject_invalid_transformed_ir() {
     concatenate.set_attr_concatenate_axis(&graph.ctx, AxisAttr::new(0));
     assert!(verify_op(&concatenate, &graph.ctx).is_err());
 
+    let image = graph.parameter(&[2, 8, 8, 3]);
+    let kernel = graph.parameter(&[3, 3, 3, 4]);
+    let result = graph.tensor_type(&[2, 7, 6, 4], DType::F32);
+    let convolution = Conv2dOp::from_operation(Operation::new(
+        &mut graph.ctx,
+        Conv2dOp::get_concrete_op_info(),
+        vec![result],
+        vec![image, kernel],
+        vec![],
+        0,
+    ));
+    convolution.set_attr_options(&graph.ctx, Conv2dOptionsAttr::new(Conv2dOptions::default()));
+    assert!(verify_op(&convolution, &graph.ctx).is_err());
+
+    let result = graph.tensor_type(&[2, 5, 4, 3], DType::F32);
+    let pool = MaxPool2dOp::from_operation(Operation::new(
+        &mut graph.ctx,
+        MaxPool2dOp::get_concrete_op_info(),
+        vec![result],
+        vec![image],
+        vec![],
+        0,
+    ));
+    pool.set_attr_max_pool_options(&graph.ctx, Pool2dOptionsAttr::new(Pool2dOptions::default()));
+    assert!(verify_op(&pool, &graph.ctx).is_err());
+
     let result = graph.tensor_type(&[2, 3], DType::F32);
     let iota = IotaOp::from_operation(Operation::new(
         &mut graph.ctx,

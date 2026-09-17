@@ -4976,6 +4976,15 @@ insertion plus that same rule. The Pliron concatenate verifier recomputes this
 type independently, so malformed frontends cannot merely assert a convenient
 result bound.
 
+Vision operators currently admit bounded dynamism on the batch axis while
+requiring spatial and channel dimensions to remain static. Conv2d, OIHW
+Conv2d, transposed Conv2d, max pooling and average pooling preserve the input
+batch bound in their result types. Their Pliron verifiers independently check
+rank, dtype, channel groups, window parameters, spatial formulas and the batch
+bound; the former placeholder `succ` verifiers are not used for these forward
+operators. General dynamic spatial convolution remains deliberately rejected
+until its output-bound and backend execution semantics are implemented.
+
 This is currently an IR and compilation feature, not a promise that every PJRT
 plugin can construct and execute bounded-dynamic buffers. The development ZML
 CPU plugin compiles an identity signature, but ordinary elementwise compilation

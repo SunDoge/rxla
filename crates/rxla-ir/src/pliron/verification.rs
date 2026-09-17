@@ -28,6 +28,22 @@ fn static_elements(dims: &[i64]) -> Option<u128> {
     })
 }
 
+fn maximum_elements(ty: &TensorType) -> Option<u128> {
+    ty.dims
+        .iter()
+        .enumerate()
+        .try_fold(1_u128, |elements, (axis, &dimension)| {
+            let extent = if dimension == -1 {
+                ty.bound(axis)?
+            } else {
+                dimension
+            };
+            u128::try_from(extent)
+                .ok()
+                .and_then(|extent| elements.checked_mul(extent))
+        })
+}
+
 impl Verify for ParameterOp {
     fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
         let Some(number) = self.get_attr_number(ctx) else {
@@ -293,10 +309,7 @@ impl Verify for ReshapeOp {
         if input.dtype != result.dtype {
             return pliron::verify_err_noloc!("rxla.reshape must preserve element type");
         }
-        if let (Some(input), Some(result)) =
-            (static_elements(&input.dims), static_elements(&result.dims))
-            && input != result
-        {
+        if maximum_elements(&input) != maximum_elements(&result) {
             return pliron::verify_err_noloc!("rxla.reshape must preserve element count");
         }
         Ok(())
@@ -370,31 +383,59 @@ impl Verify for TransposeOp {
             return pliron::verify_err_noloc!("rxla.transpose requires a permutation");
         };
         let permutation = permutation.values();
-        let mut sorted = permutation.clone();
-        sorted.sort_unstable();
-        if input.dtype != result.dtype {
-            return pliron::verify_err_noloc!("rxla.transpose must preserve element type");
-        }
-        if permutation.len() != input.dims.len()
-            || result.dims.len() != input.dims.len()
-            || sorted != (0..input.dims.len()).collect::<Vec<_>>()
-        {
+        let Some(expected) = input.permuted(&permutation) else {
             return pliron::verify_err_noloc!(
                 "rxla.transpose permutation must contain every input axis exactly once"
             );
-        }
-        if permutation
-            .iter()
-            .enumerate()
-            .any(|(result_axis, &input_axis)| {
-                !compatible_dimension(result.dims[result_axis], input.dims[input_axis])
-            })
-        {
+        };
+        if result != expected {
             return pliron::verify_err_noloc!(
-                "rxla.transpose result shape does not match its permutation"
+                "rxla.transpose result type does not match its permutation"
             );
         }
         Ok(())
+    }
+}
+
+fn verify_reduction(
+    operation: pliron::context::Ptr<Operation>,
+    ctx: &Context,
+    axes: Option<Vec<usize>>,
+) -> pliron::result::Result<()> {
+    let Some(axes) = axes else {
+        return pliron::verify_err_noloc!("rxla reduction requires axes");
+    };
+    let operation = operation.deref(ctx);
+    let input = value_type(operation.get_operand(0), ctx)?;
+    let result = value_type(operation.get_result(0), ctx)?;
+    let Some(expected) = input.reduced(&axes, false) else {
+        return pliron::verify_err_noloc!("rxla reduction axes must be distinct and in range");
+    };
+    if result != expected {
+        return pliron::verify_err_noloc!(
+            "rxla reduction result type must remove the selected axes"
+        );
+    }
+    Ok(())
+}
+
+impl Verify for ReduceSumOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        verify_reduction(
+            self.get_operation(),
+            ctx,
+            self.get_attr_reduction_axes(ctx).map(|axes| axes.values()),
+        )
+    }
+}
+
+impl Verify for ReduceMaximumOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        verify_reduction(
+            self.get_operation(),
+            ctx,
+            self.get_attr_maximum_axes(ctx).map(|axes| axes.values()),
+        )
     }
 }
 
@@ -616,11 +657,12 @@ impl Verify for GatherGradientOp {
 impl Verify for CumsumOp {
     fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
         let operation = self.get_operation().deref(ctx);
+        let input = value_type(operation.get_operand(0), ctx)?;
         let result = value_type(operation.get_result(0), ctx)?;
         let Some(axis) = self.get_attr_axis(ctx) else {
             return pliron::verify_err_noloc!("rxla.cumsum requires an axis attribute");
         };
-        if result.dtype != DType::F32 {
+        if result.dtype != DType::F32 || result != input {
             return pliron::verify_err_noloc!("rxla.cumsum currently requires F32 values");
         }
         if axis.value() >= result.dims.len() || result.dims[axis.value()] <= 1 {
@@ -688,14 +730,12 @@ impl Verify for ArgMaxOp {
         if axis.value() >= input.dims.len() {
             return pliron::verify_err_noloc!("rxla.argmax axis is out of range");
         }
-        let expected = input
-            .dims
-            .iter()
-            .enumerate()
-            .filter_map(|(index, &dimension)| (index != axis.value()).then_some(dimension))
-            .collect::<Vec<_>>();
-        if result.dims != expected {
-            return pliron::verify_err_noloc!("rxla.argmax result shape must remove its axis");
+        let mut expected = input
+            .reduced(&[axis.value()], false)
+            .expect("validated argmax axis");
+        expected.dtype = DType::I32;
+        if result != expected {
+            return pliron::verify_err_noloc!("rxla.argmax result type must remove its axis");
         }
         Ok(())
     }
@@ -715,12 +755,177 @@ impl Verify for SortedIndicesOp {
                 "rxla.sorted_indices requires F32 input and I32 output"
             );
         }
-        if axis >= input.dims.len() || result.dims != input.dims {
+        let mut expected = input.clone();
+        expected.dtype = DType::I32;
+        if axis >= input.dims.len() || result != expected {
             return pliron::verify_err_noloc!(
                 "rxla.sorted_indices requires a valid axis and matching result shape"
             );
         }
         Ok(())
+    }
+}
+
+fn verify_conv2d(
+    operation: pliron::context::Ptr<Operation>,
+    ctx: &Context,
+    options: Conv2dOptions,
+    oihw: bool,
+) -> pliron::result::Result<()> {
+    let operation = operation.deref(ctx);
+    let input = value_type(operation.get_operand(0), ctx)?;
+    let kernel = value_type(operation.get_operand(1), ctx)?;
+    let result = value_type(operation.get_result(0), ctx)?;
+    if input.dtype != DType::F32
+        || kernel.dtype != DType::F32
+        || result.dtype != DType::F32
+        || input.dims.len() != 4
+        || kernel.dims.len() != 4
+        || result.dims.len() != 4
+        || input.dims[1..].iter().any(|&dimension| dimension < 0)
+        || kernel.dims.iter().any(|&dimension| dimension <= 0)
+    {
+        return pliron::verify_err_noloc!(
+            "rxla convolution requires rank-4 F32 tensors with only a dynamic batch axis"
+        );
+    }
+    let (kh, kw, kernel_input, kernel_output) = if oihw {
+        (
+            kernel.dims[2],
+            kernel.dims[3],
+            kernel.dims[1],
+            kernel.dims[0],
+        )
+    } else {
+        (
+            kernel.dims[0],
+            kernel.dims[1],
+            kernel.dims[2],
+            kernel.dims[3],
+        )
+    };
+    if options.groups <= 0
+        || input.dims[3] <= 0
+        || input.dims[3] % options.groups != 0
+        || input.dims[3] / options.groups != kernel_input
+        || kernel_output % options.groups != 0
+    {
+        return pliron::verify_err_noloc!("rxla convolution channel groups are incompatible");
+    }
+    let mut expected = input.clone();
+    expected.dims[3] = kernel_output;
+    for (axis, kernel_size) in [kh, kw].into_iter().enumerate() {
+        let stride = options.strides[axis];
+        let dilation = options.dilation[axis];
+        let [low, high] = options.padding[axis];
+        if stride <= 0 || dilation <= 0 || low < 0 || high < 0 {
+            return pliron::verify_err_noloc!("rxla convolution has invalid window attributes");
+        }
+        let Some(effective) = (kernel_size - 1)
+            .checked_mul(dilation)
+            .and_then(|value| value.checked_add(1))
+        else {
+            return pliron::verify_err_noloc!("rxla convolution window overflows");
+        };
+        let Some(padded) = input.dims[axis + 1]
+            .checked_add(low)
+            .and_then(|value| value.checked_add(high))
+        else {
+            return pliron::verify_err_noloc!("rxla convolution input extent overflows");
+        };
+        expected.dims[axis + 1] = if padded < effective {
+            0
+        } else {
+            (padded - effective) / stride + 1
+        };
+    }
+    if result != expected {
+        return pliron::verify_err_noloc!(
+            "rxla convolution result type is inconsistent with its operands"
+        );
+    }
+    Ok(())
+}
+
+impl Verify for Conv2dOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let Some(options) = self.get_attr_options(ctx) else {
+            return pliron::verify_err_noloc!("rxla.conv2d requires convolution attributes");
+        };
+        verify_conv2d(self.get_operation(), ctx, options.options(), false)
+    }
+}
+
+impl Verify for Conv2dOihwOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let Some(options) = self.get_attr_oihw_options(ctx) else {
+            return pliron::verify_err_noloc!("rxla.conv2d_oihw requires convolution attributes");
+        };
+        verify_conv2d(self.get_operation(), ctx, options.options(), true)
+    }
+}
+
+fn verify_pool2d(
+    operation: pliron::context::Ptr<Operation>,
+    ctx: &Context,
+    options: Pool2dOptions,
+) -> pliron::result::Result<()> {
+    let operation = operation.deref(ctx);
+    let input = value_type(operation.get_operand(0), ctx)?;
+    let result = value_type(operation.get_result(0), ctx)?;
+    if input.dtype != DType::F32
+        || result.dtype != DType::F32
+        || input.dims.len() != 4
+        || result.dims.len() != 4
+        || input.dims[1..].iter().any(|&dimension| dimension < 0)
+    {
+        return pliron::verify_err_noloc!(
+            "rxla pool2d requires rank-4 F32 tensors with only a dynamic batch axis"
+        );
+    }
+    let mut expected = input.clone();
+    for axis in 0..2 {
+        let window = options.window[axis];
+        let stride = options.strides[axis];
+        let [low, high] = options.padding[axis];
+        if window <= 0 || stride <= 0 || low < 0 || high < 0 {
+            return pliron::verify_err_noloc!("rxla pool2d has invalid window attributes");
+        }
+        let Some(padded) = input.dims[axis + 1]
+            .checked_add(low)
+            .and_then(|value| value.checked_add(high))
+        else {
+            return pliron::verify_err_noloc!("rxla pool2d input extent overflows");
+        };
+        expected.dims[axis + 1] = if padded < window {
+            0
+        } else {
+            (padded - window) / stride + 1
+        };
+    }
+    if result != expected {
+        return pliron::verify_err_noloc!(
+            "rxla pool2d result type is inconsistent with its operand"
+        );
+    }
+    Ok(())
+}
+
+impl Verify for MaxPool2dOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let Some(options) = self.get_attr_max_pool_options(ctx) else {
+            return pliron::verify_err_noloc!("rxla.max_pool2d requires pooling attributes");
+        };
+        verify_pool2d(self.get_operation(), ctx, options.options())
+    }
+}
+
+impl Verify for SumPool2dOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let Some(options) = self.get_attr_sum_pool_options(ctx) else {
+            return pliron::verify_err_noloc!("rxla.sum_pool2d requires pooling attributes");
+        };
+        verify_pool2d(self.get_operation(), ctx, options.options())
     }
 }
 
@@ -742,10 +947,14 @@ impl Verify for ConvTranspose2dOp {
             || input.dims.len() != 4
             || kernel.dims.len() != 4
             || result.dims.len() != 4
+            || input.dims[1..].iter().any(|&dimension| dimension < 0)
+            || kernel.dims.iter().any(|&dimension| dimension <= 0)
+            || result.dims[1..].iter().any(|&dimension| dimension < 0)
         {
             return pliron::verify_err_noloc!("rxla.conv_transpose2d requires rank-4 F32 tensors");
         }
         if input.dims[0] != result.dims[0]
+            || input.bound(0) != result.bound(0)
             || input.dims[3] != kernel.dims[3]
             || kernel.dims[2] != result.dims[3]
         {
