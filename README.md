@@ -173,6 +173,7 @@ crates.io publishing.
 - [Distributed PJRT and NCCL](docs/PJRT-DISTRIBUTED.md)
 - [MLX layout review](docs/MLX-LAYOUT-REVIEW.md)
 - [Deployment notes](docs/DEPLOYMENT.md)
+- [Offline Mosaic GPU kernel artifacts](docs/MOSAIC-GPU.md)
 - [Profiling guide](docs/PROFILING.md)
 - [Release process](docs/RELEASING.md)
 

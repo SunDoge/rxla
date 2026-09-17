@@ -126,6 +126,8 @@ pub enum Error {
     },
     #[snafu(display("load PJRT plugin: {source}"))]
     LoadPlugin { source: libloading::Error },
+    #[snafu(display("load native support library: {source}"))]
+    LoadSupportLibrary { source: libloading::Error },
     #[snafu(display("resolve PJRT entry point: {source}"))]
     ResolveEntryPoint { source: libloading::Error },
     #[snafu(display("{operation}: {source}"))]
@@ -227,6 +229,38 @@ struct PluginInner {
 /// does not define a process-wide shutdown contract.
 #[derive(Clone)]
 pub struct Plugin(Arc<PluginInner>);
+
+/// A native library whose symbols are globally visible to compiled XLA code.
+///
+/// The mapping is intentionally retained for the process lifetime: compiled
+/// executables can keep unresolved host-symbol references after this Rust
+/// value is dropped. This is useful for small runtime libraries accompanying
+/// offline-generated custom kernels, such as Mosaic GPU artifacts.
+pub struct NativeSupportLibrary {
+    _library: ManuallyDrop<Library>,
+}
+
+unsafe impl Send for NativeSupportLibrary {}
+unsafe impl Sync for NativeSupportLibrary {}
+
+impl NativeSupportLibrary {
+    /// Load a trusted library with process-global symbol visibility.
+    ///
+    /// # Safety
+    /// The library and all of its initialization code must be trusted, and its
+    /// exported ABI must match every compiled artifact that references it.
+    #[cfg(unix)]
+    pub unsafe fn load_global(path: impl AsRef<Path>) -> Result<Self> {
+        use libloading::os::unix::{Library as UnixLibrary, RTLD_GLOBAL, RTLD_NOW};
+
+        let library = unsafe { UnixLibrary::open(Some(path.as_ref()), RTLD_NOW | RTLD_GLOBAL) }
+            .map(Library::from)
+            .context(LoadSupportLibrarySnafu)?;
+        Ok(Self {
+            _library: ManuallyDrop::new(library),
+        })
+    }
+}
 
 /// Calling convention used by a GPU custom-call handler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

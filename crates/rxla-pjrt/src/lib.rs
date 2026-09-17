@@ -17,7 +17,7 @@ pub use half::{bf16, f16};
 pub use runtime::{
     Buffer, BufferMemoryLayout, Client, ClientInfo, ClientOptionValue, ClientOptions, DType,
     DeviceInfo, DeviceMemoryStats, Element, Error, Executable, GpuCustomCallApi,
-    GpuCustomCallHandlers, MemoryInfo, OptimizedProgram, PendingExecution, PendingHostUpload,
-    PjrtErrorCode, Plugin, PluginRegistry, Program,
+    GpuCustomCallHandlers, MemoryInfo, NativeSupportLibrary, OptimizedProgram, PendingExecution,
+    PendingHostUpload, PjrtErrorCode, Plugin, PluginRegistry, Program,
 };
 pub use runtime::{ByteStrides, HostView, Shape, StridedLayout};
