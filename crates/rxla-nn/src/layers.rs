@@ -34,14 +34,22 @@ impl<L: Layer> NamedLayer<L> {
     }
 }
 
-/// Tensor-first application of a layer already bound to an effect scope.
+/// Tensor-first application of layer configurations.
 pub trait TensorApply {
+    /// Apply a reusable layer already bound to its model-tree path.
     fn apply<L: Layer>(&self, layer: &NamedLayer<L>) -> Result<Tensor>;
+
+    /// Bind a layer configuration to `cx` and immediately apply it.
+    fn through<L: Layer>(&self, cx: Cx, layer: L) -> Result<Tensor>;
 }
 
 impl TensorApply for Tensor {
     fn apply<L: Layer>(&self, layer: &NamedLayer<L>) -> Result<Tensor> {
         layer.apply(self)
+    }
+
+    fn through<L: Layer>(&self, cx: Cx, layer: L) -> Result<Tensor> {
+        layer.apply_in(&cx, self)
     }
 }
 
@@ -995,10 +1003,8 @@ mod tests {
     fn layer_configs_apply_named_effects_without_a_builder_type() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 8])?;
-            let encoder = cx.named_layer("encoder", Linear::new(4).bias(false))?;
-            let head = cx.named_layer("head", Linear::new(3))?;
-            let hidden = input.apply(&encoder)?;
-            hidden.apply(&head)
+            let hidden = input.through(cx.at("encoder")?, Linear::new(4).bias(false))?;
+            hidden.through(cx.at("head")?, Linear::new(3))
         })
         .unwrap();
 

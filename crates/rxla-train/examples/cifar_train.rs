@@ -140,28 +140,30 @@ fn gcd(mut lhs: usize, mut rhs: usize) -> usize {
 }
 
 fn basic_block(cx: Cx, input: &Tensor, channels: i64, stride: i64) -> NnResult<Tensor> {
-    let conv1 = path!(cx / "conv1")?.layer(
-        Conv2d::new(channels, [3, 3])
-            .options(Conv2dOptions {
-                strides: [stride, stride],
-                padding: [[1, 1], [1, 1]],
-                ..Default::default()
-            })
-            .bias(false),
-    );
-    let bn1 = path!(cx / "bn1")?.layer(BatchNorm::new());
-    let conv2 = path!(cx / "conv2")?.layer(
-        Conv2d::new(channels, [3, 3])
-            .options(Conv2dOptions {
-                padding: [[1, 1], [1, 1]],
-                ..Default::default()
-            })
-            .bias(false),
-    );
-    let bn2 = path!(cx / "bn2")?.layer(BatchNorm::new());
-
-    let hidden = input.apply(&conv1)?.apply(&bn1)?.relu()?;
-    let hidden = hidden.apply(&conv2)?.apply(&bn2)?;
+    let hidden = input
+        .through(
+            path!(cx / "conv1")?,
+            Conv2d::new(channels, [3, 3])
+                .options(Conv2dOptions {
+                    strides: [stride, stride],
+                    padding: [[1, 1], [1, 1]],
+                    ..Default::default()
+                })
+                .bias(false),
+        )?
+        .through(path!(cx / "bn1")?, BatchNorm::new())?
+        .relu()?;
+    let hidden = hidden
+        .through(
+            path!(cx / "conv2")?,
+            Conv2d::new(channels, [3, 3])
+                .options(Conv2dOptions {
+                    padding: [[1, 1], [1, 1]],
+                    ..Default::default()
+                })
+                .bias(false),
+        )?
+        .through(path!(cx / "bn2")?, BatchNorm::new())?;
     let residual = if stride == 1 {
         input.clone()
     } else {
@@ -176,18 +178,18 @@ fn basic_block(cx: Cx, input: &Tensor, channels: i64, stride: i64) -> NnResult<T
 }
 
 fn classifier(cx: Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor)> {
-    let stem_conv = path!(cx / "conv1")?.layer(
-        Conv2d::new(16, [3, 3])
-            .options(Conv2dOptions {
-                padding: [[1, 1], [1, 1]],
-                ..Default::default()
-            })
-            .bias(false),
-    );
-    let stem_bn = path!(cx / "bn1")?.layer(BatchNorm::new());
-    let head = path!(cx / "fc")?.layer(Linear::new(CLASSES));
-
-    let mut hidden = images.apply(&stem_conv)?.apply(&stem_bn)?.relu()?;
+    let mut hidden = images
+        .through(
+            path!(cx / "conv1")?,
+            Conv2d::new(16, [3, 3])
+                .options(Conv2dOptions {
+                    padding: [[1, 1], [1, 1]],
+                    ..Default::default()
+                })
+                .bias(false),
+        )?
+        .through(path!(cx / "bn1")?, BatchNorm::new())?
+        .relu()?;
     for stage in 0..3 {
         let channels = 16 << stage;
         for block in 0..3 {
@@ -198,7 +200,7 @@ fn classifier(cx: Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tenso
         }
     }
     let features = hidden.mean(&[1, 2], false)?;
-    let logits = features.apply(&head)?;
+    let logits = features.through(path!(cx / "fc")?, Linear::new(CLASSES))?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;

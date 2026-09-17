@@ -210,43 +210,44 @@ fn permute(index: usize, count: usize, rng: DataRng, epoch: u64) -> usize {
 }
 
 fn basic_block(cx: Cx, input: &Tensor, channels: i64, stride: i64) -> NnResult<Tensor> {
-    let conv1 = path!(cx / "conv1")?.layer(
-        Conv2d::new(channels, [3, 3])
-            .options(Conv2dOptions {
-                strides: [stride, stride],
-                padding: [[1, 1], [1, 1]],
-                ..Default::default()
-            })
-            .bias(false),
-    );
-    let bn1 = path!(cx / "bn1")?.layer(BatchNorm::new());
-    let conv2 = path!(cx / "conv2")?.layer(
-        Conv2d::new(channels, [3, 3])
-            .options(Conv2dOptions {
-                padding: [[1, 1], [1, 1]],
-                ..Default::default()
-            })
-            .bias(false),
-    );
-    let bn2 = path!(cx / "bn2")?.layer(BatchNorm::new());
-
-    let hidden = input.apply(&conv1)?;
-    let hidden = hidden.apply(&bn1)?.relu()?;
-    let hidden = hidden.apply(&conv2)?;
-    let hidden = hidden.apply(&bn2)?;
-    let residual = if input.shape()[3] == channels && stride == 1 {
-        input.clone()
-    } else {
-        let shortcut_conv = path!(cx / "downsample" / 0)?.layer(
-            Conv2d::new(channels, [1, 1])
+    let hidden = input
+        .through(
+            path!(cx / "conv1")?,
+            Conv2d::new(channels, [3, 3])
                 .options(Conv2dOptions {
                     strides: [stride, stride],
+                    padding: [[1, 1], [1, 1]],
                     ..Default::default()
                 })
                 .bias(false),
-        );
-        let shortcut_bn = path!(cx / "downsample" / 1)?.layer(BatchNorm::new());
-        input.apply(&shortcut_conv)?.apply(&shortcut_bn)?
+        )?
+        .through(path!(cx / "bn1")?, BatchNorm::new())?
+        .relu()?;
+    let hidden = hidden
+        .through(
+            path!(cx / "conv2")?,
+            Conv2d::new(channels, [3, 3])
+                .options(Conv2dOptions {
+                    padding: [[1, 1], [1, 1]],
+                    ..Default::default()
+                })
+                .bias(false),
+        )?
+        .through(path!(cx / "bn2")?, BatchNorm::new())?;
+    let residual = if input.shape()[3] == channels && stride == 1 {
+        input.clone()
+    } else {
+        input
+            .through(
+                path!(cx / "downsample" / 0)?,
+                Conv2d::new(channels, [1, 1])
+                    .options(Conv2dOptions {
+                        strides: [stride, stride],
+                        ..Default::default()
+                    })
+                    .bias(false),
+            )?
+            .through(path!(cx / "downsample" / 1)?, BatchNorm::new())?
     };
     Ok(hidden.add(&residual)?.relu()?)
 }
@@ -262,27 +263,27 @@ fn resnet18(cx: Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor,
         .broadcast_to(images.shape())?
         .select(&images.flip_left_right()?, &images)?
         .normalize_nhwc(&[0.485, 0.456, 0.406], &[0.229, 0.224, 0.225])?;
-    let stem_conv = path!(cx / "conv1")?.layer(
-        Conv2d::new(64, [7, 7])
-            .options(Conv2dOptions {
+    let mut hidden = images
+        .through(
+            path!(cx / "conv1")?,
+            Conv2d::new(64, [7, 7])
+                .options(Conv2dOptions {
+                    strides: [2, 2],
+                    padding: [[3, 3], [3, 3]],
+                    ..Default::default()
+                })
+                .bias(false),
+        )?
+        .through(path!(cx / "bn1")?, BatchNorm::new())?
+        .relu()?
+        .avg_pool2d(
+            Pool2dOptions {
+                window: [3, 3],
                 strides: [2, 2],
-                padding: [[3, 3], [3, 3]],
-                ..Default::default()
-            })
-            .bias(false),
-    );
-    let stem_bn = path!(cx / "bn1")?.layer(BatchNorm::new());
-    let head = path!(cx / "fc")?.layer(Linear::new(CLASSES));
-
-    let mut hidden = images.apply(&stem_conv)?;
-    hidden = hidden.apply(&stem_bn)?.relu()?.avg_pool2d(
-        Pool2dOptions {
-            window: [3, 3],
-            strides: [2, 2],
-            padding: [[1, 1], [1, 1]],
-        },
-        false,
-    )?;
+                padding: [[1, 1], [1, 1]],
+            },
+            false,
+        )?;
     for (stage, channels) in [64, 128, 256, 512].into_iter().enumerate() {
         for block in 0..2 {
             let stride = if stage != 0 && block == 0 { 2 } else { 1 };
@@ -292,7 +293,7 @@ fn resnet18(cx: Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor,
         }
     }
     let features = hidden.mean(&[1, 2], false)?;
-    let logits = features.apply(&head)?;
+    let logits = features.through(path!(cx / "fc")?, Linear::new(CLASSES))?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;
