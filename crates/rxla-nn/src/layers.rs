@@ -15,8 +15,29 @@ pub enum ImageLayout {
 }
 
 /// A stateless layer configuration interpreted inside a named effect scope.
-pub trait Layer {
-    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor>;
+pub trait Layer: Sized {
+    fn apply(&self, cx: &mut Cx, input: &Tensor) -> Result<Tensor>;
+
+    fn named(self, name: impl Into<String>) -> NamedLayer<Self> {
+        NamedLayer {
+            name: name.into(),
+            layer: self,
+        }
+    }
+}
+
+/// A reusable layer configuration with a stable name relative to an effect
+/// scope. It holds no parameters and does not borrow the context.
+pub struct NamedLayer<L> {
+    name: String,
+    layer: L,
+}
+
+impl<L: Layer> NamedLayer<L> {
+    pub fn apply(&self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+        let mut scope = cx.scope(&self.name)?;
+        self.layer.apply(&mut scope, input)
+    }
 }
 
 /// A named embedding lookup with an inferred output shape.
@@ -345,13 +366,13 @@ impl LayerNorm {
 }
 
 impl Layer for Linear {
-    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+    fn apply(&self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
         apply_linear(cx, input, self.out_features, self.bias)
     }
 }
 
 impl Layer for Conv2d {
-    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+    fn apply(&self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
         apply_conv2d(
             cx,
             input,
@@ -365,7 +386,7 @@ impl Layer for Conv2d {
 }
 
 impl Layer for GroupNorm {
-    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+    fn apply(&self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
         apply_group_norm(
             cx,
             input,
@@ -378,7 +399,7 @@ impl Layer for GroupNorm {
 }
 
 impl Layer for BatchNorm {
-    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+    fn apply(&self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
         let training = cx.mode() == ExecutionMode::Training;
         apply_batch_norm(
             cx,
@@ -392,19 +413,19 @@ impl Layer for BatchNorm {
 }
 
 impl Layer for LayerNorm {
-    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+    fn apply(&self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
         apply_layer_norm(cx, input, self.normalized_rank, self.epsilon, self.affine)
     }
 }
 
 impl Layer for QuantizedLinear {
-    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
-        apply_quantized_linear(cx, input, &self)
+    fn apply(&self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+        apply_quantized_linear(cx, input, self)
     }
 }
 
 impl Layer for Embedding {
-    fn apply(self, cx: &mut Cx, indices: &Tensor) -> Result<Tensor> {
+    fn apply(&self, cx: &mut Cx, indices: &Tensor) -> Result<Tensor> {
         ensure!(
             indices.dtype() == DType::I32 && self.vocabulary > 0 && self.width > 0,
             InvalidLayerInputSnafu {
@@ -423,7 +444,7 @@ impl Layer for Embedding {
 }
 
 impl Layer for RmsNorm {
-    fn apply(self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+    fn apply(&self, cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
         ensure!(
             input.dtype() == DType::F32 && !input.shape().is_empty(),
             InvalidLayerInputSnafu {
@@ -453,7 +474,7 @@ impl Layer for RmsNorm {
 impl Cx {
     pub fn apply<L: Layer>(&mut self, name: &str, layer: L, input: &Tensor) -> Result<Tensor> {
         let mut scope = self.scope(name)?;
-        layer.apply(&mut scope, input)
+        Layer::apply(&layer, &mut scope, input)
     }
 }
 
@@ -961,8 +982,10 @@ mod tests {
     fn layer_configs_apply_named_effects_without_a_builder_type() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 8])?;
-            let hidden = cx.apply("encoder", Linear::new(4).bias(false), &input)?;
-            cx.apply("head", Linear::new(3), &hidden)
+            let encoder = Linear::new(4).bias(false).named("encoder");
+            let head = Linear::new(3).named("head");
+            let hidden = encoder.apply(cx, &input)?;
+            head.apply(cx, &hidden)
         })
         .unwrap();
 
@@ -971,6 +994,25 @@ mod tests {
         assert!(schema.get("encoder.bias").is_none());
         assert_eq!(schema.get("head.weight").unwrap().shape(), [3, 4]);
         assert_eq!(schema.get("head.bias").unwrap().shape(), [3]);
+    }
+
+    #[test]
+    fn named_layers_can_be_reused_without_owning_parameters() {
+        let (schema, outputs) = init(|cx| {
+            let first = cx.input(&[2, 8])?;
+            let second = cx.input(&[2, 8])?;
+            let projection = Linear::new(4).named("projection");
+            Ok::<_, Error>([
+                projection.apply(cx, &first)?,
+                projection.apply(cx, &second)?,
+            ])
+        })
+        .unwrap();
+
+        assert_eq!(outputs[0].shape(), [2, 4]);
+        assert_eq!(outputs[1].shape(), [2, 4]);
+        assert_eq!(schema.parameters().len(), 2);
+        assert_eq!(schema.get("projection.weight").unwrap().shape(), [4, 8]);
     }
 
     #[test]
