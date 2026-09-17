@@ -89,6 +89,18 @@ let hidden = stem.apply(cx, &image)?;
 # }
 ```
 
+`named(&self, ...)` copies the small configuration into an owned `NamedLayer`.
+The same configuration can therefore bind multiple independent parameter
+identities without an explicit clone, while a single named layer can be applied
+multiple times to share parameters:
+
+```rust
+# use rxla::nn::{Layer, Linear};
+let projection = Linear::new(64).bias(false);
+let query = projection.named("query");
+let key = projection.named("key");
+```
+
 Setters that require normalization, validation, or shorthand expansion remain
 hand-written; the derive is only for mechanical field replacement. This keeps
 the public type equal to the final layer configuration and avoids typestate

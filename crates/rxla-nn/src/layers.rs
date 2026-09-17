@@ -15,13 +15,13 @@ pub enum ImageLayout {
 }
 
 /// A stateless layer configuration interpreted inside a named effect scope.
-pub trait Layer: Sized {
+pub trait Layer: Clone + Sized {
     fn apply(&self, cx: &mut Cx, input: &Tensor) -> Result<Tensor>;
 
-    fn named(self, name: impl Into<String>) -> NamedLayer<Self> {
+    fn named(&self, name: impl Into<String>) -> NamedLayer<Self> {
         NamedLayer {
             name: name.into(),
-            layer: self,
+            layer: self.clone(),
         }
     }
 }
@@ -42,6 +42,7 @@ impl<L: Layer> NamedLayer<L> {
 
 /// A named embedding lookup with an inferred output shape.
 #[must_use = "layer builders do nothing until apply is called"]
+#[derive(Clone)]
 pub struct Embedding {
     vocabulary: i64,
     width: i64,
@@ -73,7 +74,7 @@ impl Embedding {
 
 /// A named affine projection whose input width is inferred by [`Linear::apply`].
 #[must_use = "layer builders do nothing until apply is called"]
-#[derive(Setters)]
+#[derive(Clone, Setters)]
 #[setters(generate = false)]
 pub struct Linear {
     out_features: i64,
@@ -87,6 +88,7 @@ pub struct Linear {
 /// value per output row and input group. Dequantization remains visible in IR
 /// so XLA may fuse it into the consuming contraction.
 #[must_use = "layer builders do nothing until apply is called"]
+#[derive(Clone)]
 pub struct QuantizedLinear {
     out_features: i64,
     group_size: i64,
@@ -163,7 +165,7 @@ impl Linear {
 
 /// A named NHWC convolution whose input channels are inferred at its use site.
 #[must_use = "layer builders do nothing until apply is called"]
-#[derive(Setters)]
+#[derive(Clone, Setters)]
 #[setters(generate = false)]
 pub struct Conv2d {
     out_channels: i64,
@@ -203,7 +205,7 @@ impl Conv2d {
 
 /// A named GroupNorm operation with optional learned affine parameters.
 #[must_use = "layer builders do nothing until apply is called"]
-#[derive(Setters)]
+#[derive(Clone, Setters)]
 #[setters(generate = false)]
 pub struct GroupNorm {
     groups: i64,
@@ -217,7 +219,7 @@ pub struct GroupNorm {
 
 /// Stateful NHWC BatchNorm with inferred channel count.
 #[must_use = "layer builders do nothing until apply is called"]
-#[derive(Setters)]
+#[derive(Clone, Setters)]
 #[setters(generate = false)]
 pub struct BatchNorm {
     #[setters(generate)]
@@ -282,7 +284,7 @@ impl GroupNorm {
 
 /// A named LayerNorm operation whose normalized shape is inferred on apply.
 #[must_use = "layer builders do nothing until apply is called"]
-#[derive(Setters)]
+#[derive(Clone, Setters)]
 #[setters(generate = false)]
 pub struct LayerNorm {
     normalized_rank: usize,
@@ -294,7 +296,7 @@ pub struct LayerNorm {
 
 /// A named RMSNorm operation whose width is inferred on apply.
 #[must_use = "layer builders do nothing until apply is called"]
-#[derive(Setters)]
+#[derive(Clone, Setters)]
 #[setters(generate = false)]
 pub struct RmsNorm {
     #[setters(generate)]
@@ -1013,6 +1015,25 @@ mod tests {
         assert_eq!(outputs[1].shape(), [2, 4]);
         assert_eq!(schema.parameters().len(), 2);
         assert_eq!(schema.get("projection.weight").unwrap().shape(), [4, 8]);
+    }
+
+    #[test]
+    fn one_lightweight_config_binds_multiple_parameter_identities() {
+        let (schema, outputs) = init(|cx| {
+            let input = cx.input(&[2, 8])?;
+            let config = Linear::new(8).bias(false);
+            let first = config.named("first");
+            let second = config.named("second");
+            let hidden = first.apply(cx, &input)?;
+            Ok::<_, Error>([hidden.clone(), second.apply(cx, &hidden)?])
+        })
+        .unwrap();
+
+        assert_eq!(outputs[0].shape(), [2, 8]);
+        assert_eq!(outputs[1].shape(), [2, 8]);
+        assert_eq!(schema.parameters().len(), 2);
+        assert!(schema.get("first.weight").is_some());
+        assert!(schema.get("second.weight").is_some());
     }
 
     #[test]
