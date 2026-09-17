@@ -59,7 +59,7 @@ fn real_index_singleton_axes_preserve_integer_bits() {
     for shape in [vec![], vec![1], vec![2, 1, 3], vec![2, 0, 1]] {
         let g = Tracer::default();
         let ids = g.input_i32(&shape).unwrap();
-        let values: Vec<_> = (0..ids.numel())
+        let values: Vec<_> = (0..ids.static_numel().unwrap())
             .map(|i| [i32::MIN, i32::MAX, -1, 0, 16_777_217, 42][i % 6])
             .collect();
         let input = client.buffer(&shape, &values).unwrap();

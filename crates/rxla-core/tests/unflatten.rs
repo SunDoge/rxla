@@ -49,8 +49,10 @@ fn real_unflatten_preserves_typed_values_and_gradient() {
             .grad(&[x])
             .unwrap()
             .remove(0);
-        let values: Vec<_> = (0..index.numel()).map(|i| i as f32 - 3.).collect();
-        let integers: Vec<_> = (0..index.numel())
+        let values: Vec<_> = (0..index.static_numel().unwrap())
+            .map(|i| i as f32 - 3.)
+            .collect();
+        let integers: Vec<_> = (0..index.static_numel().unwrap())
             .map(|i| [i32::MIN, i32::MAX, -1][i % 3])
             .collect();
         let exe = g

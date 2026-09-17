@@ -828,6 +828,15 @@ pub struct OutputSpec<'a> {
     pub dynamic_bounds: &'a [i64],
 }
 
+impl OutputSpec<'_> {
+    pub fn bound(&self, axis: usize) -> Option<i64> {
+        self.dynamic_bounds
+            .get(axis)
+            .copied()
+            .filter(|&bound| bound >= 0)
+    }
+}
+
 pub struct Executable {
     raw: rxla_pjrt::Executable,
     client: Client,

@@ -26,13 +26,11 @@ macro_rules! shape_queries {
                     .and_then(|&bound| usize::try_from(bound).ok())
             }
 
-            /// Static element count; a scalar has one element and any zero
-            /// extent makes the tensor empty. This is not a byte or memory-usage
-            /// estimate and does not compile, execute or synchronize the graph.
-            pub fn numel(&self) -> usize {
-                // All constructors validate this same product before exposing
-                // a handle; callers cannot mutate its shape metadata.
-                elements(self.shape()).expect("symbolic shape validated at construction")
+            /// Static element count, or `None` when any extent is dynamic.
+            /// A scalar has one element and any static zero extent makes the
+            /// tensor empty. This does not add IR or contact a device.
+            pub fn static_numel(&self) -> Option<usize> {
+                elements(self.shape()).ok()
             }
 
             /// Whether any axis has extent zero. Scalars are not empty.
@@ -45,6 +43,18 @@ macro_rules! shape_queries {
 shape_queries!(Tensor);
 
 impl Tensor {
+    /// Record the runtime element count as a scalar I32 SSA value.
+    ///
+    /// Unlike [`Self::static_numel`], this also works for bounded dynamic
+    /// dimensions and therefore remains part of the compiled program.
+    pub fn numel(&self) -> Result<Tensor> {
+        let mut dimensions = (0..self.ndim()).map(|axis| self.dim(axis));
+        let Some(first) = dimensions.next() else {
+            return self.graph().constant_i32(&[], &[1]);
+        };
+        dimensions.try_fold(first?, |product, dimension| product.mul(&dimension?))
+    }
+
     /// Record the runtime size of one statically selected axis as a scalar I32
     /// SSA value. Unlike `static_dim`, this remains in the generated IR.
     pub fn dim(&self, axis: usize) -> Result<Tensor> {

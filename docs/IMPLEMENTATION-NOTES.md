@@ -4953,6 +4953,9 @@ an optional metadata query; `Tensor::dim(axis)` emits
 `stablehlo.get_dimension_size` and returns a scalar I32 Tensor, and
 `shape_tensor()` concatenates those values into a rank-one I32 Tensor. Such
 values can feed structured `cond` and later `while` operations.
+`static_numel()` is the metadata-only optional query; `numel()` multiplies
+runtime dimension SSA values and therefore returns a scalar I32 Tensor instead
+of panicking when a dimension is dynamic.
 
 Bounded dynamic signatures use `Dim::Bounded { upper }`; raw public `-1`
 dimensions remain invalid. The upper bounds are part of `TensorType`, the Pliron

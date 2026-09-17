@@ -41,13 +41,13 @@ fn static_metadata_and_public_result_work_without_native_execution() -> Result<(
         let before = graph.stablehlo_many(&outputs)?;
         assert_eq!(tensor.ndim(), shape.len());
         assert_eq!(index.ndim(), shape.len());
-        assert_eq!(tensor.numel(), count);
-        assert_eq!(index.numel(), count);
+        assert_eq!(tensor.static_numel(), Some(count));
+        assert_eq!(index.static_numel(), Some(count));
         assert_eq!(tensor.is_empty(), count == 0);
         assert_eq!(index.is_empty(), count == 0);
         for output in &outputs {
             assert_eq!(output.ndim(), shape.len());
-            assert_eq!(output.numel(), count);
+            assert_eq!(output.static_numel(), Some(count));
             assert_eq!(output.is_empty(), count == 0);
         }
         assert_eq!(before, graph.stablehlo_many(&outputs)?);

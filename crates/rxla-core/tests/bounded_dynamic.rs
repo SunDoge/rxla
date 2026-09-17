@@ -10,11 +10,15 @@ fn bounded_shape_survives_tensor_ir_and_elementwise_lowering() {
     assert_eq!(input.dim_bound(0), Some(8));
     assert_eq!(input.static_dim(1), Some(4));
     assert_eq!(input.dim_bound(1), None);
+    assert_eq!(input.static_numel(), None);
 
     let output = input.add_scalar(1.0).unwrap();
-    let traced = tracer.program(vec![output]).unwrap();
+    let count = input.numel().unwrap();
+    let traced = tracer.program(vec![output, count]).unwrap();
     let code = std::str::from_utf8(traced.lowered_program().code()).unwrap();
     assert!(code.contains("tensor<?x4xf32, #stablehlo.bounds<8, ?>>"));
+    assert_eq!(code.matches("stablehlo.get_dimension_size").count(), 2);
+    assert!(code.contains("stablehlo.multiply"));
     let spec = traced.input_spec(0).unwrap();
     assert_eq!(spec.shape, [-1, 4]);
     assert_eq!(spec.bound(0), Some(8));

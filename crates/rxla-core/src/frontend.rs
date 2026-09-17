@@ -1558,7 +1558,9 @@ mod tests {
     fn runtime_shape_values_compile_and_execute_on_xla_cpu() {
         let tracer = Tracer::new();
         let input = tracer.input(&[2, 3]).unwrap();
-        let program = tracer.program(vec![input.shape_tensor().unwrap()]).unwrap();
+        let program = tracer
+            .program(vec![input.shape_tensor().unwrap(), input.numel().unwrap()])
+            .unwrap();
         let client = unsafe {
             Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
         }
@@ -1568,6 +1570,7 @@ mod tests {
         let outputs = program.run_buffers(&mut runtime, &[&buffer]).unwrap();
 
         assert_eq!(outputs[0].to_vec::<i32>().unwrap(), [2, 3]);
+        assert_eq!(outputs[1].to_vec::<i32>().unwrap(), [6]);
     }
 
     #[test]
