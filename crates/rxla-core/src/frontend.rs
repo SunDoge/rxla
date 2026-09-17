@@ -976,14 +976,7 @@ impl Runtime {
             .iter()
             .map(|input| input.to_buffer_on_device(&client, device.ordinal()))
             .collect::<Result<Vec<_>>>()?;
-        self.run_buffers_on(
-            device,
-            program,
-            &buffers
-                .iter()
-                .map(|buffer| buffer.as_ref())
-                .collect::<Vec<_>>(),
-        )
+        self.run_buffers_on(device, program, &buffers.iter().collect::<Vec<_>>())
     }
 
     /// Materialize one or more lazy expressions with a typed return shape.
@@ -1055,10 +1048,7 @@ impl Runtime {
                 actual: executable.device_count(),
             });
         }
-        let references = buffers
-            .iter()
-            .map(|buffer| buffer.as_ref())
-            .collect::<Vec<_>>();
+        let references = buffers.iter().collect::<Vec<_>>();
         let execution = executable.submit(&references)?;
         Ok(PendingEvaluation {
             execution: Some(execution),

@@ -1,5 +1,5 @@
 use super::*;
-use snafu::ensure;
+use snafu::{OptionExt, ensure};
 
 /// Owned diagnostic metadata; no borrowed plugin strings or native handles.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -9,6 +9,14 @@ pub struct DeviceInfo {
     pub description: String,
     /// This is the device currently used for this client's buffer transfers.
     pub selected: bool,
+}
+
+/// Backend-owned memory space associated with a materialized PJRT buffer.
+/// `kind` is intentionally an owned string: memory kinds are backend-defined.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryInfo {
+    pub id: i32,
+    pub kind: String,
 }
 
 /// Descriptive metadata, not a sufficient persistent executable-cache fingerprint.
@@ -145,6 +153,57 @@ impl Client {
             platform_version,
             process_index: process.process_index,
             addressable_devices,
+        })
+    }
+}
+
+impl Buffer {
+    /// Device on which this buffer is materialized.
+    pub fn device_info(&self) -> Result<DeviceInfo> {
+        let index = self.device_index()?;
+        Client(self.inner.client.clone())
+            .info()?
+            .addressable_devices
+            .into_iter()
+            .nth(index)
+            .context(InvalidPluginDataSnafu {
+                message: "buffer device is absent from client metadata",
+            })
+    }
+
+    /// Backend-defined memory space containing this buffer.
+    pub fn memory_info(&self) -> Result<MemoryInfo> {
+        let plugin = &self.inner.client.plugin;
+        let memory = pjrt_call!(
+            plugin,
+            PJRT_Buffer_Memory,
+            PJRT_Buffer_Memory_Args,
+            PJRT_Buffer_Memory_Args_STRUCT_SIZE,
+            buffer = self.inner.raw.as_ptr(),
+        );
+        ensure!(
+            !memory.memory.is_null(),
+            InvalidPluginDataSnafu {
+                message: "buffer has null PJRT memory",
+            }
+        );
+        let id = pjrt_call!(
+            plugin,
+            PJRT_Memory_Id,
+            PJRT_Memory_Id_Args,
+            PJRT_Memory_Id_Args_STRUCT_SIZE,
+            memory = memory.memory,
+        );
+        let kind = pjrt_call!(
+            plugin,
+            PJRT_Memory_Kind,
+            PJRT_Memory_Kind_Args,
+            PJRT_Memory_Kind_Args_STRUCT_SIZE,
+            memory = memory.memory,
+        );
+        Ok(MemoryInfo {
+            id: id.id,
+            kind: unsafe { copy_string(kind.kind, kind.kind_size) }?,
         })
     }
 }

@@ -118,16 +118,12 @@ fn prepared_state_keeps_bf16_binding_identity_and_session_isolation() {
     let mut second = program
         .session(vec![(total.clone(), client.buffer(&[], &[10.]).unwrap())])
         .unwrap();
-    let first_weight = std::sync::Arc::new(
-        client
-            .buffer(&[], &[rxla_core::bf16::from_bits(0x4000)])
-            .unwrap(),
-    ); // 2
-    let second_weight = std::sync::Arc::new(
-        client
-            .buffer(&[], &[rxla_core::bf16::from_bits(0x4040)])
-            .unwrap(),
-    ); // 3
+    let first_weight = client
+        .buffer(&[], &[rxla_core::bf16::from_bits(0x4000)])
+        .unwrap(); // 2
+    let second_weight = client
+        .buffer(&[], &[rxla_core::bf16::from_bits(0x4040)])
+        .unwrap(); // 3
     first
         .bind_parameters(vec![(weight.clone(), first_weight.clone())])
         .unwrap();
@@ -138,21 +134,17 @@ fn prepared_state_keeps_bf16_binding_identity_and_session_isolation() {
     assert_eq!(second.input_count(), 1);
     let foreign = StateGraph::default().parameter_bf16_as_f32(&[]).unwrap();
     for invalid in [
-        vec![(
-            weight.clone(),
-            std::sync::Arc::new(client.buffer(&[], &[2.]).unwrap()),
-        )],
-        vec![(
-            unused,
-            std::sync::Arc::new(client.buffer(&[3], &[0.; 3]).unwrap()),
-        )],
+        vec![(weight.clone(), client.buffer(&[], &[2.]).unwrap())],
+        vec![(unused, client.buffer(&[3], &[0.; 3]).unwrap())],
         vec![(foreign, second_weight.clone())],
     ] {
         assert!(first.bind_parameters(invalid).is_err());
-        assert!(std::ptr::eq(
-            first.parameter(&weight).unwrap(),
-            first_weight.as_ref()
-        ));
+        assert!(
+            first
+                .parameter(&weight)
+                .unwrap()
+                .shares_allocation_with(&first_weight)
+        );
         assert_eq!(first.state(&total).unwrap().to_vec::<f32>().unwrap(), [0.]);
     }
     let input = client.buffer(&[], &[2.]).unwrap();
@@ -167,11 +159,9 @@ fn prepared_state_keeps_bf16_binding_identity_and_session_isolation() {
     first
         .bind_parameters(vec![(
             weight.clone(),
-            std::sync::Arc::new(
-                client
-                    .buffer(&[], &[rxla_core::bf16::from_bits(0x40a0)])
-                    .unwrap(),
-            ),
+            client
+                .buffer(&[], &[rxla_core::bf16::from_bits(0x40a0)])
+                .unwrap(),
         )])
         .unwrap(); // 5
     assert_eq!(
@@ -182,10 +172,12 @@ fn prepared_state_keeps_bf16_binding_identity_and_session_isolation() {
         second.state(&total).unwrap().to_vec::<f32>().unwrap(),
         [16.]
     );
-    assert!(std::ptr::eq(
-        second.parameter(&weight).unwrap(),
-        second_weight.as_ref()
-    ));
+    assert!(
+        second
+            .parameter(&weight)
+            .unwrap()
+            .shares_allocation_with(&second_weight)
+    );
     prepared.compile(&mut compiler).unwrap();
     assert_eq!((compiler.stats().misses, compiler.stats().hits), (1, 1));
 }

@@ -2116,7 +2116,7 @@ is persisted: graph-local identities, the original-input mapping, weights and
 state are rebuilt/rebound by the caller. This is a same-plugin/same-host CPU
 compatibility test, not cross-version or cross-device cache portability.
 
-`session.bind_inputs(Vec<(usize, Arc<Buffer>)>)` fixes selected visible inputs,
+`session.bind_inputs(Vec<(usize, Buffer)>)` fixes selected visible inputs,
 such as inference weights, once. Indices are the original visible input order,
 excluding hidden state parameters. Subsequent `run` calls supply only unbound
 inputs in their original relative order; `input_count()` reports that count.
@@ -2814,7 +2814,7 @@ both sides must appear exactly once with matching dtype/shape. This supports
 different registration orders and pruned input ABIs. Resident buffers transfer
 ownership without graph execution, recompilation, or tensor payload copies.
 Fixed input bindings are explicitly replaced using destination registration
-numbers and `Arc<Buffer>` handles; an empty set clears them. Remaining retained
+numbers and cloneable `Buffer` handles; an empty set clears them. Remaining retained
 inputs become dynamic in destination order. There is no implicit semantic name
 matching, state-count migration, or cross-client tensor transfer.
 

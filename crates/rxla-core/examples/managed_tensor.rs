@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(dropped.load(Ordering::Acquire)); // Upload lifetime does not leak the external owner.
     let a = resident.to_buffer(&client)?;
     let b = resident.to_buffer(&client)?;
-    assert!(Arc::ptr_eq(&a, &b)); // Same native wrapper, not a second upload.
+    assert!(a.shares_allocation_with(&b)); // Same allocation, not a second upload.
     drop((a, b));
     let mut compiler = Compiler::new(client, CacheLimits::default());
     for _ in 0..3 {
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let executable = compiler.compile(&graph, &y)?;
     // PendingExecution, not the Tensor descriptor, keeps this buffer alive.
     let buffer = resident.storage().unwrap().buffer().unwrap().clone();
-    let pending = executable.submit(&[buffer.as_ref()])?;
+    let pending = executable.submit(&[&buffer])?;
     drop(buffer);
     drop(resident);
     drop(executable);

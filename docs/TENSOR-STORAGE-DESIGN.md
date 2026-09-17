@@ -11,8 +11,8 @@ Tensor (one Arc pointer)
        -> optional private tracing identity { session, node ID }
        -> SmallVec<i64, 5> logical shape + explicit dtype
        -> optional input binding
-            host:   Storage owner + checked StridedLayout
-            native: Storage owner -> Arc<Buffer> -> PJRT allocation + client
+            host: Storage backing + checked StridedLayout
+            PJRT: Storage backing -> Buffer -> PJRT allocation + client
 
 PendingExecution -> native input/output/executable owners until completion
 ```
@@ -55,9 +55,9 @@ F32/I32/BF16. Shape transforms and gathers preserve
 dtype; integer arithmetic stays exact. Unsupported BF16 arithmetic and non-F32
 autodiff are rejected. to_f32 is explicit conversion, not a bitcast.
 
-`Storage::device(Arc<Buffer>)` retains an existing native owner without copying.
+`Storage::pjrt(Buffer)` retains an existing backend owner without copying.
 `with_host_storage` validates shape, dtype, element size and view bounds;
-`with_device_storage` validates native shape/dtype against the descriptor. Host
+`with_pjrt_storage` validates backend shape/dtype against the descriptor. Host
 binding also rejects same-width dtype mismatches (I32 versus F32). Both reject computed
 graph values: externally attaching data is input binding, not asserting that
 an arbitrary computation has completed. This avoids a fake materialization cache.
@@ -67,6 +67,13 @@ capture input bindings, and a graph/snapshot never owns resident data. Keep the
 bound inputs and pass them explicitly to `Compiler::execute_bound(output, inputs)`
 in parameter order. The method rejects wrong graphs/order, missing storage and
 count mismatches. It accepts F32/I32/BF16 bound inputs. It returns ordinary native Buffers.
+
+Storage is an Arc-owned backing interface rather than a `Host | Device` enum.
+The current implementations are CPU-addressable host bytes and PJRT buffers;
+future CUDA, Metal, mmap, or imported allocations can supply their own mapping,
+placement, synchronization, and release rules without becoming new Tensor types.
+Placement and memory space are not inferred from pointer accessibility. A PJRT
+buffer exposes owned device metadata and its backend-defined memory kind.
 
 `to_buffer(client)` explicitly packs/uploads host data; repeated calls on a host
 binding upload repeatedly. `to_device(client)` returns a resident bound Tensor

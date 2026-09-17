@@ -83,7 +83,7 @@ Mutation requires exclusive session access. Training owns its parameter updates
 and optimizer state separately; not every tensor field is a differentiable parameter.
 
 The implemented `Session::bind_inputs` retains selected read-only runtime inputs
-as `Arc<Buffer>` owners, allowing sessions to share weights while their mutable
+as cloneable `Buffer` handles, allowing sessions to share weights while their mutable
 state remains independently owned. The low-level binding indices refer to visible
 input registration order. `StateGraph::parameter` now registers an F32 input with
 a `Parameter` identity and symbolic `tensor()` accessor. Clones preserve identity,

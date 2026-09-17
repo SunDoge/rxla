@@ -198,7 +198,7 @@ macro_rules! pjrt_call {
 
 #[path = "metadata.rs"]
 mod metadata;
-pub use metadata::{ClientInfo, DeviceInfo};
+pub use metadata::{ClientInfo, DeviceInfo, MemoryInfo};
 #[path = "memory_stats.rs"]
 mod memory_stats;
 pub use memory_stats::DeviceMemoryStats;
@@ -1134,6 +1134,11 @@ struct BufferInner {
 unsafe impl Send for BufferInner {}
 unsafe impl Sync for BufferInner {}
 impl Buffer {
+    /// Whether two handles retain the same native PJRT allocation.
+    pub fn shares_allocation_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     pub fn belongs_to(&self, client: &Client) -> bool {
         Arc::ptr_eq(&self.inner.client, &client.0)
     }

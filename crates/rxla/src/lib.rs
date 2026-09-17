@@ -11,10 +11,10 @@
 pub use rxla_core as core;
 pub use rxla_core::{
     Buffer, Client, ClientOptions, Compiler, Conv2dOptions, ConvTranspose2dOptions, DType, Device,
-    DeviceRuntime, Error, Evaluable, PendingEvaluation, PendingTensorEvaluation, Pool2dOptions,
-    Result, Runtime, RuntimeBuilder, Storage, StorageError, StorageKind, StorageResult, Tensor,
-    TensorBuildError, TensorBuilder, TensorDescriptor, TensorDownloadError, TensorElement,
-    TensorFunction, TensorLayout, bf16, f16,
+    DeviceInfo, DeviceRuntime, Error, Evaluable, MemoryInfo, PendingEvaluation,
+    PendingTensorEvaluation, Pool2dOptions, Result, Runtime, RuntimeBuilder, Storage, StorageError,
+    StorageKind, StorageResult, Tensor, TensorBuildError, TensorBuilder, TensorDescriptor,
+    TensorDownloadError, TensorElement, TensorFunction, TensorLayout, bf16, f16,
 };
 pub use rxla_ir as ir;
 pub use rxla_nn as nn;

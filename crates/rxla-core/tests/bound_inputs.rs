@@ -1,5 +1,4 @@
 use rxla_core::{CacheLimits, Client, Compiler, StateGraph};
-use std::sync::Arc;
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -15,10 +14,7 @@ fn real_many_interleaved_fixed_inputs() {
         initial.push((slot, client.buffer(&[], &[-1.]).unwrap()));
         let input = graph.input(&[]).unwrap();
         sum = sum.add(&input).unwrap();
-        bindings.push((
-            index,
-            Arc::new(client.buffer(&[], &[index as f32]).unwrap()),
-        ));
+        bindings.push((index, client.buffer(&[], &[index as f32]).unwrap()));
     }
     let program = graph.compile(&mut compiler, &[sum]).unwrap();
     let mut session = program.session(initial).unwrap();
@@ -67,15 +63,14 @@ fn real_fixed_inputs_are_shared_validated_and_rebindable() {
     let mut second = program
         .session(vec![(state.clone(), client.buffer(&[], &[100.]).unwrap())])
         .unwrap();
-    let weight = Arc::new(client.buffer(&[2], &[2., 3.]).unwrap());
-    let one = Arc::new(client.buffer(&[], &[1.]).unwrap());
-    let position = Arc::new(client.buffer(&[], &[1]).unwrap());
+    let weight = client.buffer(&[2], &[2., 3.]).unwrap();
+    let one = client.buffer(&[], &[1.]).unwrap();
+    let position = client.buffer(&[], &[1]).unwrap();
     assert_eq!(first.input_count(), 3);
     first
         .bind_inputs(vec![(2, position.clone()), (1, weight.clone())])
         .unwrap();
     second.bind_inputs(vec![(1, weight.clone())]).unwrap();
-    assert_eq!(Arc::strong_count(&weight), 3);
     assert_eq!(first.input_count(), 1);
     assert_eq!(second.input_count(), 2);
     let invalid = vec![
@@ -83,7 +78,7 @@ fn real_fixed_inputs_are_shared_validated_and_rebindable() {
         vec![(1, weight.clone()), (3, position.clone())],
         vec![(1, one.clone())],
         vec![(2, one.clone())],
-        vec![(1, Arc::new(foreign.buffer(&[2], &[4., 5.]).unwrap()))],
+        vec![(1, foreign.buffer(&[2], &[4., 5.]).unwrap())],
     ];
     for binding in invalid {
         assert!(first.bind_inputs(binding).is_err());
@@ -107,13 +102,12 @@ fn real_fixed_inputs_are_shared_validated_and_rebindable() {
     first
         .bind_inputs(vec![
             (0, one.clone()),
-            (1, Arc::new(client.buffer(&[2], &[4., 5.]).unwrap())),
+            (1, client.buffer(&[2], &[4., 5.]).unwrap()),
             (2, position.clone()),
         ])
         .unwrap();
     assert_eq!(first.input_count(), 0);
     assert_eq!(first.run(&[]).unwrap()[0].to_vec::<f32>().unwrap(), [8.]);
-    assert_eq!(Arc::strong_count(&weight), 2);
     // Replacing mutable state preserves the fixed inputs.
     first
         .replace_state(vec![(state.clone(), client.buffer(&[], &[0.]).unwrap())])

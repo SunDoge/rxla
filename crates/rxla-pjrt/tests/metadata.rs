@@ -14,3 +14,18 @@ fn real_platform_and_device_metadata_are_owned() {
     );
     println!("PJRT metadata: {info:?}");
 }
+
+#[test]
+#[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+fn buffer_reports_device_and_backend_memory_independently() {
+    let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
+    let buffer = client.buffer(&[2], &[1.0_f32, 2.0]).unwrap();
+
+    let device = buffer.device_info().unwrap();
+    let memory = buffer.memory_info().unwrap();
+
+    assert!(device.selected);
+    assert!(!device.kind.is_empty());
+    assert!(client.info().unwrap().addressable_devices.contains(&device));
+    println!("PJRT buffer placement: device={device:?}, memory={memory:?}");
+}

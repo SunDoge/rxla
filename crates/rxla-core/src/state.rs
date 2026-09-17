@@ -78,7 +78,7 @@ enum Argument {
 enum InputBinding {
     Unused,
     Dynamic(usize),
-    Fixed(Arc<Buffer>),
+    Fixed(Buffer),
 }
 
 /// Records symbolic state versions without modifying live runtime buffers.
@@ -841,8 +841,8 @@ pub struct Session {
 
 fn input_parameter_bindings(
     program: &StateProgram,
-    bindings: Vec<(Parameter, Arc<Buffer>)>,
-) -> Result<Vec<(usize, Arc<Buffer>)>> {
+    bindings: Vec<(Parameter, Buffer)>,
+) -> Result<Vec<(usize, Buffer)>> {
     let mut indexed = Vec::with_capacity(bindings.len());
     for (parameter, buffer) in bindings {
         if !Arc::ptr_eq(&parameter.owner, &program.0.owner) {
@@ -867,7 +867,7 @@ impl Session {
         &mut self,
         program: &StateProgram,
         mapping: &[(StateSlot, StateSlot)],
-        bindings: Vec<(Parameter, Arc<Buffer>)>,
+        bindings: Vec<(Parameter, Buffer)>,
     ) -> Result<()> {
         let indexed = input_parameter_bindings(program, bindings)?;
         self.switch_program(program, mapping, indexed)
@@ -889,7 +889,7 @@ impl Session {
         &mut self,
         program: &StateProgram,
         mapping: &[(StateSlot, StateSlot)],
-        fixed_inputs: Vec<(usize, Arc<Buffer>)>,
+        fixed_inputs: Vec<(usize, Buffer)>,
     ) -> Result<()> {
         let source_slots: Vec<_> = mapping.iter().map(|(source, _)| source.clone()).collect();
         let destination_slots: Vec<_> = mapping
@@ -970,7 +970,7 @@ impl Session {
         match &parameter.storage {
             ParameterStorage::State(slot) => self.state(slot),
             ParameterStorage::Input(index) => match self.inputs.get(*index) {
-                Some(InputBinding::Fixed(buffer)) => Ok(buffer.as_ref()),
+                Some(InputBinding::Fixed(buffer)) => Ok(buffer),
                 Some(InputBinding::Dynamic(_)) => {
                     Err(err("parameter has no fixed resident binding"))
                 }
@@ -988,7 +988,7 @@ impl Session {
     /// Parameters removed by `compile_pruned` cannot be bound.
     /// Parameter handles need not remain alive after binding. Buffers are shared
     /// read-only via Arc; no compilation, execution, or tensor copies occur.
-    pub fn bind_parameters(&mut self, bindings: Vec<(Parameter, Arc<Buffer>)>) -> Result<()> {
+    pub fn bind_parameters(&mut self, bindings: Vec<(Parameter, Buffer)>) -> Result<()> {
         self.bind_inputs(input_parameter_bindings(&self.program, bindings)?)
     }
     /// Replace the set of fixed visible inputs (e.g. resident inference weights).
@@ -1001,9 +1001,9 @@ impl Session {
     /// Buffers are shared by ownership, not copied or embedded as graph constants.
     /// All bindings are validated before replacement; errors leave both previous
     /// bindings and mutable state intact. No compilation or execution occurs.
-    pub fn bind_inputs(&mut self, bindings: Vec<(usize, Arc<Buffer>)>) -> Result<()> {
+    pub fn bind_inputs(&mut self, bindings: Vec<(usize, Buffer)>) -> Result<()> {
         let plan = &self.program.0;
-        let mut fixed: Vec<Option<Arc<Buffer>>> = (0..plan.input_count).map(|_| None).collect();
+        let mut fixed: Vec<Option<Buffer>> = (0..plan.input_count).map(|_| None).collect();
         for (index, buffer) in bindings {
             let slot = fixed
                 .get_mut(index)
@@ -1163,7 +1163,7 @@ impl Session {
                 Ok(match *arg {
                     Argument::Input(i) => match &self.inputs[i] {
                         InputBinding::Dynamic(index) => inputs[*index],
-                        InputBinding::Fixed(buffer) => buffer.as_ref(),
+                        InputBinding::Fixed(buffer) => buffer,
                         InputBinding::Unused => {
                             return Err(Error::PrunedExecutionInput { index: i });
                         }

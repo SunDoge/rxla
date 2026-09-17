@@ -1,5 +1,4 @@
 use rxla_core::{CacheLimits, Client, Compiler, StateGraph, StateProgram, StateSlot};
-use std::sync::Arc;
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -74,7 +73,7 @@ fn real_program_switch_remaps_state_and_validates_before_replacing_bindings() {
             (a[1].clone(), client.buffer(&[], &[16_777_217]).unwrap()),
         ])
         .unwrap();
-    let two = Arc::new(client.buffer(&[], &[2.]).unwrap());
+    let two = client.buffer(&[], &[2.]).unwrap();
     session
         .bind_inputs(vec![(first_scale, two.clone())])
         .unwrap();
@@ -135,7 +134,7 @@ fn real_program_switch_remaps_state_and_validates_before_replacing_bindings() {
     for bindings in [
         vec![(0, two.clone())], // pruned destination input
         vec![(second_scale, two.clone()), (second_scale, two.clone())],
-        vec![(second_scale, Arc::new(client.buffer(&[], &[2]).unwrap()))],
+        vec![(second_scale, client.buffer(&[], &[2]).unwrap())],
     ] {
         assert!(session.switch_program(&second, &mapping, bindings).is_err());
         assert_eq!(session.input_count(), 1);
@@ -149,7 +148,7 @@ fn real_program_switch_remaps_state_and_validates_before_replacing_bindings() {
         .switch_program(
             &second,
             &mapping,
-            vec![(second_scale, Arc::new(client.buffer(&[], &[3.]).unwrap()))],
+            vec![(second_scale, client.buffer(&[], &[3.]).unwrap())],
         )
         .unwrap();
     assert!(session.state(&a[0]).is_err());

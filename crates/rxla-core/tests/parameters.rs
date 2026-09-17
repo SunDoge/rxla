@@ -1,5 +1,4 @@
 use rxla_core::{CacheLimits, Client, Compiler, StateGraph};
-use std::sync::Arc;
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -34,8 +33,8 @@ fn real_parameter_identity_binding_and_replacement() {
     };
     let mut first = make_session();
     let mut second = make_session();
-    let two = Arc::new(client.buffer(&[], &[2.]).unwrap());
-    let three = Arc::new(client.buffer(&[], &[3.]).unwrap());
+    let two = client.buffer(&[], &[2.]).unwrap();
+    let three = client.buffer(&[], &[3.]).unwrap();
     first
         .bind_parameters(vec![(b.clone(), three.clone()), (a.clone(), two.clone())])
         .unwrap();
@@ -43,11 +42,11 @@ fn real_parameter_identity_binding_and_replacement() {
         .bind_parameters(vec![(a.clone(), two.clone()), (b.clone(), three.clone())])
         .unwrap();
     assert_eq!(first.input_count(), 1);
-    let wrong = Arc::new(client.buffer(&[1], &[2.]).unwrap());
-    let integer = Arc::new(client.buffer(&[], &[2]).unwrap());
+    let wrong = client.buffer(&[1], &[2.]).unwrap();
+    let integer = client.buffer(&[], &[2]).unwrap();
     let foreign_client =
         unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
-    let foreign_buffer = Arc::new(foreign_client.buffer(&[], &[2.]).unwrap());
+    let foreign_buffer = foreign_client.buffer(&[], &[2.]).unwrap();
     for bindings in [
         vec![(a.clone(), two.clone()), (tied, three.clone())],
         vec![(a.clone(), two.clone()), (foreign, three.clone())],

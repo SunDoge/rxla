@@ -15,7 +15,6 @@ use std::{
     collections::{HashMap, HashSet},
     io::Write,
     path::{Path, PathBuf},
-    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -319,23 +318,23 @@ struct Pipeline {
     denoise: Stage,
     vae: Stage,
     tokens: Buffer,
-    initial: Rc<Buffer>,
-    zero: Rc<Buffer>,
-    timesteps: Vec<Rc<Buffer>>,
-    coefficients: Vec<Rc<Buffer>>,
+    initial: Buffer,
+    zero: Buffer,
+    timesteps: Vec<Buffer>,
+    coefficients: Vec<Buffer>,
     scheduler: PndmScheduler,
 }
 
 impl Pipeline {
     fn evaluate(&mut self) -> Result<(Buffer, Duration, Duration, Duration)> {
         let start = Instant::now();
-        let context = Rc::new(self.clip.execute::<Buffer>(&[&self.tokens])?);
+        let context = self.clip.execute::<Buffer>(&[&self.tokens])?;
         let clip_time = start.elapsed();
 
         let start = Instant::now();
         let mut current = self.initial.clone();
         let initial = current.clone();
-        let mut history: Vec<Rc<Buffer>> = Vec::with_capacity(4);
+        let mut history: Vec<Buffer> = Vec::with_capacity(4);
         for index in 0..self.scheduler.timesteps().len() {
             let plan = self.scheduler.step(index)?;
             let update_sample = match plan.sample_source {
@@ -346,18 +345,17 @@ impl Pipeline {
                 .map(|slot| history.get(slot).unwrap_or(&self.zero))
                 .collect();
             let [next, model_output] = self.denoise.model.run([
-                current.as_ref(),
-                update_sample.as_ref(),
-                self.timesteps[index].as_ref(),
-                context.as_ref(),
-                history_inputs[0].as_ref(),
-                history_inputs[1].as_ref(),
-                history_inputs[2].as_ref(),
-                history_inputs[3].as_ref(),
-                self.coefficients[index].as_ref(),
+                &current,
+                update_sample,
+                &self.timesteps[index],
+                &context,
+                history_inputs[0],
+                history_inputs[1],
+                history_inputs[2],
+                history_inputs[3],
+                &self.coefficients[index],
             ])?;
-            current = Rc::new(next);
-            let model_output = Rc::new(model_output);
+            current = next;
             if plan.retain_model_output {
                 history.insert(0, model_output);
                 history.truncate(4);
@@ -365,7 +363,7 @@ impl Pipeline {
         }
         let denoise_time = start.elapsed();
         let start = Instant::now();
-        let image = self.vae.execute::<Buffer>(&[current.as_ref()])?;
+        let image = self.vae.execute::<Buffer>(&[&current])?;
         let vae_time = start.elapsed();
         Ok((image, clip_time, denoise_time, vae_time))
     }
@@ -503,25 +501,23 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
     if let Some(path) = &args.latent_output {
         write_f32(path, &initial_values)?;
     }
-    let initial = Rc::new(client.buffer(&[1, 64, 64, 4], &initial_values)?);
-    let zero = Rc::new(client.buffer(&[1, 64, 64, 4], &vec![0.; 64 * 64 * 4])?);
+    let initial = client.buffer(&[1, 64, 64, 4], &initial_values)?;
+    let zero = client.buffer(&[1, 64, 64, 4], &vec![0.; 64 * 64 * 4])?;
     let timesteps = scheduler
         .timesteps()
         .iter()
         .map(|&value| {
             let embedding = timestep_embedding(value, timestep_width);
             let doubled: Vec<_> = embedding.iter().chain(&embedding).copied().collect();
-            Ok(Rc::new(
-                client.buffer(&[2, timestep_width as i64], &doubled)?,
-            ))
+            Ok(client.buffer(&[2, timestep_width as i64], &doubled)?)
         })
         .collect::<Result<_>>()?;
     let coefficients = (0..scheduler.timesteps().len())
         .map(|index| {
-            Ok(Rc::new(client.buffer(
+            Ok(client.buffer(
                 &[8],
                 &scheduler.step(index)?.tensor_coefficients(args.guidance)?,
-            )?))
+            )?)
         })
         .collect::<Result<_>>()?;
     let cache_stats = compiler.stats();

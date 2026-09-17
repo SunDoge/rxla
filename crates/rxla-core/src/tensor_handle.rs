@@ -65,16 +65,55 @@ fn lazy_session_for_graph(graph: &Graph) -> Option<Arc<LazySession>> {
     graph.0.lazy.get().and_then(Weak::upgrade)
 }
 
-/// Thread-safe allocation ownership, independent of tensor shape, strides and offset.
-/// Clones share the owner.
+/// Shared backing ownership, independent of tensor shape and logical layout.
+/// Concrete backings carry their own placement, mapping, and release rules.
 #[derive(Clone)]
-pub struct Storage(Arc<StorageInner>);
-enum StorageInner {
-    Host {
-        dtype: DType,
-        owner: Box<dyn AsRef<[u8]> + Send + Sync>,
-    },
-    Device(Arc<Buffer>),
+pub struct Storage(Arc<dyn Backing>);
+
+trait Backing: Send + Sync {
+    fn kind(&self) -> StorageKind;
+    fn dtype(&self) -> StorageResult<DType>;
+    fn host_bytes(&self) -> Option<&[u8]> {
+        None
+    }
+    fn pjrt_buffer(&self) -> Option<&Buffer> {
+        None
+    }
+}
+
+struct HostBacking<O> {
+    dtype: DType,
+    owner: O,
+}
+
+impl<O: AsRef<[u8]> + Send + Sync> Backing for HostBacking<O> {
+    fn kind(&self) -> StorageKind {
+        StorageKind::Host
+    }
+
+    fn dtype(&self) -> StorageResult<DType> {
+        Ok(self.dtype)
+    }
+
+    fn host_bytes(&self) -> Option<&[u8]> {
+        Some(self.owner.as_ref())
+    }
+}
+
+struct PjrtBacking(Buffer);
+
+impl Backing for PjrtBacking {
+    fn kind(&self) -> StorageKind {
+        StorageKind::Pjrt
+    }
+
+    fn dtype(&self) -> StorageResult<DType> {
+        Ok(self.0.dtype()?)
+    }
+
+    fn pjrt_buffer(&self) -> Option<&Buffer> {
+        Some(&self.0)
+    }
 }
 
 struct TypedOwner<T: TensorElement>(Vec<T>);
@@ -294,6 +333,16 @@ impl TensorBuilder {
         self.from_storage(Storage::host(dtype, TypedOwner(values)))
     }
 
+    /// Allocate dense host storage and fill every element with one value.
+    pub fn from_elem<T: TensorElement>(self, value: T) -> TensorBuildResult<Tensor> {
+        let len = self.shape.numel().context(InvalidShapeSnafu)?;
+        self.validate_elements::<T>(len)?;
+        let mut values = Vec::new();
+        values.try_reserve_exact(len).context(HostAllocationSnafu)?;
+        values.resize(len, value);
+        self.from_vec(values)
+    }
+
     /// Retain an existing immutable storage owner without copying its payload.
     pub fn from_storage(self, storage: Storage) -> TensorBuildResult<Tensor> {
         let element_bytes = self
@@ -399,43 +448,28 @@ impl Storage {
     /// stable while used as an input; no mutation is exposed by this API.
     /// Storage keeps the provider alive until its final owning handle is dropped.
     pub fn host(dtype: DType, owner: impl AsRef<[u8]> + Send + Sync + 'static) -> Self {
-        Self(Arc::new(StorageInner::Host {
-            dtype,
-            owner: Box::new(owner),
-        }))
+        Self(Arc::new(HostBacking { dtype, owner }))
     }
-    /// Retain a native allocation; no metadata query or payload copy.
-    pub fn device(buffer: Arc<Buffer>) -> Self {
-        Self(Arc::new(StorageInner::Device(buffer)))
+    /// Retain a PJRT-managed allocation; no metadata query or payload copy.
+    pub fn pjrt(buffer: Buffer) -> Self {
+        Self(Arc::new(PjrtBacking(buffer)))
     }
     pub fn kind(&self) -> StorageKind {
-        match &*self.0 {
-            StorageInner::Host { .. } => StorageKind::Host,
-            StorageInner::Device(_) => StorageKind::Pjrt,
-        }
+        self.0.kind()
     }
     /// Owner identity, not an overlap test for independently imported allocations.
     pub fn shares_owner_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
     pub fn host_bytes(&self) -> Option<&[u8]> {
-        match &*self.0 {
-            StorageInner::Host { owner, .. } => Some(owner.as_ref().as_ref()),
-            _ => None,
-        }
+        self.0.host_bytes()
     }
-    pub fn buffer(&self) -> Option<&Arc<Buffer>> {
-        match &*self.0 {
-            StorageInner::Device(buffer) => Some(buffer),
-            _ => None,
-        }
+    pub fn buffer(&self) -> Option<&Buffer> {
+        self.0.pjrt_buffer()
     }
-    /// Host metadata is explicit; native dtype comes from the opaque PJRT buffer.
+    /// Dtype is supplied by the concrete backing rather than inferred from location.
     pub fn dtype(&self) -> StorageResult<DType> {
-        match &*self.0 {
-            StorageInner::Host { dtype, .. } => Ok(*dtype),
-            StorageInner::Device(buffer) => Ok(buffer.dtype()?),
-        }
+        self.0.dtype()
     }
     /// Validate a raw-byte view against this storage's recorded dtype.
     pub fn view(&self, layout: StridedLayout) -> StorageResult<HostView<'_>> {
@@ -458,7 +492,7 @@ impl Storage {
     /// Explicitly pack/upload host bytes in native endian order according to dtype.
     /// I32 and BF16 never pass through F32. Typed, aligned scratch exists only at
     /// this native transfer boundary, not in the retained storage representation.
-    pub fn upload(&self, layout: &StridedLayout, client: &Client) -> StorageResult<Arc<Buffer>> {
+    pub fn upload(&self, layout: &StridedLayout, client: &Client) -> StorageResult<Buffer> {
         let selected = client
             .info()?
             .addressable_devices
@@ -473,7 +507,7 @@ impl Storage {
         layout: &StridedLayout,
         client: &Client,
         device: usize,
-    ) -> StorageResult<Arc<Buffer>> {
+    ) -> StorageResult<Buffer> {
         let view = self.view(layout.clone())?;
         let shape = layout.shape().as_slice();
         let buffer = match self.dtype()? {
@@ -504,7 +538,7 @@ impl Storage {
             )?,
             dtype => return Err(StorageError::UnsupportedStorageDType { dtype }),
         };
-        Ok(Arc::new(buffer))
+        Ok(buffer)
     }
 }
 
@@ -536,7 +570,7 @@ enum Binding {
         storage: Storage,
         layout: StridedLayout,
     },
-    Device {
+    Pjrt {
         storage: Storage,
         layout: BufferMemoryLayout,
     },
@@ -548,7 +582,7 @@ enum Binding {
 pub enum TensorLayout<'a> {
     Symbolic,
     Host(&'a StridedLayout),
-    Device(&'a BufferMemoryLayout),
+    Pjrt(&'a BufferMemoryLayout),
 }
 
 /// Opaque immutable implementation of a Tensor handle. Fields are private to the
@@ -669,6 +703,40 @@ impl Tensor {
         Self::builder(shape, dtype)?.copy_from_slice(values.as_ref())
     }
 
+    /// Create a dense host-backed tensor filled with one typed value.
+    /// The explicit dtype must match `T`.
+    pub fn from_elem<T: TensorElement>(
+        shape: impl AsRef<[i64]>,
+        dtype: DType,
+        value: T,
+    ) -> TensorBuildResult<Self> {
+        Self::builder(shape, dtype)?.from_elem(value)
+    }
+
+    /// Create a dense host-backed tensor filled with zeros.
+    pub fn zeros(shape: impl AsRef<[i64]>, dtype: DType) -> TensorBuildResult<Self> {
+        match dtype {
+            DType::U8 => Self::from_elem(shape, dtype, 0_u8),
+            DType::F16 => Self::from_elem(shape, dtype, f16::from_f32(0.0)),
+            DType::F32 => Self::from_elem(shape, dtype, 0.0_f32),
+            DType::I32 => Self::from_elem(shape, dtype, 0_i32),
+            DType::BF16 => Self::from_elem(shape, dtype, bf16::from_f32(0.0)),
+            _ => UnsupportedDTypeSnafu { dtype }.fail(),
+        }
+    }
+
+    /// Create a dense host-backed tensor filled with ones.
+    pub fn ones(shape: impl AsRef<[i64]>, dtype: DType) -> TensorBuildResult<Self> {
+        match dtype {
+            DType::U8 => Self::from_elem(shape, dtype, 1_u8),
+            DType::F16 => Self::from_elem(shape, dtype, f16::from_f32(1.0)),
+            DType::F32 => Self::from_elem(shape, dtype, 1.0_f32),
+            DType::I32 => Self::from_elem(shape, dtype, 1_i32),
+            DType::BF16 => Self::from_elem(shape, dtype, bf16::from_f32(1.0)),
+            _ => UnsupportedDTypeSnafu { dtype }.fail(),
+        }
+    }
+
     /// Attach a logical sharding constraint without selecting physical devices.
     /// Reapplying the same constraint is idempotent; conflicting constraints on
     /// the same expression are rejected.
@@ -724,7 +792,7 @@ impl Tensor {
         value.into_lazy()
     }
 
-    /// True when this value already owns host or device storage.
+    /// True when this value already owns a concrete backing.
     pub fn is_materialized(&self) -> bool {
         self.binding.get().is_some()
     }
@@ -738,21 +806,21 @@ impl Tensor {
         match self.binding.get() {
             None => TensorLayout::Symbolic,
             Some(Binding::Host { layout, .. }) => TensorLayout::Host(layout),
-            Some(Binding::Device { layout, .. }) => TensorLayout::Device(layout),
+            Some(Binding::Pjrt { layout, .. }) => TensorLayout::Pjrt(layout),
         }
     }
     /// Wrap an executor result as a materialized leaf in the implicit lazy graph.
     pub(crate) fn materialized(buffer: Buffer) -> Result<Self> {
-        Self::from_device_buffer(Arc::new(buffer))?.into_lazy()
+        Self::from_pjrt_buffer(buffer)?.into_lazy()
     }
 
     /// Wrap an executor result only for publication into existing lazy roots.
     /// Unlike `materialized`, this does not register a temporary graph input.
     pub(crate) fn materialized_detached(buffer: Buffer) -> Result<Self> {
-        Self::from_device_buffer(Arc::new(buffer))
+        Self::from_pjrt_buffer(buffer)
     }
 
-    fn from_device_buffer(buffer: Arc<Buffer>) -> Result<Self> {
+    fn from_pjrt_buffer(buffer: Buffer) -> Result<Self> {
         let shape = buffer.dimensions()?;
         let dtype = buffer.dtype()?;
         let layout = buffer.memory_layout()?;
@@ -761,8 +829,8 @@ impl Tensor {
                 trace: None,
                 shape: SmallVec::from_slice_copy(&shape),
                 dtype,
-                binding: OnceLock::from(Binding::Device {
-                    storage: Storage::device(buffer),
+                binding: OnceLock::from(Binding::Pjrt {
+                    storage: Storage::pjrt(buffer),
                     layout,
                 }),
             }),
@@ -953,7 +1021,7 @@ impl Tensor {
     }
     /// Attach a resident input without copying its data. Client identity is
     /// validated when used with an executor. This does not create a strided view.
-    pub fn with_device_storage(&self, storage: Storage) -> Result<Self> {
+    pub fn with_pjrt_storage(&self, storage: Storage) -> Result<Self> {
         self.input_index()?;
         let buffer = storage.buffer().ok_or(Error::ExpectedDeviceStorage)?;
         let actual_dtype = buffer.dtype()?;
@@ -967,12 +1035,32 @@ impl Tensor {
             });
         }
         let layout = buffer.memory_layout()?;
-        Ok(self.with_binding(Binding::Device { storage, layout }))
+        Ok(self.with_binding(Binding::Pjrt { storage, layout }))
     }
     pub fn storage(&self) -> Option<&Storage> {
         self.binding.get().map(|b| match b {
-            Binding::Host { storage, .. } | Binding::Device { storage, .. } => storage,
+            Binding::Host { storage, .. } | Binding::Pjrt { storage, .. } => storage,
         })
+    }
+
+    /// Device metadata for a PJRT-materialized tensor. Host-backed and symbolic
+    /// tensors are uncommitted and return `None`.
+    pub fn device_info(&self) -> Result<Option<DeviceInfo>> {
+        self.storage()
+            .and_then(Storage::buffer)
+            .map(Buffer::device_info)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// Backend-defined memory space for a PJRT-materialized tensor.
+    /// Host-backed and symbolic tensors return `None`.
+    pub fn memory_info(&self) -> Result<Option<MemoryInfo>> {
+        self.storage()
+            .and_then(Storage::buffer)
+            .map(Buffer::memory_info)
+            .transpose()
+            .map_err(Into::into)
     }
 
     /// Download a materialized PJRT tensor into a typed host vector.
@@ -1010,9 +1098,9 @@ impl Tensor {
     /// Explicitly upload/pack a managed host input, or retain its same-client
     /// device buffer. Native byte order is used; no implicit cross-client copy.
     /// Repeated host calls upload again: use to_device once for resident reuse.
-    pub fn to_buffer(&self, client: &Client) -> Result<Arc<Buffer>> {
+    pub fn to_buffer(&self, client: &Client) -> Result<Buffer> {
         match self.binding.get() {
-            Some(Binding::Device { storage, .. }) => {
+            Some(Binding::Pjrt { storage, .. }) => {
                 let buffer = storage.buffer().ok_or(Error::ExpectedDeviceStorage)?;
                 if !buffer.belongs_to(client) {
                     return Err(Error::ForeignClientStorage);
@@ -1024,13 +1112,9 @@ impl Tensor {
         }
     }
 
-    pub(crate) fn to_buffer_on_device(
-        &self,
-        client: &Client,
-        device: usize,
-    ) -> Result<Arc<Buffer>> {
+    pub(crate) fn to_buffer_on_device(&self, client: &Client, device: usize) -> Result<Buffer> {
         match self.binding.get() {
-            Some(Binding::Device { storage, .. }) => {
+            Some(Binding::Pjrt { storage, .. }) => {
                 let buffer = storage.buffer().ok_or(Error::ExpectedDeviceStorage)?;
                 if !buffer.belongs_to(client) {
                     return Err(Error::ForeignClientStorage);
@@ -1046,16 +1130,16 @@ impl Tensor {
     /// Return a new input descriptor owning resident storage; original unchanged.
     pub fn to_device(&self, client: &Client) -> Result<Self> {
         if !self.is_implicit_lazy() {
-            return self.with_device_storage(Storage::device(self.to_buffer(client)?));
+            return self.with_pjrt_storage(Storage::pjrt(self.to_buffer(client)?));
         }
         if self.is_materialized() {
-            if matches!(self.binding.get(), Some(Binding::Device { .. })) {
+            if matches!(self.binding.get(), Some(Binding::Pjrt { .. })) {
                 self.to_buffer(client)?;
                 return Ok(self.clone());
             }
-            return Self::from_device_buffer(self.to_buffer(client)?)?.into_lazy();
+            return Self::from_pjrt_buffer(self.to_buffer(client)?)?.into_lazy();
         }
-        self.with_device_storage(Storage::device(self.to_buffer(client)?))
+        self.with_pjrt_storage(Storage::pjrt(self.to_buffer(client)?))
     }
 
     fn trace_value(&self) -> Result<&TraceValue> {
@@ -1109,7 +1193,7 @@ impl Compiler {
             .collect::<Result<Vec<_>>>()?;
         let executable =
             self.compile_graph_outputs(output.graph(), std::slice::from_ref(output))?;
-        executable.execute(&buffers.iter().map(|b| b.as_ref()).collect::<Vec<_>>())
+        executable.execute(&buffers.iter().collect::<Vec<_>>())
     }
 }
 
@@ -1383,6 +1467,20 @@ mod tests {
                 actual: 2,
                 ..
             }
+        ));
+
+        let zeros = Tensor::zeros([2, 2], DType::F32).unwrap();
+        assert_eq!(zeros.storage().unwrap().host_bytes().unwrap(), &[0; 16]);
+        let ones = Tensor::ones([2], DType::I32).unwrap();
+        assert_eq!(
+            ones.host_view().unwrap().element(&[1]).unwrap(),
+            1_i32.to_ne_bytes()
+        );
+        let filled = Tensor::from_elem([3], DType::U8, 7_u8).unwrap();
+        assert_eq!(filled.storage().unwrap().host_bytes().unwrap(), &[7, 7, 7]);
+        assert!(matches!(
+            Tensor::from_elem([1], DType::I32, 1.0_f32),
+            Err(TensorBuildError::DTypeMismatch { .. })
         ));
     }
 

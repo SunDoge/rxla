@@ -1,5 +1,4 @@
 use rxla_core::{CacheLimits, Client, Compiler, StateGraph};
-use std::sync::Arc;
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -16,7 +15,7 @@ fn real_session_state_transfer_and_rebinding() {
         .write_many(&[(&count, &next), (&total, &sum)])
         .unwrap();
     let program = graph.compile(&mut compiler, &[sum]).unwrap();
-    let shared = Arc::new(client.buffer(&[], &[2.]).unwrap());
+    let shared = client.buffer(&[], &[2.]).unwrap();
     let mut session = program
         .session(vec![
             (total.clone(), client.buffer(&[], &[1.]).unwrap()),
@@ -27,9 +26,7 @@ fn real_session_state_transfer_and_rebinding() {
         .bind_parameters(vec![(weight.clone(), shared.clone())])
         .unwrap();
     let first = session.run(&[]).unwrap();
-    assert_eq!(Arc::strong_count(&shared), 2);
     let saved = session.into_state();
-    assert_eq!(Arc::strong_count(&shared), 1);
     assert_eq!(saved.len(), 2);
     assert_eq!(saved[0].1.to_vec::<i32>().unwrap(), [16_777_218]);
     assert_eq!(saved[1].1.to_vec::<f32>().unwrap(), [3.]);

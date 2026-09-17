@@ -1,5 +1,4 @@
 use rxla_core::{CacheLimits, Client, Compiler, StateGraph};
-use std::sync::Arc;
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -35,7 +34,7 @@ fn real_pruned_inputs_preserve_identities_hidden_updates_and_state_transfer() {
     assert!(pruned.session(vec![]).is_err()); // old state inputs pruned, schema intact
     let mut session = pruned.session(fresh()).unwrap();
     assert_eq!(session.input_count(), 3);
-    let shared = Arc::new(client.buffer(&[], &[2.]).unwrap());
+    let shared = client.buffer(&[], &[2.]).unwrap();
     session
         .bind_parameters(vec![(weight.clone(), shared.clone())])
         .unwrap();
@@ -43,17 +42,16 @@ fn real_pruned_inputs_preserve_identities_hidden_updates_and_state_transfer() {
     assert!(session.parameter(&dead).is_err());
     assert!(
         session
-            .bind_parameters(vec![(
-                dead.clone(),
-                Arc::new(client.buffer(&[3], &[0.; 3]).unwrap())
-            )])
+            .bind_parameters(vec![(dead.clone(), client.buffer(&[3], &[0.; 3]).unwrap())])
             .is_err()
     );
     assert_eq!(session.input_count(), 2);
-    assert!(std::ptr::eq(
-        session.parameter(&weight).unwrap(),
-        shared.as_ref()
-    ));
+    assert!(
+        session
+            .parameter(&weight)
+            .unwrap()
+            .shares_allocation_with(&shared)
+    );
     let mut child = session.new_session(fresh()).unwrap();
     let xb = client.buffer(&[], &[3.]).unwrap();
     let ib = client.buffer(&[], &[17]).unwrap();
