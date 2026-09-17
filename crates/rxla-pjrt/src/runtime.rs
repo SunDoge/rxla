@@ -228,6 +228,60 @@ struct PluginInner {
 #[derive(Clone)]
 pub struct Plugin(Arc<PluginInner>);
 
+/// Calling convention used by a GPU custom-call handler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuCustomCallApi {
+    /// XLA's legacy untyped custom-call ABI.
+    Legacy = 0,
+    /// The typed XLA FFI ABI.
+    TypedFfi = 1,
+}
+
+/// Process-lifetime entry points for one GPU custom call.
+///
+/// XLA FFI permits optional lifecycle handlers and requires an execute handler.
+/// The code containing these pointers must remain loaded for the lifetime of
+/// the PJRT plugin.
+#[derive(Clone, Copy, Debug)]
+pub struct GpuCustomCallHandlers {
+    pub instantiate: Option<NonNull<std::ffi::c_void>>,
+    pub prepare: Option<NonNull<std::ffi::c_void>>,
+    pub initialize: Option<NonNull<std::ffi::c_void>>,
+    pub execute: NonNull<std::ffi::c_void>,
+}
+
+impl GpuCustomCallHandlers {
+    pub const fn execute_only(execute: NonNull<std::ffi::c_void>) -> Self {
+        Self {
+            instantiate: None,
+            prepare: None,
+            initialize: None,
+            execute,
+        }
+    }
+}
+
+#[repr(C)]
+struct PjrtGpuRegisterCustomCallArgs {
+    struct_size: usize,
+    function_name: *const std::ffi::c_char,
+    function_name_size: usize,
+    api_version: i32,
+    handler_instantiate: *mut std::ffi::c_void,
+    handler_prepare: *mut std::ffi::c_void,
+    handler_initialize: *mut std::ffi::c_void,
+    handler_execute: *mut std::ffi::c_void,
+}
+
+type PjrtGpuRegisterCustomCall =
+    unsafe extern "C" fn(*mut PjrtGpuRegisterCustomCallArgs) -> *mut PJRT_Error;
+
+#[repr(C)]
+struct PjrtGpuCustomCallExtension {
+    base: PJRT_Extension_Base,
+    custom_call: Option<PjrtGpuRegisterCustomCall>,
+}
+
 // PJRT API tables are immutable after initialization and implementations expose
 // thread-safe client, buffer, and executable interfaces. The dynamic library is
 // retained for process lifetime, so sharing this pointer cannot race unloading.
@@ -254,27 +308,93 @@ impl Plugin {
         self.0.api
     }
 
+    fn extension(&self, kind: PJRT_Extension_Type) -> Option<NonNull<PJRT_Extension_Base>> {
+        let mut extension = unsafe { (*self.api()).extension_start };
+        let mut visited = std::collections::HashSet::new();
+        while let Some(current) = NonNull::new(extension) {
+            if !visited.insert(current.as_ptr() as usize) {
+                return None;
+            }
+            let base = unsafe { current.as_ptr().read() };
+            if base.struct_size < PJRT_Extension_Base_STRUCT_SIZE as usize {
+                return None;
+            }
+            if base.type_ == kind {
+                return Some(current);
+            }
+            extension = base.next;
+        }
+        None
+    }
+
     /// Whether this implementation advertises the experimental direct
     /// collectives extension. This is distinct from graph collectives: a CUDA
     /// plugin can execute StableHLO collectives through NCCL without exposing
     /// this extension.
     pub fn supports_collectives_extension(&self) -> bool {
-        let mut extension = unsafe { (*self.api()).extension_start };
-        let mut visited = std::collections::HashSet::new();
-        while let Some(current) = NonNull::new(extension) {
-            if !visited.insert(current.as_ptr() as usize) {
-                return false;
-            }
-            let base = unsafe { current.as_ptr().read() };
-            if base.struct_size < PJRT_Extension_Base_STRUCT_SIZE as usize {
-                return false;
-            }
-            if base.type_ == PJRT_Extension_Type_PJRT_Extension_Type_Collectives {
-                return true;
-            }
-            extension = base.next;
+        self.extension(PJRT_Extension_Type_PJRT_Extension_Type_Collectives)
+            .is_some()
+    }
+
+    /// Whether this plugin can register CUDA/ROCm custom-call handlers.
+    pub fn supports_gpu_custom_calls(&self) -> bool {
+        let Some(extension) =
+            self.extension(PJRT_Extension_Type_PJRT_Extension_Type_Gpu_Custom_Call)
+        else {
+            return false;
+        };
+        let extension = extension.cast::<PjrtGpuCustomCallExtension>();
+        let required = std::mem::offset_of!(PjrtGpuCustomCallExtension, custom_call)
+            + std::mem::size_of::<Option<PjrtGpuRegisterCustomCall>>();
+        unsafe {
+            (*extension.as_ptr()).base.struct_size >= required
+                && (*extension.as_ptr()).custom_call.is_some()
         }
-        false
+    }
+
+    /// Register a process-lifetime GPU custom-call implementation.
+    ///
+    /// # Safety
+    /// Every handler must use the selected XLA ABI and remain executable for
+    /// the process lifetime. Its implementation must uphold the buffer, stream,
+    /// aliasing and asynchronous-lifetime contracts described by XLA FFI.
+    pub unsafe fn register_gpu_custom_call(
+        &self,
+        name: &str,
+        api: GpuCustomCallApi,
+        handlers: GpuCustomCallHandlers,
+    ) -> Result<()> {
+        let extension = self
+            .extension(PJRT_Extension_Type_PJRT_Extension_Type_Gpu_Custom_Call)
+            .context(UnsupportedSnafu {
+                message: "PJRT plugin does not expose GPU custom-call registration",
+            })?
+            .cast::<PjrtGpuCustomCallExtension>();
+        let required = std::mem::offset_of!(PjrtGpuCustomCallExtension, custom_call)
+            + std::mem::size_of::<Option<PjrtGpuRegisterCustomCall>>();
+        ensure!(
+            unsafe { (*extension.as_ptr()).base.struct_size } >= required,
+            IncompatiblePluginSnafu {
+                message: "GPU custom-call extension is shorter than its required prefix",
+            }
+        );
+        let register =
+            unsafe { (*extension.as_ptr()).custom_call }.context(IncompatiblePluginSnafu {
+                message: "GPU custom-call extension has a null registration function",
+            })?;
+        let mut args = PjrtGpuRegisterCustomCallArgs {
+            struct_size: std::mem::size_of::<PjrtGpuRegisterCustomCallArgs>(),
+            function_name: name.as_ptr().cast(),
+            function_name_size: name.len(),
+            api_version: api as i32,
+            handler_instantiate: handlers
+                .instantiate
+                .map_or(ptr::null_mut(), NonNull::as_ptr),
+            handler_prepare: handlers.prepare.map_or(ptr::null_mut(), NonNull::as_ptr),
+            handler_initialize: handlers.initialize.map_or(ptr::null_mut(), NonNull::as_ptr),
+            handler_execute: handlers.execute.as_ptr(),
+        };
+        self.check(unsafe { register(&mut args) })
     }
 
     /// Whether the PJRT API table advertises both DMA map/unmap entry points.
@@ -2270,6 +2390,53 @@ mod lifetime_tests {
         assert!(!plugin(&api).supports_collectives_extension());
         api.extension_start = ptr::from_mut(&mut collectives);
         assert!(plugin(&api).supports_collectives_extension());
+    }
+
+    #[test]
+    fn gpu_custom_call_extension_registers_typed_handlers() {
+        use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static API_VERSION: AtomicI32 = AtomicI32::new(-1);
+        static NAME_SIZE: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn register(args: *mut PjrtGpuRegisterCustomCallArgs) -> *mut PJRT_Error {
+            let args = unsafe { &*args };
+            CALLS.fetch_add(1, Ordering::Relaxed);
+            API_VERSION.store(args.api_version, Ordering::Relaxed);
+            NAME_SIZE.store(args.function_name_size, Ordering::Relaxed);
+            ptr::null_mut()
+        }
+
+        let mut extension = PjrtGpuCustomCallExtension {
+            base: PJRT_Extension_Base {
+                struct_size: std::mem::size_of::<PjrtGpuCustomCallExtension>(),
+                type_: PJRT_Extension_Type_PJRT_Extension_Type_Gpu_Custom_Call,
+                next: ptr::null_mut(),
+            },
+            custom_call: Some(register),
+        };
+        let mut api = lifetime_table();
+        api.extension_start = ptr::from_mut(&mut extension).cast();
+        let plugin = Plugin(Arc::new(PluginInner {
+            api: &api,
+            _library: Some(ManuallyDrop::new(
+                libloading::os::unix::Library::this().into(),
+            )),
+        }));
+        let execute = NonNull::<u8>::dangling().cast();
+        assert!(plugin.supports_gpu_custom_calls());
+        unsafe {
+            plugin
+                .register_gpu_custom_call(
+                    "rxla.test",
+                    GpuCustomCallApi::TypedFfi,
+                    GpuCustomCallHandlers::execute_only(execute),
+                )
+                .unwrap();
+        }
+        assert_eq!(CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(API_VERSION.load(Ordering::Relaxed), 1);
+        assert_eq!(NAME_SIZE.load(Ordering::Relaxed), "rxla.test".len());
     }
 
     #[test]
