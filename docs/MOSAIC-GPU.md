@@ -60,3 +60,40 @@ existing example assumes batch one and aligned sequence/head dimensions and is
 not a drop-in implementation for Hiera's window shapes. A custom kernel should
 be justified by end-to-end serving measurements, artifact portability and
 maintenance cost—not by winning one isolated benchmark.
+
+## FlashAttention architecture probe
+
+The upstream JAX implementations were tested unchanged on the local RTX 5080
+(`sm_120a`) with F16 Q/K/V shaped `[1, 256, 2, 64]` and 64-element query and
+key/value blocks:
+
+| Upstream implementation | Intended architecture | RTX 5080 result |
+| --- | --- | --- |
+| `mosaic/gpu/examples/flash_attention.py` | Hopper `sm90a` | compilation rejected `nvvm.wgmma.fence.aligned` on `sm_120a` |
+| `pallas/ops/gpu/attention_mgpu.py` | Hopper `sm90a` | same WGMMA rejection |
+| Tokamax 0.0.14 `implementation="mosaic"` | `sm90` and datacenter Blackwell `sm100` | explicitly rejected `sm120` |
+
+This is an upstream kernel architecture gap, not an RXLA custom-call gap. A
+minimal Mosaic elementwise kernel already compiles and executes on `sm_120a`,
+but JAX's Hopper attention uses WGMMA instructions that the Mosaic compiler
+does not legalize for `sm_120a`. Tokamax has a newer TCGEN05 implementation for
+B200-class `sm100`, but its dispatcher deliberately accepts only `sm90` and
+`sm100`.
+
+JAX's older Pallas GPU attention API is deprecated in favor of OpenXLA
+Tokamax. Do not fork the Hopper example as RXLA's long-term kernel. Recheck
+Tokamax first when it adds `sm120`; until then, an RTX 5080 kernel requires an
+`sm120` implementation (or another backend such as cuTile/Triton). Tokamax was
+installed temporarily for this probe and then removed because it added over 60
+Python packages while providing no usable Mosaic implementation on this GPU.
+
+The intended project boundary remains:
+
+- Python/JAX/Mosaic for kernel development, validation, tuning and offline
+  artifact generation;
+- Rust for RXLA IR, compilation caches, PJRT execution, scheduling and the
+  production serving process.
+
+Python-generated kernels must cross the same typed semantic-op and artifact
+manifest boundary as native kernels. Python is therefore a build frontend, not
+a requirement in the serving hot path.
