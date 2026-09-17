@@ -169,3 +169,34 @@ isolated kernels were faster. The resulting stages remained numerically close
 to the previous F16 outputs (final-stage cosine 0.9999939), so this is an
 end-to-end layout/fusion cost rather than a correctness failure. Backend choice
 must remain an IR compilation decision informed by the surrounding graph.
+
+### Complete JAX trunk control
+
+`benchmarks/sam2_hiera_jax.py` independently implements the complete Hiera-small
+trunk in JAX using the same safetensors weights, NHWC input, native F16
+parameters and four stage outputs. Its position resize deliberately reproduces
+RXLA/PyTorch bicubic semantics (half-pixel centers, edge padding and four taps
+with `a=-0.75`) instead of using JAX's different generic bicubic convention.
+
+| Implementation | Attention policy | Compile | P50 |
+| --- | --- | ---: | ---: |
+| RXLA | explicit long-sequence cuDNN | 14.14 s | 7.44–7.53 ms |
+| JAX | long-sequence cuDNN, short XLA | 18.39 s | 7.710 ms |
+| JAX | cuDNN for every attention | 15.32 s | 7.785 ms |
+| JAX | XLA decomposition only | 18.87 s | 9.104 ms |
+
+The JAX hybrid output agrees closely with the saved RXLA F16 control: stage 0
+cosine is 0.99999966 and stage 3 cosine is 0.99999270. JAX therefore provides
+no hidden frontend optimization that explains RXLA's gap to PyTorch; on this
+model RXLA is slightly faster under the same broad attention policy. Both XLA
+frontends remain around 1.5 ms behind `torch.compile`, consistent with the
+Nsight attribution to short-window attention and GEMM/layout interactions.
+
+Reproduce the JAX control with:
+
+```console
+uv run python benchmarks/sam2_hiera_jax.py \
+  /home/me/.cache/rxla/models/sam2.1_hiera_small.safetensors \
+  --attention hybrid --warmup 2 --iterations 10 \
+  --compare-prefix /tmp/rxla-sam2-f16-acc32
+```
