@@ -115,3 +115,34 @@ window-attention blocks lower to two GEMMs plus softmax, explaining the extra
 threshold to include 196-token windows was measured and rejected because it
 increased end-to-end latency; a suitable short-attention fusion/kernel is the
 next optimization target.
+
+### Isolated JAX attention backends
+
+JAX 0.11.1's public `jax.nn.dot_product_attention` was measured on the same RTX
+5080 using device-side timing. Unlike the upstream Mosaic kernels, its cuDNN
+implementation supports every relevant `sm120` Hiera shape and lowers to
+`__cudnn$fmhaSoftmax`.
+
+| B, T, H, D | JAX cuDNN | JAX XLA | PyTorch Flash SDPA |
+| --- | ---: | ---: | ---: |
+| 1, 256, 2, 64 | 0.0079 ms | **0.0053 ms** | 0.0159 ms |
+| 25, 196, 4, 96 | 0.0433 ms | 0.0539 ms | **0.0395 ms** |
+| 1024, 64, 1, 96 | **0.0293 ms** | 0.0688 ms | 0.0444 ms |
+| 1024, 16, 2, 96 | 0.0475 ms | **0.0283 ms** | 0.0731 ms |
+| 25, 49, 8, 96 | **0.0077 ms** | 0.0234 ms | 0.0179 ms |
+
+Run the two frameworks separately so their allocators and CUDA contexts do not
+interfere:
+
+```console
+uv run python benchmarks/attention_backends.py jax
+uv run python benchmarks/attention_backends.py torch
+```
+
+The isolated numbers show that a new FlashAttention kernel is not automatically
+the best solution for short windows: XLA wins at T=16 and T=256, while cuDNN is
+already very competitive elsewhere. They do not overturn the end-to-end Hiera
+result above. Layout conversions, fusion boundaries and 13 repeated call sites
+can make an individually fast cuDNN kernel regress the whole model. The next
+optimization should therefore make attention lowering shape-aware and measure
+the complete trunk, rather than forcing one backend for every attention op.
