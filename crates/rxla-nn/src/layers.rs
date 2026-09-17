@@ -1,6 +1,7 @@
 //! Parameter-effect neural-network building blocks.
 
 use super::*;
+use derive_setters::Setters;
 use rxla_core::Conv2dOptions;
 use snafu::{OptionExt, ensure};
 
@@ -15,14 +16,17 @@ pub enum ImageLayout {
 
 /// A named embedding lookup with an inferred output shape.
 #[must_use = "layer builders do nothing until apply is called"]
-pub struct Embedding<'a> {
-    scope: Scope<'a>,
+pub struct Embedding {
     vocabulary: i64,
     width: i64,
 }
 
-impl Embedding<'_> {
-    pub fn apply(mut self, indices: &Tensor) -> Result<Tensor> {
+impl Embedding {
+    pub fn new(vocabulary: i64, width: i64) -> Self {
+        Self { vocabulary, width }
+    }
+
+    pub fn apply(self, cx: &mut Cx, name: &str, indices: &Tensor) -> Result<Tensor> {
         ensure!(
             indices.dtype() == DType::I32 && self.vocabulary > 0 && self.width > 0,
             InvalidLayerInputSnafu {
@@ -30,8 +34,8 @@ impl Embedding<'_> {
                 requirement: "I32 indices and positive vocabulary/width",
             }
         );
-        Ok(self
-            .scope
+        Ok(cx
+            .scope(name)?
             .param_initialized(
                 "weight",
                 &[self.vocabulary, self.width],
@@ -43,9 +47,11 @@ impl Embedding<'_> {
 
 /// A named affine projection whose input width is inferred by [`Linear::apply`].
 #[must_use = "layer builders do nothing until apply is called"]
-pub struct Linear<'a> {
-    scope: Scope<'a>,
+#[derive(Setters)]
+#[setters(generate = false)]
+pub struct Linear {
     out_features: i64,
+    #[setters(generate)]
     bias: bool,
 }
 
@@ -55,94 +61,110 @@ pub struct Linear<'a> {
 /// value per output row and input group. Dequantization remains visible in IR
 /// so XLA may fuse it into the consuming contraction.
 #[must_use = "layer builders do nothing until apply is called"]
-pub struct QuantizedLinear<'a> {
-    scope: Scope<'a>,
+pub struct QuantizedLinear {
     out_features: i64,
     group_size: i64,
 }
 
-impl QuantizedLinear<'_> {
-    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
-        ensure!(
-            input.dtype() == DType::F32 && !input.shape().is_empty(),
-            InvalidLayerInputSnafu {
-                layer: "QuantizedLinear",
-                requirement: "an F32 input with rank at least one",
-            }
-        );
-        let in_features = *input.shape().last().expect("rank checked above");
-        ensure!(
-            self.out_features > 0
-                && self.group_size > 0
-                && in_features > 0
-                && in_features % self.group_size == 0,
-            InvalidLayerInputSnafu {
-                layer: "QuantizedLinear",
-                requirement: "positive widths and a group size dividing the input width",
-            }
-        );
-        let groups = in_features / self.group_size;
-        let weight = self
-            .scope
-            .param_dtype("weight", &[self.out_features, in_features], DType::U8)?
-            .cast(DType::F32)?
-            .add_scalar(-128.0)?
-            .reshape(&[self.out_features, groups, self.group_size])?;
-        let scale = self
-            .scope
-            .param("scale", &[self.out_features, groups])?
-            .reshape(&[self.out_features, groups, 1])?
-            .broadcast_to(&[self.out_features, groups, self.group_size])?;
-        Ok(input.linear(
-            &weight
-                .mul(&scale)?
-                .reshape(&[self.out_features, in_features])?,
-            None,
-        )?)
+impl QuantizedLinear {
+    pub fn new(out_features: i64, group_size: i64) -> Self {
+        Self {
+            out_features,
+            group_size,
+        }
+    }
+
+    pub fn apply(self, cx: &mut Cx, name: &str, input: &Tensor) -> Result<Tensor> {
+        let mut scope = cx.scope(name)?;
+        apply_quantized_linear(&mut scope, input, &self)
     }
 }
 
-impl Linear<'_> {
-    pub fn bias(mut self, bias: bool) -> Self {
-        self.bias = bias;
-        self
+fn apply_quantized_linear(
+    scope: &mut Cx,
+    input: &Tensor,
+    layer: &QuantizedLinear,
+) -> Result<Tensor> {
+    ensure!(
+        input.dtype() == DType::F32 && !input.shape().is_empty(),
+        InvalidLayerInputSnafu {
+            layer: "QuantizedLinear",
+            requirement: "an F32 input with rank at least one",
+        }
+    );
+    let in_features = *input.shape().last().expect("rank checked above");
+    ensure!(
+        layer.out_features > 0
+            && layer.group_size > 0
+            && in_features > 0
+            && in_features % layer.group_size == 0,
+        InvalidLayerInputSnafu {
+            layer: "QuantizedLinear",
+            requirement: "positive widths and a group size dividing the input width",
+        }
+    );
+    let groups = in_features / layer.group_size;
+    let weight = scope
+        .param_dtype("weight", &[layer.out_features, in_features], DType::U8)?
+        .cast(DType::F32)?
+        .add_scalar(-128.0)?
+        .reshape(&[layer.out_features, groups, layer.group_size])?;
+    let scale = scope
+        .param("scale", &[layer.out_features, groups])?
+        .reshape(&[layer.out_features, groups, 1])?
+        .broadcast_to(&[layer.out_features, groups, layer.group_size])?;
+    Ok(input.linear(
+        &weight
+            .mul(&scale)?
+            .reshape(&[layer.out_features, in_features])?,
+        None,
+    )?)
+}
+
+impl Linear {
+    pub fn new(out_features: i64) -> Self {
+        Self {
+            out_features,
+            bias: true,
+        }
     }
 
-    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
-        apply_linear(&mut self.scope, input, self.out_features, self.bias)
+    pub fn apply(self, cx: &mut Cx, name: &str, input: &Tensor) -> Result<Tensor> {
+        let mut scope = cx.scope(name)?;
+        apply_linear(&mut scope, input, self.out_features, self.bias)
     }
 }
 
 /// A named NHWC convolution whose input channels are inferred at its use site.
 #[must_use = "layer builders do nothing until apply is called"]
-pub struct Conv2d<'a> {
-    scope: Scope<'a>,
+#[derive(Setters)]
+#[setters(generate = false)]
+pub struct Conv2d {
     out_channels: i64,
     kernel: [i64; 2],
+    #[setters(generate)]
     options: Conv2dOptions,
+    #[setters(generate)]
     bias: bool,
+    #[setters(generate)]
     layout: ImageLayout,
 }
 
-impl Conv2d<'_> {
-    pub fn layout(mut self, layout: ImageLayout) -> Self {
-        self.layout = layout;
-        self
+impl Conv2d {
+    pub fn new(out_channels: i64, kernel: [i64; 2]) -> Self {
+        Self {
+            out_channels,
+            kernel,
+            options: Conv2dOptions::default(),
+            bias: true,
+            layout: ImageLayout::Nhwc,
+        }
     }
 
-    pub fn options(mut self, options: Conv2dOptions) -> Self {
-        self.options = options;
-        self
-    }
-
-    pub fn bias(mut self, bias: bool) -> Self {
-        self.bias = bias;
-        self
-    }
-
-    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+    pub fn apply(self, cx: &mut Cx, name: &str, input: &Tensor) -> Result<Tensor> {
+        let mut scope = cx.scope(name)?;
         apply_conv2d(
-            &mut self.scope,
+            &mut scope,
             input,
             self.out_channels,
             self.kernel,
@@ -155,49 +177,47 @@ impl Conv2d<'_> {
 
 /// A named GroupNorm operation with optional learned affine parameters.
 #[must_use = "layer builders do nothing until apply is called"]
-pub struct GroupNorm<'a> {
-    scope: Scope<'a>,
+#[derive(Setters)]
+#[setters(generate = false)]
+pub struct GroupNorm {
     groups: i64,
+    #[setters(generate)]
     epsilon: f32,
+    #[setters(generate)]
     affine: bool,
+    #[setters(generate)]
     layout: ImageLayout,
 }
 
 /// Stateful NHWC BatchNorm with inferred channel count.
 #[must_use = "layer builders do nothing until apply is called"]
-pub struct BatchNorm<'a> {
-    scope: Scope<'a>,
+#[derive(Setters)]
+#[setters(generate = false)]
+pub struct BatchNorm {
+    #[setters(generate)]
     epsilon: f32,
+    #[setters(generate)]
     momentum: f32,
+    #[setters(generate)]
     training: bool,
+    #[setters(generate)]
     layout: ImageLayout,
 }
 
-impl BatchNorm<'_> {
-    pub fn layout(mut self, layout: ImageLayout) -> Self {
-        self.layout = layout;
-        self
+impl BatchNorm {
+    pub fn new() -> Self {
+        Self {
+            epsilon: 1e-5,
+            momentum: 0.1,
+            training: true,
+            layout: ImageLayout::Nhwc,
+        }
     }
 
-    pub fn epsilon(mut self, epsilon: f32) -> Self {
-        self.epsilon = epsilon;
-        self
-    }
-
-    /// Weight assigned to the current batch statistics in the running EMA.
-    pub fn momentum(mut self, momentum: f32) -> Self {
-        self.momentum = momentum;
-        self
-    }
-
-    pub fn training(mut self, training: bool) -> Self {
-        self.training = training;
-        self
-    }
-
-    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+    pub fn apply(self, cx: &mut Cx, name: &str, input: &Tensor) -> Result<Tensor> {
+        let mut scope = cx.scope(name)?;
         apply_batch_norm(
-            &mut self.scope,
+            &mut scope,
             input,
             self.epsilon,
             self.momentum,
@@ -207,25 +227,26 @@ impl BatchNorm<'_> {
     }
 }
 
-impl GroupNorm<'_> {
-    pub fn layout(mut self, layout: ImageLayout) -> Self {
-        self.layout = layout;
-        self
+impl Default for BatchNorm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GroupNorm {
+    pub fn new(groups: i64) -> Self {
+        Self {
+            groups,
+            epsilon: 1e-5,
+            affine: true,
+            layout: ImageLayout::Nhwc,
+        }
     }
 
-    pub fn epsilon(mut self, epsilon: f32) -> Self {
-        self.epsilon = epsilon;
-        self
-    }
-
-    pub fn affine(mut self, affine: bool) -> Self {
-        self.affine = affine;
-        self
-    }
-
-    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+    pub fn apply(self, cx: &mut Cx, name: &str, input: &Tensor) -> Result<Tensor> {
+        let mut scope = cx.scope(name)?;
         apply_group_norm(
-            &mut self.scope,
+            &mut scope,
             input,
             self.groups,
             self.epsilon,
@@ -237,34 +258,36 @@ impl GroupNorm<'_> {
 
 /// A named LayerNorm operation whose normalized shape is inferred on apply.
 #[must_use = "layer builders do nothing until apply is called"]
-pub struct LayerNorm<'a> {
-    scope: Scope<'a>,
+#[derive(Setters)]
+#[setters(generate = false)]
+pub struct LayerNorm {
     normalized_rank: usize,
+    #[setters(generate)]
     epsilon: f32,
+    #[setters(generate)]
     affine: bool,
 }
 
 /// A named RMSNorm operation whose width is inferred on apply.
 #[must_use = "layer builders do nothing until apply is called"]
-pub struct RmsNorm<'a> {
-    scope: Scope<'a>,
+#[derive(Setters)]
+#[setters(generate = false)]
+pub struct RmsNorm {
+    #[setters(generate)]
     epsilon: f32,
+    #[setters(generate)]
     zero_centered: bool,
 }
 
-impl RmsNorm<'_> {
-    pub fn epsilon(mut self, epsilon: f32) -> Self {
-        self.epsilon = epsilon;
-        self
+impl RmsNorm {
+    pub fn new() -> Self {
+        Self {
+            epsilon: 1e-5,
+            zero_centered: false,
+        }
     }
 
-    /// Interpret the stored scale as an offset from one, as used by Qwen3.5.
-    pub fn zero_centered(mut self, zero_centered: bool) -> Self {
-        self.zero_centered = zero_centered;
-        self
-    }
-
-    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+    pub fn apply(self, cx: &mut Cx, name: &str, input: &Tensor) -> Result<Tensor> {
         ensure!(
             input.dtype() == DType::F32 && !input.shape().is_empty(),
             InvalidLayerInputSnafu {
@@ -273,7 +296,7 @@ impl RmsNorm<'_> {
             }
         );
         let width = *input.shape().last().expect("rank checked above");
-        let weight = self.scope.param_initialized(
+        let weight = cx.scope(name)?.param_initialized(
             "weight",
             &[width],
             if self.zero_centered {
@@ -291,20 +314,25 @@ impl RmsNorm<'_> {
     }
 }
 
-impl LayerNorm<'_> {
-    pub fn epsilon(mut self, epsilon: f32) -> Self {
-        self.epsilon = epsilon;
-        self
+impl Default for RmsNorm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LayerNorm {
+    pub fn new(normalized_rank: usize) -> Self {
+        Self {
+            normalized_rank,
+            epsilon: 1e-5,
+            affine: true,
+        }
     }
 
-    pub fn affine(mut self, affine: bool) -> Self {
-        self.affine = affine;
-        self
-    }
-
-    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+    pub fn apply(self, cx: &mut Cx, name: &str, input: &Tensor) -> Result<Tensor> {
+        let mut scope = cx.scope(name)?;
         apply_layer_norm(
-            &mut self.scope,
+            &mut scope,
             input,
             self.normalized_rank,
             self.epsilon,
@@ -313,80 +341,209 @@ impl LayerNorm<'_> {
     }
 }
 
-/// Neural-network builders available inside a lexical effect scope.
-///
-/// Keeping these methods on the public RAII guard lets downstream crates add
-/// their own builders with extension traits without growing [`Cx`].
+/// Compatibility adapter for the former scope-first spelling.
+/// New model code should construct a layer configuration and call
+/// `layer.apply(cx, name, input)` directly.
+#[doc(hidden)]
+pub struct ScopedLayer<'a, L> {
+    scope: Scope<'a>,
+    layer: L,
+}
+
+macro_rules! scoped_setters {
+    ($layer:ty, $($name:ident : $ty:ty),* $(,)?) => {
+        impl<'a> ScopedLayer<'a, $layer> {
+            $(
+                pub fn $name(mut self, value: $ty) -> Self {
+                    self.layer = self.layer.$name(value);
+                    self
+                }
+            )*
+        }
+    };
+}
+
+scoped_setters!(Linear, bias: bool);
+scoped_setters!(Conv2d, options: Conv2dOptions, bias: bool, layout: ImageLayout);
+scoped_setters!(GroupNorm, epsilon: f32, affine: bool, layout: ImageLayout);
+scoped_setters!(BatchNorm, epsilon: f32, momentum: f32, training: bool, layout: ImageLayout);
+scoped_setters!(LayerNorm, epsilon: f32, affine: bool);
+scoped_setters!(RmsNorm, epsilon: f32, zero_centered: bool);
+
+// The adapter cannot call the public named API because that would introduce an
+// extra path component. These implementations intentionally execute the same
+// layer helpers in the scope already acquired by the old spelling.
+impl ScopedLayer<'_, Linear> {
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        apply_linear(
+            &mut self.scope,
+            input,
+            self.layer.out_features,
+            self.layer.bias,
+        )
+    }
+}
+
+impl ScopedLayer<'_, Conv2d> {
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        apply_conv2d(
+            &mut self.scope,
+            input,
+            self.layer.out_channels,
+            self.layer.kernel,
+            self.layer.options,
+            self.layer.bias,
+            self.layer.layout,
+        )
+    }
+}
+
+impl ScopedLayer<'_, GroupNorm> {
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        apply_group_norm(
+            &mut self.scope,
+            input,
+            self.layer.groups,
+            self.layer.epsilon,
+            self.layer.affine,
+            self.layer.layout,
+        )
+    }
+}
+
+impl ScopedLayer<'_, BatchNorm> {
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        apply_batch_norm(
+            &mut self.scope,
+            input,
+            self.layer.epsilon,
+            self.layer.momentum,
+            self.layer.training,
+            self.layer.layout,
+        )
+    }
+}
+
+impl ScopedLayer<'_, LayerNorm> {
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        apply_layer_norm(
+            &mut self.scope,
+            input,
+            self.layer.normalized_rank,
+            self.layer.epsilon,
+            self.layer.affine,
+        )
+    }
+}
+
+impl ScopedLayer<'_, RmsNorm> {
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        let width = *input.shape().last().context(InvalidLayerInputSnafu {
+            layer: "RmsNorm",
+            requirement: "an F32 input with rank at least one",
+        })?;
+        let weight = self.scope.param_initialized(
+            "weight",
+            &[width],
+            if self.layer.zero_centered {
+                Initializer::zeros()
+            } else {
+                Initializer::ones()
+            },
+        )?;
+        let weight = if self.layer.zero_centered {
+            weight.add_scalar(1.0)?
+        } else {
+            weight
+        };
+        Ok(input.rms_norm(&weight, self.layer.epsilon)?)
+    }
+}
+
+impl ScopedLayer<'_, Embedding> {
+    pub fn apply(mut self, indices: &Tensor) -> Result<Tensor> {
+        ensure!(
+            indices.dtype() == DType::I32 && self.layer.vocabulary > 0 && self.layer.width > 0,
+            InvalidLayerInputSnafu {
+                layer: "Embedding",
+                requirement: "I32 indices and positive vocabulary/width",
+            }
+        );
+        Ok(self
+            .scope
+            .param_initialized(
+                "weight",
+                &[self.layer.vocabulary, self.layer.width],
+                Initializer::normal(0.0, 1.0),
+            )?
+            .take(indices, 0)?)
+    }
+}
+
+impl ScopedLayer<'_, QuantizedLinear> {
+    pub fn apply(mut self, input: &Tensor) -> Result<Tensor> {
+        apply_quantized_linear(&mut self.scope, input, &self.layer)
+    }
+}
+
 impl<'a> Scope<'a> {
-    pub fn embedding(self, vocabulary: i64, width: i64) -> Embedding<'a> {
-        Embedding {
+    pub fn embedding(self, vocabulary: i64, width: i64) -> ScopedLayer<'a, Embedding> {
+        ScopedLayer {
             scope: self,
-            vocabulary,
-            width,
+            layer: Embedding::new(vocabulary, width),
         }
     }
 
-    pub fn linear(self, out_features: i64) -> Linear<'a> {
-        Linear {
+    pub fn linear(self, out_features: i64) -> ScopedLayer<'a, Linear> {
+        ScopedLayer {
             scope: self,
-            out_features,
-            bias: true,
+            layer: Linear::new(out_features),
         }
     }
 
-    pub fn quantized_linear(self, out_features: i64, group_size: i64) -> QuantizedLinear<'a> {
-        QuantizedLinear {
+    pub fn quantized_linear(
+        self,
+        out_features: i64,
+        group_size: i64,
+    ) -> ScopedLayer<'a, QuantizedLinear> {
+        ScopedLayer {
             scope: self,
-            out_features,
-            group_size,
+            layer: QuantizedLinear::new(out_features, group_size),
         }
     }
 
-    pub fn conv2d(self, out_channels: i64, kernel: [i64; 2]) -> Conv2d<'a> {
-        Conv2d {
+    pub fn conv2d(self, out_channels: i64, kernel: [i64; 2]) -> ScopedLayer<'a, Conv2d> {
+        ScopedLayer {
             scope: self,
-            out_channels,
-            kernel,
-            options: Conv2dOptions::default(),
-            bias: true,
-            layout: ImageLayout::Nhwc,
+            layer: Conv2d::new(out_channels, kernel),
         }
     }
 
-    pub fn group_norm(self, groups: i64) -> GroupNorm<'a> {
-        GroupNorm {
+    pub fn group_norm(self, groups: i64) -> ScopedLayer<'a, GroupNorm> {
+        ScopedLayer {
             scope: self,
-            groups,
-            epsilon: 1e-5,
-            affine: true,
-            layout: ImageLayout::Nhwc,
+            layer: GroupNorm::new(groups),
         }
     }
 
-    pub fn batch_norm(self) -> BatchNorm<'a> {
-        BatchNorm {
+    pub fn batch_norm(self) -> ScopedLayer<'a, BatchNorm> {
+        ScopedLayer {
             scope: self,
-            epsilon: 1e-5,
-            momentum: 0.1,
-            training: true,
-            layout: ImageLayout::Nhwc,
+            layer: BatchNorm::new(),
         }
     }
 
-    pub fn layer_norm(self, normalized_rank: usize) -> LayerNorm<'a> {
-        LayerNorm {
+    pub fn layer_norm(self, normalized_rank: usize) -> ScopedLayer<'a, LayerNorm> {
+        ScopedLayer {
             scope: self,
-            normalized_rank,
-            epsilon: 1e-5,
-            affine: true,
+            layer: LayerNorm::new(normalized_rank),
         }
     }
 
-    pub fn rms_norm(self) -> RmsNorm<'a> {
-        RmsNorm {
+    pub fn rms_norm(self) -> ScopedLayer<'a, RmsNorm> {
+        ScopedLayer {
             scope: self,
-            epsilon: 1e-5,
-            zero_centered: false,
+            layer: RmsNorm::new(),
         }
     }
 }
@@ -684,6 +841,22 @@ mod tests {
     }
 
     #[test]
+    fn layer_configs_apply_named_effects_without_a_builder_type() {
+        let (schema, output) = init(|cx| {
+            let input = cx.input(&[2, 8])?;
+            let hidden = Linear::new(4).bias(false).apply(cx, "encoder", &input)?;
+            Linear::new(3).apply(cx, "head", &hidden)
+        })
+        .unwrap();
+
+        assert_eq!(output.shape(), [2, 3]);
+        assert_eq!(schema.get("encoder.weight").unwrap().shape(), [4, 8]);
+        assert!(schema.get("encoder.bias").is_none());
+        assert_eq!(schema.get("head.weight").unwrap().shape(), [3, 4]);
+        assert_eq!(schema.get("head.bias").unwrap().shape(), [3]);
+    }
+
+    #[test]
     fn spatial_builders_accept_checkpoint_native_nchw_activations() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 4, 16, 12])?;
@@ -707,11 +880,11 @@ mod tests {
     #[test]
     fn downstream_vocabulary_can_be_an_extension_trait_on_scope() {
         trait ProjectionExt<'a> {
-            fn projection(self, width: i64) -> Linear<'a>;
+            fn projection(self, width: i64) -> ScopedLayer<'a, Linear>;
         }
 
         impl<'a> ProjectionExt<'a> for Scope<'a> {
-            fn projection(self, width: i64) -> Linear<'a> {
+            fn projection(self, width: i64) -> ScopedLayer<'a, Linear> {
                 self.linear(width).bias(false)
             }
         }

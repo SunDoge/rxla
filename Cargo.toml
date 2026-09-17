@@ -28,6 +28,7 @@ blake3 = "1.8"
 clap = { version = "4.6.6", features = ["derive"] }
 cranelift-entity = "0.134.1"
 dlpark = { version = "=0.9.0-beta.1", default-features = false, features = ["half", "image"] }
+derive_setters = "0.1.9"
 half = { version = "2.7.1", default-features = false }
 rayon = "1.11.0"
 image = { version = "0.25.10", default-features = false }
