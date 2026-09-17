@@ -118,6 +118,29 @@ fn low_precision_sum_accumulates_in_f32() {
 }
 
 #[test]
+fn cuda_attention_matches_jax_cudnn_logical_abi() {
+    let mut program = ProgramIr::default();
+    let ty = TensorType::static_shape(vec![1, 2, 512, 64], DType::F32);
+    let query = program.append(&Op::Parameter(0), &[], &ty).unwrap();
+    let key = program.append(&Op::Parameter(1), &[], &ty).unwrap();
+    let value = program.append(&Op::Parameter(2), &[], &ty).unwrap();
+    let attention = program
+        .append(&Op::Attention { scale: 0.125 }, &[query, key, value], &ty)
+        .unwrap();
+
+    let snapshot = SemanticProgram::capture(&program, &[attention], true).unwrap();
+    let lowered = snapshot.lower(LoweringTarget::CudaF16Compute).unwrap();
+    assert_eq!(lowered.code.matches("dims = [0, 2, 1, 3]").count(), 3);
+    assert!(lowered.code.contains("@__cudnn$fmhaSoftmax"));
+    assert!(
+        lowered
+            .code
+            .contains("result_layouts = [dense<[3, 1, 2, 0]>")
+    );
+    assert!(lowered.code.contains("tensor<1x512x2x64xf16>"));
+}
+
+#[test]
 fn state_effects_survive_semantic_snapshots_and_discharge_to_pure_stablehlo() {
     let mut program = ProgramIr::default();
     let ty = vector_type(2, DType::F32);

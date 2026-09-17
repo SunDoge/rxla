@@ -37,6 +37,18 @@ pub(super) fn emit_attention(emission: &mut OperationEmission<'_>) -> Result<boo
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let cudnn_operand_types = operand_types
+        .iter()
+        .map(|ty| {
+            let mut dims = ty.dims.clone();
+            dims.swap(1, 2);
+            stablehlo_type(&TensorType {
+                dims,
+                dtype: DType::F16,
+                dynamic_bounds: vec![],
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let output_f16_ty = stablehlo_type(&TensorType {
         dims: emission.result_type.dims.clone(),
         dtype: DType::F16,
@@ -58,12 +70,29 @@ pub(super) fn emit_attention(emission: &mut OperationEmission<'_>) -> Result<boo
             Ok(name)
         })
         .collect::<Result<Vec<_>>>()?;
+    // The semantic RXLA layout is [B, H, T, D], while XLA's public cuDNN
+    // attention lowering consumes [B, T, H, D]. Reproduce that ABI exactly;
+    // layout assignment can turn these logical transposes into bitcasts.
+    let cudnn_operands = converted
+        .iter()
+        .zip(&f16_types)
+        .zip(&cudnn_operand_types)
+        .map(|((operand, source), target)| {
+            let name = emission.auxiliary();
+            writeln!(
+                emission.body,
+                "    {name} = stablehlo.transpose {operand}, dims = [0, 2, 1, 3] : ({source}) -> {target}"
+            )
+            .unwrap();
+            name
+        })
+        .collect::<Vec<_>>();
     let config = format!(
-        r#"{{"operation_queue_id":"0","cudnn_fmha_backend_config":{{"algorithm":{{"algo_id":"0","math_type":"TENSOR_OP_MATH","tuning_knobs":{{"17":"1","24":"0"}},"is_cudnn_frontend":true,"workspace_size":"0"}},"fmha_scale":{scale},"intermediate_tensor_shape":{{"element_type":"F16","dimensions":["{batch}","{heads}","{queries}","{keys}"],"tuple_shapes":[],"layout":{{"dim_level_types":[],"dim_unique":[],"dim_ordered":[],"minor_to_major":["3","2","1","0"],"tiles":[],"element_size_in_bits":"0","memory_space":"0","index_primitive_type":"PRIMITIVE_TYPE_INVALID","pointer_primitive_type":"PRIMITIVE_TYPE_INVALID","dynamic_shape_metadata_prefix_bytes":"0"}},"is_dynamic_dimension":[false,false,false,false]}},"is_flash_attention":true,"mask_type":"NO_MASK","bmm1_dot_dimension_numbers":{{"lhs_contracting_dimensions":["3"],"rhs_contracting_dimensions":["3"],"lhs_batch_dimensions":["0","1"],"rhs_batch_dimensions":["0","1"]}},"bmm2_dot_dimension_numbers":{{"lhs_contracting_dimensions":["3"],"rhs_contracting_dimensions":["2"],"lhs_batch_dimensions":["0","1"],"rhs_batch_dimensions":["0","1"]}},"dropout_rate":0.0,"seed":42,"sliding_window_length":0,"max_seg_per_batch":1,"is_paged_attention":false}}}}"#
+        r#"{{"operation_queue_id":"0","cudnn_fmha_backend_config":{{"algorithm":{{"algo_id":"0","math_type":"TENSOR_OP_MATH","tuning_knobs":{{"17":"1","24":"0"}},"is_cudnn_frontend":true,"workspace_size":"0"}},"fmha_scale":{scale},"intermediate_tensor_shape":{{"element_type":"F16","dimensions":["{batch}","{heads}","{queries}","{keys}"],"tuple_shapes":[],"layout":{{"dim_level_types":[],"dim_unique":[],"dim_ordered":[],"minor_to_major":["3","2","1","0"],"tiles":[],"element_size_in_bits":"0","memory_space":"0","index_primitive_type":"PRIMITIVE_TYPE_INVALID","pointer_primitive_type":"PRIMITIVE_TYPE_INVALID","dynamic_shape_metadata_prefix_bytes":"0"}},"is_dynamic_dimension":[false,false,false,false]}},"is_flash_attention":true,"mask_type":"NO_MASK","bmm1_dot_dimension_numbers":{{"lhs_contracting_dimensions":["3"],"rhs_contracting_dimensions":["3"],"lhs_batch_dimensions":["0","2"],"rhs_batch_dimensions":["0","2"]}},"bmm2_dot_dimension_numbers":{{"lhs_contracting_dimensions":["3"],"rhs_contracting_dimensions":["1"],"lhs_batch_dimensions":["0","1"],"rhs_batch_dimensions":["0","2"]}},"dropout_rate":0.0,"seed":42,"sliding_window_length":0,"max_seg_per_batch":1,"is_paged_attention":false}}}}"#
     );
     let escaped = config.replace('\\', "\\\\").replace('"', "\\22");
     let call = emission.auxiliary();
-    writeln!(emission.body, "    {call}:2 = stablehlo.custom_call @__cudnn$fmhaSoftmax({}, {}, {}) {{api_version = 2 : i32, backend_config = \"{escaped}\", operand_layouts = [dense<[3, 2, 1, 0]> : tensor<4xindex>, dense<[3, 2, 1, 0]> : tensor<4xindex>, dense<[3, 2, 1, 0]> : tensor<4xindex>], result_layouts = [dense<[3, 2, 1, 0]> : tensor<4xindex>, dense<0> : tensor<1xindex>]}} : ({}, {}, {}) -> ({output_f16_ty}, tensor<0xui8>)", converted[0], converted[1], converted[2], f16_types[0], f16_types[1], f16_types[2]).unwrap();
+    writeln!(emission.body, "    {call}:2 = stablehlo.custom_call @__cudnn$fmhaSoftmax({}, {}, {}) {{api_version = 2 : i32, backend_config = \"{escaped}\", operand_layouts = [dense<[3, 2, 1, 0]> : tensor<4xindex>, dense<[3, 2, 1, 0]> : tensor<4xindex>, dense<[3, 2, 1, 0]> : tensor<4xindex>], result_layouts = [dense<[3, 1, 2, 0]> : tensor<4xindex>, dense<0> : tensor<1xindex>]}} : ({}, {}, {}) -> ({output_f16_ty}, tensor<0xui8>)", cudnn_operands[0], cudnn_operands[1], cudnn_operands[2], cudnn_operand_types[0], cudnn_operand_types[1], cudnn_operand_types[2]).unwrap();
     writeln!(
         emission.body,
         "    {} = stablehlo.convert {call}#0 : ({output_f16_ty}) -> {}",

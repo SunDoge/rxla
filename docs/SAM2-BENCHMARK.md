@@ -146,3 +146,19 @@ result above. Layout conversions, fusion boundaries and 13 repeated call sites
 can make an individually fast cuDNN kernel regress the whole model. The next
 optimization should therefore make attention lowering shape-aware and measure
 the complete trunk, rather than forcing one backend for every attention op.
+
+RXLA's cuDNN emitter now reproduces JAX's logical FMHA ABI instead of only
+copying its backend configuration. RXLA attention remains `[B,H,T,D]` in the
+semantic IR; lowering transposes Q/K/V to JAX's `[B,T,H,D]`, uses the same dot
+dimension numbers and requests JAX's `[3,1,2,0]` result layout. XLA can fold
+those logical transposes into layout assignment. With the established
+long-sequence policy, the complete trunk measured 7.435 ms P50 versus the prior
+7.494 ms recheck. The 0.8% difference is small and should not be presented as a
+large speedup, but the custom-call ABI is no longer an RXLA-specific variant.
+
+Forcing cuDNN onto the individually favorable 49/64/196-token shapes was also
+tested and rejected: complete-trunk P50 regressed to 7.793 ms even though the
+isolated kernels were faster. The resulting stages remained numerically close
+to the previous F16 outputs (final-stage cosine 0.9999939), so this is an
+end-to-end layout/fusion cost rather than a correctness failure. Backend choice
+must remain an IR compilation decision informed by the surrounding graph.
