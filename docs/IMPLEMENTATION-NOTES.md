@@ -4985,6 +4985,15 @@ bound; the former placeholder `succ` verifiers are not used for these forward
 operators. General dynamic spatial convolution remains deliberately rejected
 until its output-bound and backend execution semantics are implemented.
 
+Batched matmul aligns batch axes by type, not by raw dimension integers. Static
+singleton axes may broadcast into bounded axes (including the common
+`[batch, tokens, hidden] @ [hidden, output]` case); two dynamic batch axes must
+carry equal bounds, and incompatible dynamic/static non-singleton axes are
+rejected. Matrix output axes retain their source bounds. Vector promotion and
+the final squeeze are typed singleton insertion/removal operations. The Pliron
+matmul verifier checks batch rank, dtype, contracting dimensions, result axes
+and all associated bounds instead of trusting an asserted result shape.
+
 This is currently an IR and compilation feature, not a promise that every PJRT
 plugin can construct and execute bounded-dynamic buffers. The development ZML
 CPU plugin compiles an identity signature, but ordinary elementwise compilation

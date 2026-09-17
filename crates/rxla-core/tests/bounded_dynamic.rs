@@ -174,6 +174,45 @@ fn vision_ops_preserve_a_bounded_batch_axis() {
 }
 
 #[test]
+fn matmul_broadcasts_bounded_batch_axes_into_unbatched_weights() {
+    let tracer = Tracer::new();
+    let activations = tracer
+        .input_shape(
+            &[
+                Dim::Bounded { upper: 16 },
+                Dim::Bounded { upper: 8 },
+                Dim::Static(32),
+            ],
+            DType::F32,
+        )
+        .unwrap();
+    let weights = tracer.input(&[32, 64]).unwrap();
+    let output = activations.matmul(&weights).unwrap();
+    assert_eq!(output.shape(), [-1, -1, 64]);
+    assert_eq!(output.dim_bound(0), Some(16));
+    assert_eq!(output.dim_bound(1), Some(8));
+
+    let batched_weights = tracer.input(&[1, 32, 64]).unwrap();
+    let broadcast_output = activations.matmul(&batched_weights).unwrap();
+    assert_eq!(broadcast_output.shape(), [-1, -1, 64]);
+    assert_eq!(broadcast_output.dim_bound(0), Some(16));
+    assert_eq!(broadcast_output.dim_bound(1), Some(8));
+
+    let incompatible = tracer
+        .input_shape(
+            &[Dim::Bounded { upper: 12 }, Dim::Static(32), Dim::Static(64)],
+            DType::F32,
+        )
+        .unwrap();
+    assert!(activations.matmul(&incompatible).is_err());
+
+    let program = tracer.program(vec![output, broadcast_output]).unwrap();
+    let code = std::str::from_utf8(program.lowered_program().code()).unwrap();
+    assert!(code.contains("tensor<?x?x64xf32, #stablehlo.bounds<16, 8, ?>>"));
+    assert_eq!(code.matches("stablehlo.dot_general").count(), 2);
+}
+
+#[test]
 #[ignore = "requires a trusted PJRT_CPU_PLUGIN_PATH"]
 fn xla_cpu_accepts_bounded_dynamic_stablehlo() {
     let tracer = Tracer::new();

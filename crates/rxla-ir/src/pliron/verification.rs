@@ -246,6 +246,56 @@ impl Verify for IotaOp {
     }
 }
 
+impl Verify for MatmulOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let operation = self.get_operation().deref(ctx);
+        let lhs = value_type(operation.get_operand(0), ctx)?;
+        let rhs = value_type(operation.get_operand(1), ctx)?;
+        let result = value_type(operation.get_result(0), ctx)?;
+        let Some(batch_rank) = self.get_attr_batch_rank(ctx) else {
+            return pliron::verify_err_noloc!("rxla.matmul requires a batch rank");
+        };
+        let batch_rank = batch_rank.value();
+        let rank = batch_rank + 2;
+        if lhs.dtype != rhs.dtype
+            || lhs.dtype != result.dtype
+            || lhs.dims.len() != rank
+            || rhs.dims.len() != rank
+            || result.dims.len() != rank
+        {
+            return pliron::verify_err_noloc!(
+                "rxla.matmul operands and result must have equal rank and dtype"
+            );
+        }
+        for axis in 0..batch_rank {
+            if lhs.dims[axis] != rhs.dims[axis]
+                || lhs.dims[axis] != result.dims[axis]
+                || lhs.bound(axis) != rhs.bound(axis)
+                || lhs.bound(axis) != result.bound(axis)
+            {
+                return pliron::verify_err_noloc!(
+                    "rxla.matmul batch dimensions and bounds must match"
+                );
+            }
+        }
+        if lhs.dims[rank - 1] != rhs.dims[rank - 2] || lhs.bound(rank - 1) != rhs.bound(rank - 2) {
+            return pliron::verify_err_noloc!(
+                "rxla.matmul contracting dimensions and bounds must match"
+            );
+        }
+        if result.dims[rank - 2] != lhs.dims[rank - 2]
+            || result.bound(rank - 2) != lhs.bound(rank - 2)
+            || result.dims[rank - 1] != rhs.dims[rank - 1]
+            || result.bound(rank - 1) != rhs.bound(rank - 1)
+        {
+            return pliron::verify_err_noloc!(
+                "rxla.matmul result matrix dimensions are inconsistent"
+            );
+        }
+        Ok(())
+    }
+}
+
 impl Verify for AttentionOp {
     fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
         let operation = self.get_operation().deref(ctx);

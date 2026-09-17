@@ -647,6 +647,20 @@ fn shape_operation_verifiers_reject_invalid_transformed_ir() {
     pool.set_attr_max_pool_options(&graph.ctx, Pool2dOptionsAttr::new(Pool2dOptions::default()));
     assert!(verify_op(&pool, &graph.ctx).is_err());
 
+    let lhs = graph.parameter(&[2, 3]);
+    let rhs = graph.parameter(&[3, 4]);
+    let result = graph.tensor_type(&[2, 5], DType::F32);
+    let matmul = MatmulOp::from_operation(Operation::new(
+        &mut graph.ctx,
+        MatmulOp::get_concrete_op_info(),
+        vec![result],
+        vec![lhs, rhs],
+        vec![],
+        0,
+    ));
+    matmul.set_attr_batch_rank(&graph.ctx, BatchRankAttr::new(0));
+    assert!(verify_op(&matmul, &graph.ctx).is_err());
+
     let result = graph.tensor_type(&[2, 3], DType::F32);
     let iota = IotaOp::from_operation(Operation::new(
         &mut graph.ctx,

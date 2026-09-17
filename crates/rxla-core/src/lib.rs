@@ -337,6 +337,17 @@ fn validate_tensor_type(ty: &TensorType) -> Result<()> {
     }
     Ok(())
 }
+
+fn inferred_tensor_type(dims: Vec<i64>, dtype: DType, mut bounds: Vec<i64>) -> TensorType {
+    if bounds.iter().all(|&bound| bound == -1) {
+        bounds.clear();
+    }
+    TensorType {
+        dims,
+        dtype,
+        dynamic_bounds: bounds,
+    }
+}
 impl Graph {
     fn region_marker(&self) -> Result<usize> {
         Ok(self
@@ -733,64 +744,127 @@ impl Tensor {
         if self.shape.is_empty() || rhs.shape.is_empty() {
             return Err(err("matmul does not accept scalars"));
         }
+        if self.dtype() != rhs.dtype() {
+            return Err(err("matmul operand dtypes must match"));
+        }
         let lhs_vector = self.shape.len() == 1;
         let rhs_vector = rhs.shape.len() == 1;
-        let mut lhs_shape = self.shape.to_vec();
-        let mut rhs_shape = rhs.shape.to_vec();
+        let mut lhs_type = self.ty();
+        let mut rhs_type = rhs.ty();
         if lhs_vector {
-            lhs_shape.insert(0, 1);
+            lhs_type = lhs_type
+                .inserted_axis(0, 1)
+                .expect("vector promotion axis is valid");
         }
         if rhs_vector {
-            rhs_shape.push(1);
+            rhs_type = rhs_type
+                .inserted_axis(rhs_type.dims.len(), 1)
+                .expect("vector promotion axis is valid");
         }
-        let l = lhs_shape.len();
-        let r = rhs_shape.len();
-        if lhs_shape[l - 1] != rhs_shape[r - 2] {
+        let l = lhs_type.dims.len();
+        let r = rhs_type.dims.len();
+        if lhs_type.dims[l - 1] != rhs_type.dims[r - 2]
+            || lhs_type.bound(l - 1) != rhs_type.bound(r - 2)
+        {
             return Err(err("matmul contracting dimensions differ"));
         }
         let batch_rank = (l - 2).max(r - 2);
-        let mut batch = vec![1; batch_rank];
-        for (operand, rank) in [(&lhs_shape, l), (&rhs_shape, r)] {
-            for (axis, &dim) in operand[..rank - 2].iter().enumerate() {
-                let target = &mut batch[batch_rank - (rank - 2) + axis];
-                if *target == 1 {
-                    *target = dim;
-                } else if dim != 1 && dim != *target {
+        let mut batch_dims = vec![1; batch_rank];
+        let mut batch_bounds = vec![-1; batch_rank];
+        for (operand, rank) in [(&lhs_type, l), (&rhs_type, r)] {
+            let offset = batch_rank - (rank - 2);
+            for axis in 0..rank - 2 {
+                let target_axis = offset + axis;
+                let dimension = operand.dims[axis];
+                let bound = operand.bound(axis).unwrap_or(-1);
+                let current = batch_dims[target_axis];
+                let current_bound = batch_bounds[target_axis];
+                if current == 1 {
+                    batch_dims[target_axis] = dimension;
+                    batch_bounds[target_axis] = bound;
+                } else if dimension != 1 && (dimension != current || bound != current_bound) {
                     return Err(err("matmul batch dimensions cannot broadcast"));
                 }
             }
         }
-        let mut lhs_target = batch.clone();
-        lhs_target.extend_from_slice(&lhs_shape[l - 2..]);
-        let mut rhs_target = batch.clone();
-        rhs_target.extend_from_slice(&rhs_shape[r - 2..]);
+        let mut lhs_target_dims = batch_dims.clone();
+        lhs_target_dims.extend_from_slice(&lhs_type.dims[l - 2..]);
+        let mut lhs_target_bounds = batch_bounds.clone();
+        lhs_target_bounds.extend([
+            lhs_type.bound(l - 2).unwrap_or(-1),
+            lhs_type.bound(l - 1).unwrap_or(-1),
+        ]);
+        let lhs_target = inferred_tensor_type(lhs_target_dims, self.dtype(), lhs_target_bounds);
+        let mut rhs_target_dims = batch_dims.clone();
+        rhs_target_dims.extend_from_slice(&rhs_type.dims[r - 2..]);
+        let mut rhs_target_bounds = batch_bounds.clone();
+        rhs_target_bounds.extend([
+            rhs_type.bound(r - 2).unwrap_or(-1),
+            rhs_type.bound(r - 1).unwrap_or(-1),
+        ]);
+        let rhs_target = inferred_tensor_type(rhs_target_dims, rhs.dtype(), rhs_target_bounds);
         let lhs = if lhs_vector {
-            self.reshape(&lhs_shape)?
+            self.graph()
+                .node_typed(Op::Reshape, vec![self.node_id()], lhs_type.clone())?
         } else {
             self.clone()
         };
         let rhs = if rhs_vector {
-            rhs.reshape(&rhs_shape)?
+            self.graph()
+                .node_typed(Op::Reshape, vec![rhs.node_id()], rhs_type.clone())?
         } else {
             rhs.clone()
         };
-        let lhs = lhs.broadcast_to(&lhs_target)?;
-        let rhs = rhs.broadcast_to(&rhs_target)?;
-        let mut output = batch;
-        output.extend_from_slice(&[lhs_shape[l - 2], rhs_shape[r - 1]]);
-        let result = self.graph().node(
+        let lhs = if lhs.ty() == lhs_target {
+            lhs
+        } else {
+            let offset = lhs_target.dims.len() - lhs.ndim();
+            self.graph().node_typed(
+                Op::Broadcast {
+                    axes: (offset..lhs_target.dims.len()).collect(),
+                },
+                vec![lhs.node_id()],
+                lhs_target.clone(),
+            )?
+        };
+        let rhs = if rhs.ty() == rhs_target {
+            rhs
+        } else {
+            let offset = rhs_target.dims.len() - rhs.ndim();
+            self.graph().node_typed(
+                Op::Broadcast {
+                    axes: (offset..rhs_target.dims.len()).collect(),
+                },
+                vec![rhs.node_id()],
+                rhs_target.clone(),
+            )?
+        };
+        let mut output_dims = batch_dims;
+        output_dims.extend_from_slice(&[lhs_type.dims[l - 2], rhs_type.dims[r - 1]]);
+        let mut output_bounds = batch_bounds;
+        output_bounds.extend([
+            lhs_type.bound(l - 2).unwrap_or(-1),
+            rhs_type.bound(r - 1).unwrap_or(-1),
+        ]);
+        let mut output_type = inferred_tensor_type(output_dims, self.dtype(), output_bounds);
+        let result = self.graph().node_typed(
             Op::Matmul { batch_rank },
             vec![lhs.node_id(), rhs.node_id()],
-            &output,
+            output_type.clone(),
         )?;
         if rhs_vector {
-            output.pop();
+            output_type = output_type
+                .removed_axis(output_type.dims.len() - 1, 1)
+                .expect("promoted rhs result axis is singleton");
         }
         if lhs_vector {
-            output.remove(batch_rank);
+            output_type = output_type
+                .removed_axis(batch_rank, 1)
+                .expect("promoted lhs result axis is singleton");
         }
         if lhs_vector || rhs_vector {
-            result.reshape(&output)
+            self.graph()
+                .node_typed(Op::Reshape, vec![result.node_id()], output_type)
         } else {
             Ok(result)
         }

@@ -353,8 +353,7 @@ pub(super) struct MultiplyOp;
     name = "rxla.matmul",
     format = "$0 `, ` $1 ` ` attr($batch_rank, $BatchRankAttr) ` : ` type($0) `, ` type($1) ` -> ` type($2)",
     interfaces = [NOpdsInterface<2>, OneResultInterface],
-    attributes = (batch_rank: BatchRankAttr),
-    verifier = "succ"
+    attributes = (batch_rank: BatchRankAttr)
 )]
 pub(super) struct MatmulOp;
 
