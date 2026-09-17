@@ -217,7 +217,7 @@ impl SplitMix64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Cx, Model};
+    use crate::{BatchNorm, Cx, Linear, Model, TensorApply};
     use rxla_core::{CacheLimits, Compiler, Tensor};
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn model_effects_validate_initializers_during_declaration() {
-        let error = Model::new(|cx: &mut Cx| {
+        let error = Model::new(|cx: Cx| {
             cx.param_initialized(
                 "weight",
                 &[2, 3],
@@ -276,7 +276,7 @@ mod tests {
         }
         .unwrap();
         let definition =
-            Model::new(|cx: &mut Cx, input: Tensor| cx.scope("head")?.linear(2).apply(&input))
+            Model::new(|cx: Cx, input: Tensor| input.apply(&cx.layer("head", Linear::new(2))?))
                 .inputs(crate::ModelInput::new([1, 3]));
         let model = definition.trace().unwrap();
         let schema = model.schema();
@@ -301,7 +301,7 @@ mod tests {
         let output: Buffer = runner.run(&input).unwrap();
         assert_eq!(output.dimensions().unwrap(), [1, 2]);
 
-        let uninitialized = Model::new(|cx: &mut Cx| cx.param("external", &[1]));
+        let uninitialized = Model::new(|cx: Cx| cx.param("external", &[1]));
         let uninitialized = uninitialized.trace().unwrap();
         let schema = uninitialized.schema();
         assert!(matches!(
@@ -310,7 +310,7 @@ mod tests {
         ));
 
         let definition =
-            Model::new(|cx: &mut Cx, input: Tensor| cx.scope("norm")?.batch_norm().apply(&input))
+            Model::new(|cx: Cx, input: Tensor| input.apply(&cx.layer("norm", BatchNorm::new())?))
                 .inputs(crate::ModelInput::new([1, 2, 2, 3]));
         let (_, model) = definition.trace_resident_under("norm.weight").unwrap();
         let schema = model.schema();
@@ -342,10 +342,10 @@ mod tests {
             .unwrap();
         assert_eq!(variance, [1.0; 3]);
 
-        let random_state = Model::new(|cx: &mut Cx| {
+        let random_state = Model::new(|cx: Cx| {
             let state =
                 cx.state_initialized("random", &[8], DType::F32, Initializer::uniform(-1.0, 1.0))?;
-            state.read(cx)
+            state.read(&cx)
         })
         .trace()
         .unwrap();

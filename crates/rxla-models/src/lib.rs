@@ -1,7 +1,7 @@
 //! Functional Stable Diffusion building blocks using scoped parameter effects.
 
 use rxla_core::{Conv2dOptions, DType, Tensor};
-use rxla_nn::{Cx, Scope};
+use rxla_nn::{Cx, LayerNorm, Linear, TensorApply};
 use snafu::Snafu;
 
 /// Machine-readable model definition and input validation failures.
@@ -109,8 +109,8 @@ pub mod pp_ocr_v6;
 
 /// Learned two-layer projection for a sinusoidal timestep embedding.
 /// The input width is inferred at the point of use.
-pub fn timestep_embedding(cx: &mut Cx, input: &Tensor, output_width: i64) -> Result<Tensor> {
-    let hidden = cx.scope("linear_1")?.linear(output_width).apply(input)?;
+pub fn timestep_embedding(cx: Cx, input: &Tensor, output_width: i64) -> Result<Tensor> {
+    let hidden = input.apply(&cx.layer("linear_1", Linear::new(output_width))?)?;
     Ok(cx
         .scope("linear_2")?
         .linear(output_width)
@@ -151,7 +151,7 @@ impl Resnet2dOptions {
 /// `norm1`, `conv1`, `time_emb_proj`, `norm2`, `conv2`, and, when channels
 /// change, `conv_shortcut`.
 pub fn resnet2d(
-    cx: &mut Cx,
+    cx: Cx,
     input: &Tensor,
     timestep_embedding: &Tensor,
     options: Resnet2dOptions,
@@ -235,7 +235,7 @@ impl SpatialTransformerOptions {
     }
 }
 
-fn cross_attention(cx: &mut Cx, query: &Tensor, context: &Tensor, head_dim: i64) -> Result<Tensor> {
+fn cross_attention(cx: Cx, query: &Tensor, context: &Tensor, head_dim: i64) -> Result<Tensor> {
     if query.shape().len() != 3
         || context.shape().len() != 3
         || query.shape()[0] != context.shape()[0]
@@ -286,7 +286,7 @@ fn cross_attention(cx: &mut Cx, query: &Tensor, context: &Tensor, head_dim: i64)
         .apply(&hidden)?)
 }
 
-fn feed_forward(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+fn feed_forward(cx: Cx, input: &Tensor) -> Result<Tensor> {
     let width = *input.shape().last().ok_or(Error::InvalidModel {
         kind: ModelDefinitionError::MissingFeedForwardDimension,
     })?;
@@ -304,35 +304,30 @@ fn feed_forward(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
         .apply(input)?;
     let parts = projected.split(projected.shape().len() - 1, &[hidden, hidden])?;
     let gated = parts[0].mul(&parts[1].gelu()?)?;
-    Ok(cx.scope("net")?.scope("2")?.linear(width).apply(&gated)?)
+    Ok(gated.apply(&cx.scope("net")?.layer("2", Linear::new(width))?)?)
 }
 
-fn transformer_block(
-    cx: &mut Cx,
-    input: &Tensor,
-    context: &Tensor,
-    head_dim: i64,
-) -> Result<Tensor> {
-    let normalized = cx.scope("norm1")?.layer_norm(1).apply(input)?;
+fn transformer_block(cx: Cx, input: &Tensor, context: &Tensor, head_dim: i64) -> Result<Tensor> {
+    let normalized = input.apply(&cx.layer("norm1", LayerNorm::new(1))?)?;
     let attention = {
-        let mut scope = cx.scope("attn1")?;
-        cross_attention(&mut scope, &normalized, &normalized, head_dim)?
+        let scope = cx.scope("attn1")?;
+        cross_attention(scope, &normalized, &normalized, head_dim)?
     };
     let hidden = input.add(&attention)?;
-    let normalized = cx.scope("norm2")?.layer_norm(1).apply(&hidden)?;
+    let normalized = hidden.apply(&cx.layer("norm2", LayerNorm::new(1))?)?;
     let attention = {
-        let mut scope = cx.scope("attn2")?;
-        cross_attention(&mut scope, &normalized, context, head_dim)?
+        let scope = cx.scope("attn2")?;
+        cross_attention(scope, &normalized, context, head_dim)?
     };
     let hidden = hidden.add(&attention)?;
-    let normalized = cx.scope("norm3")?.layer_norm(1).apply(&hidden)?;
-    let mut ff = cx.scope("ff")?;
-    Ok(hidden.add(&feed_forward(&mut ff, &normalized)?)?)
+    let normalized = hidden.apply(&cx.layer("norm3", LayerNorm::new(1))?)?;
+    let ff = cx.scope("ff")?;
+    Ok(hidden.add(&feed_forward(ff, &normalized)?)?)
 }
 
 /// Diffusers `Transformer2DModel` for NHWC activations and `[B,T,C]` context.
 pub fn spatial_transformer(
-    cx: &mut Cx,
+    cx: Cx,
     input: &Tensor,
     context: &Tensor,
     options: SpatialTransformerOptions,
@@ -360,8 +355,8 @@ pub fn spatial_transformer(
         .apply(&normalized)?
         .reshape(&[*batch, height * width, *channels])?;
     for layer in 0..options.layers {
-        let mut scope = cx.scope_path(["transformer_blocks".to_owned(), layer.to_string()])?;
-        hidden = transformer_block(&mut scope, &hidden, context, options.head_dim)?;
+        let scope = cx.scope_path(["transformer_blocks".to_owned(), layer.to_string()])?;
+        hidden = transformer_block(scope, &hidden, context, options.head_dim)?;
     }
     let hidden = hidden.reshape(&[*batch, *height, *width, *channels])?;
     Ok(cx
@@ -376,19 +371,19 @@ mod tests {
     use super::*;
     use rxla_nn::Model;
 
-    fn model(cx: &mut Cx) -> Result<Tensor> {
+    fn model(cx: Cx) -> Result<Tensor> {
         let image = cx.input(&[2, 16, 12, 32])?;
         let timestep = cx.input(&[2, 128])?;
-        let mut scope = cx.scope("block")?;
-        resnet2d(&mut scope, &image, &timestep, Resnet2dOptions::new(64))
+        let scope = cx.scope("block")?;
+        resnet2d(scope, &image, &timestep, Resnet2dOptions::new(64))
     }
 
     #[test]
     fn timestep_mlp_infers_input_width() {
-        let model = Model::new(|cx: &mut Cx| {
+        let model = Model::new(|cx: Cx| {
             let input = cx.input(&[2, 32])?;
-            let mut scope = cx.scope("time_embedding")?;
-            timestep_embedding(&mut scope, &input, 128)
+            let scope = cx.scope("time_embedding")?;
+            timestep_embedding(scope, &input, 128)
         })
         .trace()
         .unwrap();
@@ -431,7 +426,7 @@ mod tests {
 
     #[test]
     fn equal_width_resnet_omits_shortcut_parameters() {
-        let model = Model::new(|cx: &mut Cx| {
+        let model = Model::new(|cx: Cx| {
             let image = cx.input(&[1, 8, 8, 32])?;
             let timestep = cx.input(&[1, 128])?;
             resnet2d(cx, &image, &timestep, Resnet2dOptions::new(32))
@@ -446,7 +441,7 @@ mod tests {
 
     #[test]
     fn spatial_transformer_infers_width_and_diffusers_paths() {
-        let model = |cx: &mut Cx| {
+        let model = |cx: Cx| {
             let image = cx.input(&[2, 8, 6, 64])?;
             let context = cx.input(&[2, 77, 32])?;
             spatial_transformer(cx, &image, &context, SpatialTransformerOptions::new(8))

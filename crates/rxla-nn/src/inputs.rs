@@ -5,10 +5,10 @@
 //!
 //! ```
 //! use rxla_core::{DType, Tensor};
-//! use rxla_nn::{Cx, Model, ModelInput, Result};
+//! use rxla_nn::{Cx, Linear, Model, ModelInput, Result, TensorApply};
 //!
-//! fn apply(cx: &mut Cx, image: Tensor, label: Tensor) -> Result<(Tensor, Tensor)> {
-//!     let logits = cx.scope("head")?.linear(10).apply(&image)?;
+//! fn apply(cx: Cx, image: Tensor, label: Tensor) -> Result<(Tensor, Tensor)> {
+//!     let logits = image.apply(&cx.layer("head", Linear::new(10))?)?;
 //!     let loss = logits.cross_entropy_with_indices(&label, 1)?.mean(&[0], false)?;
 //!     Ok((loss, logits))
 //! }
@@ -64,7 +64,7 @@ impl ModelInput {
 pub trait ModelInputs {
     type Tensors;
 
-    fn declare(&self, cx: &mut Cx) -> Result<Self::Tensors>;
+    fn declare(&self, cx: &Cx) -> Result<Self::Tensors>;
 }
 
 /// Flatten structured runtime input buffers in the same deterministic order as
@@ -131,23 +131,19 @@ pub trait ModelHandler<I, Marker> {
     type Outputs: ModelOutputs;
     type Error: From<crate::Error>;
 
-    fn invoke(&self, cx: &mut Cx, inputs: &I) -> std::result::Result<Self::Outputs, Self::Error>;
+    fn invoke(&self, cx: Cx, inputs: &I) -> std::result::Result<Self::Outputs, Self::Error>;
 }
 
 impl<F, T, E> ModelHandler<NoModelInputs, fn() -> std::result::Result<T, E>> for F
 where
-    F: Fn(&mut Cx) -> std::result::Result<T, E>,
+    F: Fn(Cx) -> std::result::Result<T, E>,
     T: ModelOutputs,
     E: From<crate::Error>,
 {
     type Outputs = T;
     type Error = E;
 
-    fn invoke(
-        &self,
-        cx: &mut Cx,
-        _: &NoModelInputs,
-    ) -> std::result::Result<Self::Outputs, Self::Error> {
+    fn invoke(&self, cx: Cx, _: &NoModelInputs) -> std::result::Result<Self::Outputs, Self::Error> {
         self(cx)
     }
 }
@@ -155,15 +151,15 @@ where
 impl<F, I, T, E> ModelHandler<I, fn(I) -> std::result::Result<T, E>> for F
 where
     I: ModelInputs,
-    F: Fn(&mut Cx, I::Tensors) -> std::result::Result<T, E>,
+    F: Fn(Cx, I::Tensors) -> std::result::Result<T, E>,
     T: ModelOutputs,
     E: From<crate::Error>,
 {
     type Outputs = T;
     type Error = E;
 
-    fn invoke(&self, cx: &mut Cx, inputs: &I) -> std::result::Result<Self::Outputs, Self::Error> {
-        let inputs = inputs.declare(cx).map_err(E::from)?;
+    fn invoke(&self, cx: Cx, inputs: &I) -> std::result::Result<Self::Outputs, Self::Error> {
+        let inputs = inputs.declare(&cx).map_err(E::from)?;
         self(cx, inputs)
     }
 }
@@ -171,7 +167,7 @@ where
 impl ModelInputs for ModelInput {
     type Tensors = Tensor;
 
-    fn declare(&self, cx: &mut Cx) -> Result<Self::Tensors> {
+    fn declare(&self, cx: &Cx) -> Result<Self::Tensors> {
         cx.input_dtype(&self.shape, self.dtype)
     }
 }
@@ -179,7 +175,7 @@ impl ModelInputs for ModelInput {
 impl ModelInputs for NoModelInputs {
     type Tensors = ();
 
-    fn declare(&self, _: &mut Cx) -> Result<Self::Tensors> {
+    fn declare(&self, _: &Cx) -> Result<Self::Tensors> {
         Ok(())
     }
 }
@@ -187,7 +183,7 @@ impl ModelInputs for NoModelInputs {
 impl<I: ModelInputs, const N: usize> ModelInputs for [I; N] {
     type Tensors = [I::Tensors; N];
 
-    fn declare(&self, cx: &mut Cx) -> Result<Self::Tensors> {
+    fn declare(&self, cx: &Cx) -> Result<Self::Tensors> {
         let tensors = self
             .iter()
             .map(|input| input.declare(cx))
@@ -202,7 +198,7 @@ impl<I: ModelInputs, const N: usize> ModelInputs for [I; N] {
 impl<I: ModelInputs> ModelInputs for Vec<I> {
     type Tensors = Vec<I::Tensors>;
 
-    fn declare(&self, cx: &mut Cx) -> Result<Self::Tensors> {
+    fn declare(&self, cx: &Cx) -> Result<Self::Tensors> {
         self.iter().map(|input| input.declare(cx)).collect()
     }
 }
@@ -214,7 +210,7 @@ macro_rules! impl_tuple_inputs {
                 type Tensors = ($($name::Tensors,)+);
 
                 #[allow(non_snake_case)]
-                fn declare(&self, cx: &mut Cx) -> Result<Self::Tensors> {
+                fn declare(&self, cx: &Cx) -> Result<Self::Tensors> {
                     let ($($name,)+) = self;
                     Ok(($($name.declare(cx)?,)+))
                 }
@@ -283,7 +279,7 @@ macro_rules! impl_tuple_handlers {
                 > for Func
             where
                 Func: Fn(
-                    &mut Cx,
+                    Cx,
                     $($name::Tensors),+
                 ) -> std::result::Result<Output, HandlerError>,
                 Output: ModelOutputs,
@@ -295,11 +291,11 @@ macro_rules! impl_tuple_handlers {
                 #[allow(non_snake_case)]
                 fn invoke(
                     &self,
-                    cx: &mut Cx,
+                    cx: Cx,
                     inputs: &($($name,)+),
                 ) -> std::result::Result<Self::Outputs, Self::Error> {
                     let ($($name,)+) = inputs;
-                    $(let $name = $name.declare(cx).map_err(HandlerError::from)?;)+
+                    $(let $name = $name.declare(&cx).map_err(HandlerError::from)?;)+
                     self(cx, $($name),+)
                 }
             }
@@ -366,7 +362,7 @@ mod tests {
     impl ModelInputs for Batch {
         type Tensors = BatchTensors;
 
-        fn declare(&self, cx: &mut Cx) -> Result<Self::Tensors> {
+        fn declare(&self, cx: &Cx) -> Result<Self::Tensors> {
             Ok(BatchTensors {
                 images: self.images.declare(cx)?,
                 labels: self.labels.declare(cx)?,
@@ -379,23 +375,22 @@ mod tests {
         let input = ModelInput::new([2, 3]);
         assert_eq!(input.shape(), [2, 3]);
         assert_eq!(input.dtype(), DType::F32);
-        let single = Model::new(|_: &mut Cx, x: Tensor| Ok::<_, Error>(x)).inputs(input);
+        let single = Model::new(|_: Cx, x: Tensor| Ok::<_, Error>(x)).inputs(input);
         assert_eq!(single.trace().unwrap().outputs()[0].shape(), [2, 3]);
 
-        let tuple = Model::new(|_: &mut Cx, x: Tensor, y: Tensor| -> Result<_> { Ok(x.add(&y)?) })
+        let tuple = Model::new(|_: Cx, x: Tensor, y: Tensor| -> Result<_> { Ok(x.add(&y)?) })
             .inputs((ModelInput::new(vec![2]), ModelInput::new(vec![2])));
         assert_eq!(tuple.trace().unwrap().schema().inputs().len(), 2);
 
-        let array = Model::new(|_: &mut Cx, [x, y]: [Tensor; 2]| -> Result<_> { Ok(x.add(&y)?) })
+        let array = Model::new(|_: Cx, [x, y]: [Tensor; 2]| -> Result<_> { Ok(x.add(&y)?) })
             .inputs([ModelInput::new(vec![2]), ModelInput::new(vec![2])]);
         assert_eq!(array.trace().unwrap().schema().inputs().len(), 2);
 
-        let vector =
-            Model::new(|_: &mut Cx, xs: Vec<Tensor>| -> Result<_> { Ok(xs[0].add(&xs[1])?) })
-                .inputs(vec![ModelInput::new(vec![2]), ModelInput::new(vec![2])]);
+        let vector = Model::new(|_: Cx, xs: Vec<Tensor>| -> Result<_> { Ok(xs[0].add(&xs[1])?) })
+            .inputs(vec![ModelInput::new(vec![2]), ModelInput::new(vec![2])]);
         assert_eq!(vector.trace().unwrap().schema().inputs().len(), 2);
 
-        let custom = Model::new(|_: &mut Cx, batch: BatchTensors| -> Result<_> {
+        let custom = Model::new(|_: Cx, batch: BatchTensors| -> Result<_> {
             Ok(Predictions {
                 logits: batch.images.add(&batch.labels)?,
                 auxiliary: batch.images,
@@ -410,14 +405,14 @@ mod tests {
         assert_eq!(applied.outputs().len(), 2);
 
         let nested =
-            Model::new(|_: &mut Cx, x: Tensor| -> Result<_> { Ok((x.clone(), [x.clone(), x])) })
+            Model::new(|_: Cx, x: Tensor| -> Result<_> { Ok((x.clone(), [x.clone(), x])) })
                 .inputs(ModelInput::new(vec![2]));
         assert_eq!(nested.trace().unwrap().outputs().len(), 3);
     }
 
     #[test]
     fn model_handlers_preserve_downstream_errors() {
-        let model = Model::new(|_: &mut Cx| -> std::result::Result<Tensor, ModelError> {
+        let model = Model::new(|_: Cx| -> std::result::Result<Tensor, ModelError> {
             Err(ModelError::Rejected)
         });
 

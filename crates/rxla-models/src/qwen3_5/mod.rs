@@ -119,7 +119,7 @@ impl Qwen3_5Config {
     }
 }
 
-fn quantized_embedding(cx: &mut Cx, ids: &Tensor, config: &Qwen3_5Config) -> Result<Tensor> {
+fn quantized_embedding(cx: Cx, ids: &Tensor, config: &Qwen3_5Config) -> Result<Tensor> {
     let groups = config.hidden_size / config.quant_group_size;
     let weight = cx
         .param_dtype(
@@ -146,7 +146,7 @@ fn quantized_embedding(cx: &mut Cx, ids: &Tensor, config: &Qwen3_5Config) -> Res
         .reshape(&[ids.shape()[0], ids.shape()[1], config.hidden_size])?)
 }
 
-fn tied_lm_head(cx: &mut Cx, hidden: &Tensor, config: &Qwen3_5Config) -> Result<Tensor> {
+fn tied_lm_head(cx: Cx, hidden: &Tensor, config: &Qwen3_5Config) -> Result<Tensor> {
     let groups = config.hidden_size / config.quant_group_size;
     let weight = cx
         .param_dtype(
@@ -171,7 +171,7 @@ fn tied_lm_head(cx: &mut Cx, hidden: &Tensor, config: &Qwen3_5Config) -> Result<
 
 /// Full-sequence text-only inference for Qwen3.5 with weight-only W8 storage.
 /// Token IDs are `[batch, sequence]`; logits are `[batch, sequence, vocabulary]`.
-pub fn qwen3_5(cx: &mut Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Result<Tensor> {
+pub fn qwen3_5(cx: Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Result<Tensor> {
     config.validate()?;
     let [_, sequence] = token_ids.shape() else {
         return Err(Error::InvalidModel {
@@ -203,14 +203,14 @@ pub fn qwen3_5(cx: &mut Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Resul
         )?;
     let causal_mask = positions.causal_attention_mask(&positions)?;
 
-    let mut model = cx.scope("model")?;
-    let mut language_model = model.scope("language_model")?;
-    let mut embedding = language_model.scope("embed_tokens")?;
-    let mut hidden = quantized_embedding(&mut embedding, token_ids, config)?;
+    let model = cx.scope("model")?;
+    let language_model = model.scope("language_model")?;
+    let embedding = language_model.scope("embed_tokens")?;
+    let mut hidden = quantized_embedding(embedding.clone(), token_ids, config)?;
     drop(embedding);
     for (index, layer_type) in config.layers.iter().enumerate() {
-        let mut layers = language_model.scope("layers")?;
-        let mut layer = layers.scope(index.to_string())?;
+        let layers = language_model.scope("layers")?;
+        let layer = layers.scope(index.to_string())?;
         let normalized = layer
             .scope("input_layernorm")?
             .rms_norm()
@@ -219,12 +219,12 @@ pub fn qwen3_5(cx: &mut Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Resul
             .apply(&hidden)?;
         let mixed = match layer_type {
             LayerType::LinearAttention => {
-                let mut mixer = layer.scope("linear_attn")?;
-                gated_delta_attention(&mut mixer, &normalized, config)?
+                let mixer = layer.scope("linear_attn")?;
+                gated_delta_attention(mixer, &normalized, config)?
             }
             LayerType::FullAttention => {
-                let mut mixer = layer.scope("self_attn")?;
-                full_attention(&mut mixer, &normalized, &angles, &causal_mask, config)?
+                let mixer = layer.scope("self_attn")?;
+                full_attention(mixer, &normalized, &angles, &causal_mask, config)?
             }
         };
         hidden = hidden.add(&mixed)?;
@@ -234,8 +234,8 @@ pub fn qwen3_5(cx: &mut Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Resul
             .epsilon(config.epsilon)
             .zero_centered(true)
             .apply(&hidden)?;
-        let mut feed_forward = layer.scope("mlp")?;
-        hidden = hidden.add(&mlp(&mut feed_forward, &normalized, config)?)?;
+        let feed_forward = layer.scope("mlp")?;
+        hidden = hidden.add(&mlp(feed_forward, &normalized, config)?)?;
     }
     hidden = language_model
         .scope("norm")?
@@ -243,8 +243,8 @@ pub fn qwen3_5(cx: &mut Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Resul
         .epsilon(config.epsilon)
         .zero_centered(true)
         .apply(&hidden)?;
-    let mut embedding = language_model.scope("embed_tokens")?;
-    tied_lm_head(&mut embedding, &hidden, config)
+    let embedding = language_model.scope("embed_tokens")?;
+    tied_lm_head(embedding, &hidden, config)
 }
 
 #[cfg(test)]
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn tiny_quantized_qwen_builds_both_mixer_types_and_lowers() {
         let config = Qwen3_5Config::tiny();
-        let model = Model::new(|cx: &mut Cx| {
+        let model = Model::new(|cx: Cx| {
             let ids = cx.input_dtype(&[1, 3], DType::I32)?;
             qwen3_5(cx, &ids, &config)
         });
@@ -289,7 +289,7 @@ mod tests {
         let plugin = std::env::var("PJRT_CPU_PLUGIN_PATH").unwrap();
         let client = unsafe { Client::load(plugin) }.unwrap();
         let config = Qwen3_5Config::tiny();
-        let model = Model::new(|cx: &mut Cx| {
+        let model = Model::new(|cx: Cx| {
             let ids = cx.input_dtype(&[1, 3], DType::I32)?;
             qwen3_5(cx, &ids, &config)
         });

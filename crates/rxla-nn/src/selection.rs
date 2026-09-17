@@ -106,13 +106,13 @@ pub(crate) fn path_is_under(path: &str, scope: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Cx, init};
+    use crate::{Cx, Linear, TensorApply, init};
     use rxla_core::Tensor;
 
-    fn branched(cx: &mut Cx) -> crate::Result<Tensor> {
+    fn branched(cx: Cx) -> crate::Result<Tensor> {
         let input = cx.input(&[2, 4])?;
-        let body = cx.scope("body")?.linear(4).apply(&input)?;
-        cx.scope("head")?.linear(2).apply(&body)
+        let body = input.apply(&cx.layer("body", Linear::new(4))?)?;
+        body.apply(&cx.layer("head", Linear::new(2))?)
     }
 
     #[test]

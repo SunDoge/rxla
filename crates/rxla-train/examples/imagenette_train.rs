@@ -7,8 +7,8 @@ use rxla_core::{
     CacheLimits, Client, Compiler, Conv2dOptions, DType, PendingHostUpload, Pool2dOptions, Tensor,
 };
 use rxla_nn::{
-    AppliedModel, BatchNorm, Conv2d, Cx, ExecutionMode, Layer, Linear, Model, ModelInput,
-    Result as NnResult,
+    AppliedModel, BatchNorm, Conv2d, Cx, ExecutionMode, Linear, Model, ModelInput,
+    Result as NnResult, TensorApply,
 };
 use rxla_train::{BoundedPipeline, DataRng, PipelineResult, apply_model_sgd};
 use std::collections::BTreeMap;
@@ -210,55 +210,60 @@ fn permute(index: usize, count: usize, rng: DataRng, epoch: u64) -> usize {
 }
 
 fn basic_block(
-    cx: &mut Cx,
+    cx: Cx,
     input: &Tensor,
     stage_index: usize,
     block_index: usize,
     channels: i64,
     stride: i64,
 ) -> NnResult<Tensor> {
-    let mut stage = cx.scope(format!("stage{stage_index}"))?;
-    let mut block = stage.scope(format!("block{block_index}"))?;
-    let conv1 = Conv2d::new(channels, [3, 3])
-        .options(Conv2dOptions {
-            strides: [stride, stride],
-            padding: [[1, 1], [1, 1]],
-            ..Default::default()
-        })
-        .bias(false)
-        .named("conv1");
-    let bn1 = BatchNorm::new().named("bn1");
-    let conv2 = Conv2d::new(channels, [3, 3])
-        .options(Conv2dOptions {
-            padding: [[1, 1], [1, 1]],
-            ..Default::default()
-        })
-        .bias(false)
-        .named("conv2");
-    let bn2 = BatchNorm::new().named("bn2");
+    let stage = cx.scope(format!("stage{stage_index}"))?;
+    let block = stage.scope(format!("block{block_index}"))?;
+    let conv1 = block.layer(
+        "conv1",
+        Conv2d::new(channels, [3, 3])
+            .options(Conv2dOptions {
+                strides: [stride, stride],
+                padding: [[1, 1], [1, 1]],
+                ..Default::default()
+            })
+            .bias(false),
+    )?;
+    let bn1 = block.layer("bn1", BatchNorm::new())?;
+    let conv2 = block.layer(
+        "conv2",
+        Conv2d::new(channels, [3, 3])
+            .options(Conv2dOptions {
+                padding: [[1, 1], [1, 1]],
+                ..Default::default()
+            })
+            .bias(false),
+    )?;
+    let bn2 = block.layer("bn2", BatchNorm::new())?;
 
-    let hidden = conv1.apply(&mut block, input)?;
-    let hidden = bn1.apply(&mut block, &hidden)?.relu()?;
-    let hidden = conv2.apply(&mut block, &hidden)?;
-    let hidden = bn2.apply(&mut block, &hidden)?;
+    let hidden = input.apply(&conv1)?;
+    let hidden = hidden.apply(&bn1)?.relu()?;
+    let hidden = hidden.apply(&conv2)?;
+    let hidden = hidden.apply(&bn2)?;
     let residual = if input.shape()[3] == channels && stride == 1 {
         input.clone()
     } else {
-        let shortcut_conv = Conv2d::new(channels, [1, 1])
-            .options(Conv2dOptions {
-                strides: [stride, stride],
-                ..Default::default()
-            })
-            .bias(false)
-            .named("shortcut_conv");
-        let shortcut_bn = BatchNorm::new().named("shortcut_bn");
-        let projected = shortcut_conv.apply(&mut block, input)?;
-        shortcut_bn.apply(&mut block, &projected)?
+        let shortcut_conv = block.layer(
+            "shortcut_conv",
+            Conv2d::new(channels, [1, 1])
+                .options(Conv2dOptions {
+                    strides: [stride, stride],
+                    ..Default::default()
+                })
+                .bias(false),
+        )?;
+        let shortcut_bn = block.layer("shortcut_bn", BatchNorm::new())?;
+        input.apply(&shortcut_conv)?.apply(&shortcut_bn)?
     };
     Ok(hidden.add(&residual)?.relu()?)
 }
 
-fn resnet18(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor, Tensor)> {
+fn resnet18(cx: Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor, Tensor)> {
     let training = cx.mode() == ExecutionMode::Training;
     let batch_size = images.shape()[0];
     let mut augmentation_rng = cx.rng("augmentation")?;
@@ -269,19 +274,21 @@ fn resnet18(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Te
         .broadcast_to(images.shape())?
         .select(&images.flip_left_right()?, &images)?
         .normalize_nhwc(&[0.485, 0.456, 0.406], &[0.229, 0.224, 0.225])?;
-    let stem_conv = Conv2d::new(64, [7, 7])
-        .options(Conv2dOptions {
-            strides: [2, 2],
-            padding: [[3, 3], [3, 3]],
-            ..Default::default()
-        })
-        .bias(false)
-        .named("stem_conv");
-    let stem_bn = BatchNorm::new().named("stem_bn");
-    let head = Linear::new(CLASSES).named("head");
+    let stem_conv = cx.layer(
+        "stem_conv",
+        Conv2d::new(64, [7, 7])
+            .options(Conv2dOptions {
+                strides: [2, 2],
+                padding: [[3, 3], [3, 3]],
+                ..Default::default()
+            })
+            .bias(false),
+    )?;
+    let stem_bn = cx.layer("stem_bn", BatchNorm::new())?;
+    let head = cx.layer("head", Linear::new(CLASSES))?;
 
-    let mut hidden = stem_conv.apply(cx, &images)?;
-    hidden = stem_bn.apply(cx, &hidden)?.relu()?.avg_pool2d(
+    let mut hidden = images.apply(&stem_conv)?;
+    hidden = hidden.apply(&stem_bn)?.relu()?.avg_pool2d(
         Pool2dOptions {
             window: [3, 3],
             strides: [2, 2],
@@ -292,11 +299,11 @@ fn resnet18(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Te
     for (stage, channels) in [64, 128, 256, 512].into_iter().enumerate() {
         for block in 0..2 {
             let stride = if stage != 0 && block == 0 { 2 } else { 1 };
-            hidden = basic_block(cx, &hidden, stage, block, channels, stride)?;
+            hidden = basic_block(cx.clone(), &hidden, stage, block, channels, stride)?;
         }
     }
     let features = hidden.mean(&[1, 2], false)?;
-    let logits = head.apply(cx, &features)?;
+    let logits = features.apply(&head)?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;

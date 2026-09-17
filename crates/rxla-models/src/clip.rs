@@ -59,7 +59,7 @@ impl ClipTextConfig {
 }
 
 fn attention_projection(
-    cx: &mut Cx,
+    cx: Cx,
     name: &str,
     input: &Tensor,
     width: i64,
@@ -72,7 +72,7 @@ fn attention_projection(
         .reshape(&shape)?)
 }
 
-fn attention(cx: &mut Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> Result<Tensor> {
+fn attention(cx: Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> Result<Tensor> {
     let &[batch, length, width] = input.shape() else {
         return Err(Error::InvalidModel {
             kind: ModelDefinitionError::InvalidClipAttentionInput,
@@ -85,17 +85,17 @@ fn attention(cx: &mut Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> R
     }
     let head_dim = width / heads;
     let projected_shape = [batch, length, heads, head_dim];
-    let q = attention_projection(cx, "q_proj", input, width, projected_shape)?
+    let q = attention_projection(cx.clone(), "q_proj", input, width, projected_shape)?
         .transpose(&[0, 2, 1, 3])?;
-    let k = attention_projection(cx, "k_proj", input, width, projected_shape)?
+    let k = attention_projection(cx.clone(), "k_proj", input, width, projected_shape)?
         .transpose(&[0, 2, 1, 3])?;
-    let v = attention_projection(cx, "v_proj", input, width, projected_shape)?
+    let v = attention_projection(cx.clone(), "v_proj", input, width, projected_shape)?
         .transpose(&[0, 2, 1, 3])?;
     let hidden = q
         .scaled_dot_product_attention(&k, &v, Some(causal_bias), None)?
         .transpose(&[0, 2, 1, 3])?
         .reshape(&[batch, length, width])?;
-    Ok(cx.scope("out_proj")?.linear(width).apply(&hidden)?)
+    Ok(hidden.apply(&cx.layer("out_proj", Linear::new(width))?)?)
 }
 
 fn quick_gelu(input: &Tensor) -> Result<Tensor> {
@@ -103,7 +103,7 @@ fn quick_gelu(input: &Tensor) -> Result<Tensor> {
 }
 
 fn encoder_layer(
-    cx: &mut Cx,
+    cx: Cx,
     input: &Tensor,
     causal_bias: &Tensor,
     config: &ClipTextConfig,
@@ -114,8 +114,8 @@ fn encoder_layer(
         .epsilon(config.epsilon)
         .apply(input)?;
     let attended = {
-        let mut scope = cx.scope("self_attn")?;
-        attention(&mut scope, &normalized, causal_bias, config.heads)?
+        let scope = cx.scope("self_attn")?;
+        attention(scope, &normalized, causal_bias, config.heads)?
     };
     let hidden = input.add(&attended)?;
     let normalized = cx
@@ -124,7 +124,7 @@ fn encoder_layer(
         .epsilon(config.epsilon)
         .apply(&hidden)?;
     let feed_forward = {
-        let mut scope = cx.scope("mlp")?;
+        let scope = cx.scope("mlp")?;
         let projected = scope
             .scope("fc1")?
             .linear(config.intermediate_width)
@@ -138,11 +138,7 @@ fn encoder_layer(
 }
 
 /// Encode I32 token IDs `[batch, sequence]` into CLIP hidden states.
-pub fn clip_text_encoder(
-    cx: &mut Cx,
-    token_ids: &Tensor,
-    config: &ClipTextConfig,
-) -> Result<Tensor> {
+pub fn clip_text_encoder(cx: Cx, token_ids: &Tensor, config: &ClipTextConfig) -> Result<Tensor> {
     config.validate()?;
     let [_, length] = token_ids.shape() else {
         return Err(Error::InvalidModel {
@@ -156,7 +152,7 @@ pub fn clip_text_encoder(
     }
     let positions = cx.iota_i32(token_ids.shape(), 1)?;
     let mut hidden = {
-        let mut scope = cx.scope_path(["text_model", "embeddings"])?;
+        let scope = cx.scope_path(["text_model", "embeddings"])?;
         let tokens = scope
             .scope("token_embedding")?
             .embedding(config.vocabulary, config.width)
@@ -177,10 +173,10 @@ pub fn clip_text_encoder(
         .broadcast_to(&bias_shape)?;
     let causal_bias = allowed.select(&zero, &blocked)?;
     {
-        let mut layers = cx.scope_path(["text_model", "encoder", "layers"])?;
+        let layers = cx.scope_path(["text_model", "encoder", "layers"])?;
         for layer in 0..config.layers {
-            let mut scope = layers.scope(layer.to_string())?;
-            hidden = encoder_layer(&mut scope, &hidden, &causal_bias, config)?;
+            let scope = layers.scope(layer.to_string())?;
+            hidden = encoder_layer(scope, &hidden, &causal_bias, config)?;
         }
     }
     Ok(cx
@@ -196,7 +192,7 @@ mod tests {
     use super::*;
     use rxla_nn::Model;
 
-    fn tiny(cx: &mut Cx) -> Result<Tensor> {
+    fn tiny(cx: Cx) -> Result<Tensor> {
         let ids = cx.input_dtype(&[2, 77], DType::I32)?;
         clip_text_encoder(cx, &ids, &ClipTextConfig::tiny())
     }

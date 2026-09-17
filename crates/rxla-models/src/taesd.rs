@@ -12,8 +12,8 @@ fn convolution() -> Conv2dOptions {
     }
 }
 
-fn tiny_block(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
-    let mut conv = cx.scope("conv")?;
+fn tiny_block(cx: Cx, input: &Tensor) -> Result<Tensor> {
+    let conv = cx.scope("conv")?;
     let hidden = conv
         .scope("0")?
         .conv2d(input.shape()[3], [3, 3])
@@ -35,7 +35,7 @@ fn tiny_block(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
 }
 
 fn transition(
-    cx: &mut Cx,
+    cx: Cx,
     layer: usize,
     input: &Tensor,
     output_channels: i64,
@@ -54,23 +54,23 @@ fn transition(
 /// The input width is validated where it is used. Parameter paths match the
 /// PyTorch sequential indices in TAESD safetensors checkpoints. Three nearest
 /// neighbor stages produce RGB output at eight times the spatial resolution.
-pub fn taesd_decoder(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
+pub fn taesd_decoder(cx: Cx, input: &Tensor) -> Result<Tensor> {
     if input.shape().len() != 4 || input.shape()[3] != 4 {
         return Err(Error::InvalidModel {
             kind: ModelDefinitionError::InvalidTaesdLatentShape,
         });
     }
 
-    let mut decoder = cx.scope("decoder")?;
-    let mut layers = decoder.scope("layers")?;
+    let decoder = cx.scope("decoder")?;
+    let layers = decoder.scope("layers")?;
     let mut hidden = input.mul_scalar(1. / 3.)?.tanh()?.mul_scalar(3.)?;
-    hidden = transition(&mut layers, 0, &hidden, 64, true)?.relu()?;
+    hidden = transition(layers.clone(), 0, &hidden, 64, true)?.relu()?;
 
     let mut next_layer = 2;
     for (stage_index, block_count) in [3, 3, 3, 1].into_iter().enumerate() {
         for _ in 0..block_count {
-            let mut block = layers.scope(next_layer.to_string())?;
-            hidden = tiny_block(&mut block, &hidden)?;
+            let block = layers.scope(next_layer.to_string())?;
+            hidden = tiny_block(block, &hidden)?;
             next_layer += 1;
         }
         let upsample = stage_index != 3;
@@ -80,7 +80,7 @@ pub fn taesd_decoder(cx: &mut Cx, input: &Tensor) -> Result<Tensor> {
         }
         let output_channels = if stage_index == 3 { 3 } else { 64 };
         hidden = transition(
-            &mut layers,
+            layers.clone(),
             next_layer,
             &hidden,
             output_channels,
@@ -97,7 +97,7 @@ mod tests {
     use super::*;
     use rxla_nn::Model;
 
-    fn tiny(cx: &mut Cx) -> Result<Tensor> {
+    fn tiny(cx: Cx) -> Result<Tensor> {
         let latent = cx.input(&[1, 8, 12, 4])?;
         taesd_decoder(cx, &latent)
     }
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn rejects_non_latent_channels() {
-        let error = Model::new(|cx: &mut Cx| {
+        let error = Model::new(|cx: Cx| {
             let image = cx.input(&[1, 8, 8, 3])?;
             taesd_decoder(cx, &image)
         })

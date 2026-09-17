@@ -278,11 +278,11 @@ pub fn apply_model_sgd(
 mod tests {
     use super::*;
     use rxla_core::{CacheLimits, Client, DType};
-    use rxla_nn::{Cx, Model, Result};
+    use rxla_nn::{Cx, Linear, Model, Result, TensorApply};
 
-    fn linear_loss(cx: &mut Cx) -> Result<Tensor> {
+    fn linear_loss(cx: Cx) -> Result<Tensor> {
         let input = cx.input(&[2, 3])?;
-        let prediction = cx.scope("linear")?.linear(1).bias(false).apply(&input)?;
+        let prediction = input.apply(&cx.layer("linear", Linear::new(1).bias(false))?)?;
         Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
     }
 
@@ -342,11 +342,11 @@ mod tests {
 
     #[test]
     fn stateful_sgd_retains_state_writes_as_hidden_roots() {
-        fn stateful_loss(cx: &mut Cx) -> Result<Tensor> {
+        fn stateful_loss(cx: Cx) -> Result<Tensor> {
             let input = cx.input(&[1, 1])?;
             let steps = cx.state("steps", &[], DType::F32)?;
-            steps.add_(cx, &cx.constant(&[], &[1.0])?)?;
-            let prediction = cx.scope("linear")?.linear(1).bias(false).apply(&input)?;
+            steps.add_(&cx, &cx.constant(&[], &[1.0])?)?;
+            let prediction = input.apply(&cx.layer("linear", Linear::new(1).bias(false))?)?;
             Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
         }
 
@@ -394,11 +394,11 @@ mod tests {
     #[test]
     #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
     fn stateful_sgd_executes_update_and_state_transition_together() {
-        fn stateful_loss(cx: &mut Cx) -> Result<Tensor> {
+        fn stateful_loss(cx: Cx) -> Result<Tensor> {
             let input = cx.input(&[1, 1])?;
             let steps = cx.state("steps", &[], DType::F32)?;
-            steps.add_(cx, &cx.constant(&[], &[1.0])?)?;
-            let prediction = cx.scope("linear")?.linear(1).bias(false).apply(&input)?;
+            steps.add_(&cx, &cx.constant(&[], &[1.0])?)?;
+            let prediction = input.apply(&cx.layer("linear", Linear::new(1).bias(false))?)?;
             Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
         }
 
@@ -431,10 +431,10 @@ mod tests {
     #[test]
     #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
     fn linear_sgd_executes_as_one_device_program() {
-        fn regression_loss(cx: &mut Cx) -> Result<Tensor> {
+        fn regression_loss(cx: Cx) -> Result<Tensor> {
             let input = cx.input(&[1, 1])?;
             let target = cx.input(&[1, 1])?;
-            let prediction = cx.scope("linear")?.linear(1).bias(false).apply(&input)?;
+            let prediction = input.apply(&cx.layer("linear", Linear::new(1).bias(false))?)?;
             let error = prediction.sub(&target)?;
             Ok(error.mul(&error)?.sum(&[0, 1], false)?)
         }
@@ -504,9 +504,9 @@ mod tests {
     #[test]
     #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
     fn resident_linear_sgd_initializes_once_and_commits_in_session() {
-        fn regression_loss(cx: &mut Cx) -> Result<Tensor> {
+        fn regression_loss(cx: Cx) -> Result<Tensor> {
             let input = cx.input(&[1, 1])?;
-            let prediction = cx.scope("linear")?.linear(1).bias(false).apply(&input)?;
+            let prediction = input.apply(&cx.layer("linear", Linear::new(1).bias(false))?)?;
             Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
         }
 

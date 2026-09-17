@@ -68,12 +68,12 @@ impl AutoencoderKlDecoderConfig {
     }
 }
 
-fn indexed_scope<'a>(cx: &'a mut Cx, collection: &str, index: usize) -> Result<Scope<'a>> {
+fn indexed_scope(cx: &Cx, collection: &str, index: usize) -> Result<Cx> {
     Ok(cx.scope_path([collection.to_owned(), index.to_string()])?)
 }
 
 fn resnet(
-    cx: &mut Cx,
+    cx: Cx,
     input: &Tensor,
     output_channels: i64,
     groups: i64,
@@ -109,7 +109,7 @@ fn resnet(
     Ok(hidden.add(&residual)?)
 }
 
-fn attention(cx: &mut Cx, input: &Tensor, groups: i64, epsilon: f32) -> Result<Tensor> {
+fn attention(cx: Cx, input: &Tensor, groups: i64, epsilon: f32) -> Result<Tensor> {
     let [batch, height, width, channels] = input.shape() else {
         return Err(Error::InvalidModel {
             kind: ModelDefinitionError::InvalidVaeAttentionInput,
@@ -121,19 +121,19 @@ fn attention(cx: &mut Cx, input: &Tensor, groups: i64, epsilon: f32) -> Result<T
         .epsilon(epsilon)
         .apply(input)?
         .reshape(&[*batch, height * width, *channels])?;
-    let q = cx.scope("to_q")?.linear(*channels).apply(&hidden)?;
+    let q = hidden.apply(&cx.layer("to_q", Linear::new(*channels))?)?;
     let k = cx
         .scope("to_k")?
         .linear(*channels)
         .apply(&hidden)?
         .transpose(&[0, 2, 1])?;
-    let v = cx.scope("to_v")?.linear(*channels).apply(&hidden)?;
+    let v = hidden.apply(&cx.layer("to_v", Linear::new(*channels))?)?;
     let attended = q
         .matmul(&k)?
         .mul_scalar(1.0 / (*channels as f32).sqrt())?
         .softmax(2)?
         .matmul(&v)?;
-    let mut to_out = cx.scope("to_out")?;
+    let to_out = cx.scope("to_out")?;
     Ok(to_out
         .scope("0")?
         .linear(*channels)
@@ -145,7 +145,7 @@ fn attention(cx: &mut Cx, input: &Tensor, groups: i64, epsilon: f32) -> Result<T
 /// Decode an NHWC latent into an NHWC image while interpreting parameter
 /// declarations from the surrounding [`Cx`].
 pub fn autoencoder_kl_decoder(
-    cx: &mut Cx,
+    cx: Cx,
     latent: &Tensor,
     config: &AutoencoderKlDecoderConfig,
 ) -> Result<Tensor> {
@@ -163,18 +163,18 @@ pub fn autoencoder_kl_decoder(
         .scope("post_quant_conv")?
         .conv2d(config.latent_channels, [1, 1])
         .apply(&hidden)?;
-    let mut decoder = cx.scope("decoder")?;
+    let decoder = cx.scope("decoder")?;
     hidden = decoder
         .scope("conv_in")?
         .conv2d(deepest, [3, 3])
         .options(convolution(3))
         .apply(&hidden)?;
     hidden = {
-        let mut mid = decoder.scope("mid_block")?;
+        let mid = decoder.scope("mid_block")?;
         let first = {
-            let mut scope = indexed_scope(&mut mid, "resnets", 0)?;
+            let scope = indexed_scope(&mid, "resnets", 0)?;
             resnet(
-                &mut scope,
+                scope,
                 &hidden,
                 deepest,
                 config.norm_groups,
@@ -182,12 +182,12 @@ pub fn autoencoder_kl_decoder(
             )?
         };
         let attended = {
-            let mut scope = indexed_scope(&mut mid, "attentions", 0)?;
-            attention(&mut scope, &first, config.norm_groups, config.norm_epsilon)?
+            let scope = indexed_scope(&mid, "attentions", 0)?;
+            attention(scope, &first, config.norm_groups, config.norm_epsilon)?
         };
-        let mut scope = indexed_scope(&mut mid, "resnets", 1)?;
+        let scope = indexed_scope(&mid, "resnets", 1)?;
         resnet(
-            &mut scope,
+            scope,
             &attended,
             deepest,
             config.norm_groups,
@@ -197,12 +197,12 @@ pub fn autoencoder_kl_decoder(
 
     let stages = config.block_channels.len();
     for (stage, &output_channels) in config.block_channels.iter().rev().enumerate() {
-        let mut block = indexed_scope(&mut decoder, "up_blocks", stage)?;
+        let block = indexed_scope(&decoder, "up_blocks", stage)?;
         let mut value = hidden;
         for layer in 0..=config.layers_per_block {
-            let mut scope = indexed_scope(&mut block, "resnets", layer)?;
+            let scope = indexed_scope(&block, "resnets", layer)?;
             value = resnet(
-                &mut scope,
+                scope,
                 &value,
                 output_channels,
                 config.norm_groups,
@@ -210,7 +210,7 @@ pub fn autoencoder_kl_decoder(
             )?;
         }
         if stage + 1 < stages {
-            let mut scope = block.scope_path(["upsamplers", "0"])?;
+            let scope = block.scope_path(["upsamplers", "0"])?;
             value = scope
                 .scope("conv")?
                 .conv2d(output_channels, [3, 3])
@@ -236,7 +236,7 @@ mod tests {
     use super::*;
     use rxla_nn::Model;
 
-    fn tiny(cx: &mut Cx) -> Result<Tensor> {
+    fn tiny(cx: Cx) -> Result<Tensor> {
         let latent = cx.input(&[1, 8, 6, 4])?;
         autoencoder_kl_decoder(cx, &latent, &AutoencoderKlDecoderConfig::tiny())
     }
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn stable_diffusion_decoder_has_expected_shape() {
-        let model = Model::new(|cx: &mut Cx| {
+        let model = Model::new(|cx: Cx| {
             let latent = cx.input(&[1, 8, 8, 4])?;
             autoencoder_kl_decoder(cx, &latent, &AutoencoderKlDecoderConfig::stable_diffusion())
         })

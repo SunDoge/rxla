@@ -43,7 +43,7 @@ fn run(args: Args) -> Result<()> {
     let client = unsafe { Client::load(&args.plugin) }?;
     let info = client.info()?;
     let config = Qwen3_5Config::qwen3_5_0_8b_w8();
-    let model = Model::new(|cx: &mut Cx, ids| qwen3_5(cx, &ids, &config))
+    let model = Model::new(|cx: Cx, ids| qwen3_5(cx, &ids, &config))
         .inputs(ModelInput::new([1, args.sequence]).with_dtype(DType::I32));
     let applied = model.trace()?;
     let schema = applied.schema();

@@ -1,7 +1,7 @@
 use super::*;
 use rxla_core::{Conv2dOptions, RotaryLayout};
 
-fn projection(cx: &mut Cx, name: &str, input: &Tensor, width: i64, group: i64) -> Result<Tensor> {
+fn projection(cx: Cx, name: &str, input: &Tensor, width: i64, group: i64) -> Result<Tensor> {
     Ok(cx
         .scope(name)?
         .quantized_linear(width, group)
@@ -26,7 +26,7 @@ fn partial_rope(input: &Tensor, angles: &Tensor, width: i64) -> Result<Tensor> {
 }
 
 pub(super) fn full_attention(
-    cx: &mut Cx,
+    cx: Cx,
     input: &Tensor,
     angles: &Tensor,
     mask: &Tensor,
@@ -36,7 +36,7 @@ pub(super) fn full_attention(
         unreachable!("model validates rank")
     };
     let q = projection(
-        cx,
+        cx.clone(),
         "q_proj",
         input,
         config.attention_heads * config.head_dim * 2,
@@ -61,7 +61,7 @@ pub(super) fn full_attention(
         .apply(&query)?
         .transpose(&[0, 2, 1, 3])?;
     let key = projection(
-        cx,
+        cx.clone(),
         "k_proj",
         input,
         config.key_value_heads * config.head_dim,
@@ -76,7 +76,7 @@ pub(super) fn full_attention(
         .apply(&key)?
         .transpose(&[0, 2, 1, 3])?;
     let value = projection(
-        cx,
+        cx.clone(),
         "v_proj",
         input,
         config.key_value_heads * config.head_dim,
@@ -92,7 +92,7 @@ pub(super) fn full_attention(
         .reshape(&[*batch, *sequence, config.attention_heads * config.head_dim])?
         .mul(&gate)?;
     projection(
-        cx,
+        cx.clone(),
         "o_proj",
         &attended,
         config.hidden_size,
@@ -112,7 +112,7 @@ fn l2_norm(input: &Tensor) -> Result<Tensor> {
 }
 
 pub(super) fn gated_delta_attention(
-    cx: &mut Cx,
+    cx: Cx,
     input: &Tensor,
     config: &Qwen3_5Config,
 ) -> Result<Tensor> {
@@ -120,10 +120,16 @@ pub(super) fn gated_delta_attention(
         unreachable!("model validates rank")
     };
     let width = config.linear_heads * config.linear_head_dim;
-    let mixed = projection(cx, "in_proj_qkv", input, width * 3, config.quant_group_size)?
-        .reshape(&[*batch, *sequence, 1, width * 3])?;
+    let mixed = projection(
+        cx.clone(),
+        "in_proj_qkv",
+        input,
+        width * 3,
+        config.quant_group_size,
+    )?
+    .reshape(&[*batch, *sequence, 1, width * 3])?;
     let kernel = {
-        let mut conv = cx.scope("conv1d")?;
+        let conv = cx.scope("conv1d")?;
         conv.param("weight", &[width * 3, 1, config.conv_kernel])?
             .reshape(&[width * 3, 1, config.conv_kernel, 1])?
     };
@@ -157,14 +163,21 @@ pub(super) fn gated_delta_attention(
         config.linear_heads,
         config.linear_head_dim,
     ])?;
-    let z = projection(cx, "in_proj_z", input, width, config.quant_group_size)?.reshape(&[
+    let z = projection(
+        cx.clone(),
+        "in_proj_z",
+        input,
+        width,
+        config.quant_group_size,
+    )?
+    .reshape(&[
         *batch,
         *sequence,
         config.linear_heads,
         config.linear_head_dim,
     ])?;
     let beta = projection(
-        cx,
+        cx.clone(),
         "in_proj_b",
         input,
         config.linear_heads,
@@ -172,7 +185,7 @@ pub(super) fn gated_delta_attention(
     )?
     .sigmoid()?;
     let a = projection(
-        cx,
+        cx.clone(),
         "in_proj_a",
         input,
         config.linear_heads,
@@ -236,7 +249,7 @@ pub(super) fn gated_delta_attention(
         .rsqrt()?
         .broadcast_to(output.shape())?;
     let norm_weight = {
-        let mut norm = cx.scope("norm")?;
+        let norm = cx.scope("norm")?;
         norm.param("weight", &[config.linear_head_dim])?
             .broadcast_to(output.shape())?
     };
@@ -246,7 +259,7 @@ pub(super) fn gated_delta_attention(
         .mul(&z.silu()?)?
         .reshape(&[*batch, *sequence, width])?;
     projection(
-        cx,
+        cx.clone(),
         "out_proj",
         &output,
         config.hidden_size,
@@ -254,9 +267,9 @@ pub(super) fn gated_delta_attention(
     )
 }
 
-pub(super) fn mlp(cx: &mut Cx, input: &Tensor, config: &Qwen3_5Config) -> Result<Tensor> {
+pub(super) fn mlp(cx: Cx, input: &Tensor, config: &Qwen3_5Config) -> Result<Tensor> {
     let gate = projection(
-        cx,
+        cx.clone(),
         "gate_proj",
         input,
         config.intermediate_size,
@@ -264,7 +277,7 @@ pub(super) fn mlp(cx: &mut Cx, input: &Tensor, config: &Qwen3_5Config) -> Result
     )?
     .silu()?;
     let up = projection(
-        cx,
+        cx.clone(),
         "up_proj",
         input,
         config.intermediate_size,

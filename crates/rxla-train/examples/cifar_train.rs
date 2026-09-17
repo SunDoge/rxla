@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use rxla_core::{
     Buffer, CacheLimits, Client, Compiler, Conv2dOptions, DType, PendingHostUpload, Runtime, Tensor,
 };
-use rxla_nn::{Cx, Model, ModelInput, Result as NnResult};
+use rxla_nn::{BatchNorm, Cx, Linear, Model, ModelInput, Result as NnResult, TensorApply};
 use rxla_train::{DataRng, apply_model_sgd};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -138,15 +138,15 @@ fn gcd(mut lhs: usize, mut rhs: usize) -> usize {
 }
 
 fn basic_block(
-    cx: &mut Cx,
+    cx: Cx,
     input: &Tensor,
     stage_index: usize,
     block_index: usize,
     channels: i64,
     stride: i64,
 ) -> NnResult<Tensor> {
-    let mut stage = cx.scope(format!("stage{stage_index}"))?;
-    let mut block = stage.scope(format!("block{block_index}"))?;
+    let stage = cx.scope(format!("stage{stage_index}"))?;
+    let block = stage.scope(format!("block{block_index}"))?;
     let convolution = Conv2dOptions {
         strides: [stride, stride],
         padding: [[1, 1], [1, 1]],
@@ -158,7 +158,9 @@ fn basic_block(
         .options(convolution)
         .bias(false)
         .apply(input)?;
-    let hidden = block.scope("bn1")?.batch_norm().apply(&hidden)?.relu()?;
+    let hidden = hidden
+        .apply(&block.layer("bn1", BatchNorm::new())?)?
+        .relu()?;
     let hidden = block
         .scope("conv2")?
         .conv2d(channels, [3, 3])
@@ -168,7 +170,7 @@ fn basic_block(
         })
         .bias(false)
         .apply(&hidden)?;
-    let hidden = block.scope("bn2")?.batch_norm().apply(&hidden)?;
+    let hidden = hidden.apply(&block.layer("bn2", BatchNorm::new())?)?;
     let residual = if stride == 1 {
         input.clone()
     } else {
@@ -182,7 +184,7 @@ fn basic_block(
     Ok(hidden.add(&residual)?.relu()?)
 }
 
-fn classifier(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor)> {
+fn classifier(cx: Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor)> {
     let mut hidden = cx
         .scope("stem_conv")?
         .conv2d(16, [3, 3])
@@ -192,16 +194,18 @@ fn classifier(cx: &mut Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, 
         })
         .bias(false)
         .apply(&images)?;
-    hidden = cx.scope("stem_bn")?.batch_norm().apply(&hidden)?.relu()?;
+    hidden = hidden
+        .apply(&cx.layer("stem_bn", BatchNorm::new())?)?
+        .relu()?;
     for stage in 0..3 {
         let channels = 16 << stage;
         for block in 0..3 {
             let stride = if stage != 0 && block == 0 { 2 } else { 1 };
-            hidden = basic_block(cx, &hidden, stage, block, channels, stride)?;
+            hidden = basic_block(cx.clone(), &hidden, stage, block, channels, stride)?;
         }
     }
     let features = hidden.mean(&[1, 2], false)?;
-    let logits = cx.scope("head")?.linear(CLASSES).apply(&features)?;
+    let logits = features.apply(&cx.layer("head", Linear::new(CLASSES))?)?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;

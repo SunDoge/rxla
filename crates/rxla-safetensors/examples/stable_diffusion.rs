@@ -403,7 +403,7 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
 
     let clip_config = args.preset.clip();
     let clip_model =
-        Model::new(|cx: &mut Cx, tokens: Tensor| clip_text_encoder(cx, &tokens, &clip_config))
+        Model::new(|cx: Cx, tokens: Tensor| clip_text_encoder(cx, &tokens, &clip_config))
             .inputs(ModelInput::new([2, 77]).with_dtype(rxla_core::DType::I32));
     let clip_model = clip_model.trace()?;
     let clip_schema = clip_model.schema();
@@ -419,7 +419,7 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
     let context_width = args.preset.context_width();
     let timestep_width = args.preset.timestep_width();
     let denoise_model = Model::new(
-        |cx: &mut Cx,
+        |cx: Cx,
          model_sample: Tensor,
          update_sample: Tensor,
          timestep: Tensor,
@@ -465,7 +465,7 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
     };
 
     let vae_config = args.preset.vae();
-    let vae_model = Model::new(|cx: &mut Cx, latent: Tensor| -> rxla_nn::Result<Tensor> {
+    let vae_model = Model::new(|cx: Cx, latent: Tensor| -> rxla_nn::Result<Tensor> {
         Ok(autoencoder_kl_decoder(cx, &latent, &vae_config)?
             .mul_scalar(0.5)?
             .add_scalar(0.5)?

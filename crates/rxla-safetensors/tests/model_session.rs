@@ -1,13 +1,13 @@
 #![cfg(feature = "model")]
 
 use rxla_core::{CacheLimits, Client, Compiler, Tensor};
-use rxla_nn::{Cx, Model, ModelInput, Result as NnResult};
+use rxla_nn::{Cx, Linear, Model, ModelInput, Result as NnResult, TensorApply};
 use rxla_safetensors::{Dtype, SafeTensors};
 use safetensors::tensor::{TensorView, serialize};
 use std::io::Cursor;
 
-fn linear(cx: &mut Cx, input: Tensor) -> NnResult<Tensor> {
-    cx.scope("head")?.linear(2).bias(false).apply(&input)
+fn linear(cx: Cx, input: Tensor) -> NnResult<Tensor> {
+    input.apply(&cx.layer("head", Linear::new(2).bias(false))?)
 }
 
 #[test]

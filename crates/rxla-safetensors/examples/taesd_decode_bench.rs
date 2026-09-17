@@ -47,7 +47,7 @@ fn percentile(samples: &[f64], fraction: f64) -> f64 {
 fn run(args: Args) -> Result<()> {
     let client = unsafe { Client::load(&args.plugin) }?;
     let info = client.info()?;
-    let decoder = Model::new(|cx: &mut Cx, latent| taesd_decoder(cx, &latent))
+    let decoder = Model::new(|cx: Cx, latent| taesd_decoder(cx, &latent))
         .inputs(ModelInput::new([1, args.latent, args.latent, 4]));
     let decoder = decoder.trace()?;
     let schema = decoder.schema();

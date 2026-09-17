@@ -1,11 +1,10 @@
 use rxla_core::Tensor;
-use rxla_nn::{Cx, Layer, Linear, Model, ModelInput, Result};
+use rxla_nn::{Cx, Linear, Model, ModelInput, Result, TensorApply};
 
-fn apply(cx: &mut Cx, input: Tensor) -> Result<Tensor> {
-    let hidden = Linear::new(256).named("hidden");
-    let head = Linear::new(10).named("head");
-    let input = hidden.apply(cx, &input)?.relu()?;
-    head.apply(cx, &input)
+fn apply(cx: Cx, input: Tensor) -> Result<Tensor> {
+    let hidden = cx.layer("hidden", Linear::new(256))?;
+    let head = cx.layer("head", Linear::new(10))?;
+    input.apply(&hidden)?.relu()?.apply(&head)
 }
 
 fn main() -> Result<()> {

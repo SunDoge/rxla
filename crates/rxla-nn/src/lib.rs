@@ -7,7 +7,7 @@
 use rxla_core::{DType, StateGraph, StateSlot, Tensor};
 use snafu::{OptionExt, Snafu, ensure};
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex};
 
 mod applied;
 pub use applied::{
@@ -21,7 +21,7 @@ pub use initializer::Initializer;
 mod layers;
 pub use layers::{
     BatchNorm, Conv2d, Embedding, GroupNorm, ImageLayout, Layer, LayerNorm, Linear, NamedLayer,
-    QuantizedLinear, RmsNorm,
+    QuantizedLinear, RmsNorm, TensorApply,
 };
 mod outputs;
 pub use outputs::{ModelOutputValues, ModelOutputs};
@@ -213,7 +213,7 @@ where
     where
         F: ModelHandler<I, Marker>,
     {
-        trace_once_mode(self.mode, |cx| self.apply.invoke(cx, &self.inputs))
+        trace_once_mode(self.mode, |cx| self.apply.invoke(cx.clone(), &self.inputs))
     }
 
     /// Trace typed inputs once with every parameter stored as resident state.
@@ -226,7 +226,8 @@ where
     where
         F: ModelHandler<I, Marker>,
     {
-        let applied = trace_once_resident_all(self.mode, |cx| self.apply.invoke(cx, &self.inputs))?;
+        let applied =
+            trace_once_resident_all(self.mode, |cx| self.apply.invoke(cx.clone(), &self.inputs))?;
         let selection = applied.schema().select_all();
         Ok((selection, applied))
     }
@@ -242,8 +243,9 @@ where
     where
         F: ModelHandler<I, Marker>,
     {
-        let applied =
-            trace_once_resident_under(scope, self.mode, |cx| self.apply.invoke(cx, &self.inputs))?;
+        let applied = trace_once_resident_under(scope, self.mode, |cx| {
+            self.apply.invoke(cx.clone(), &self.inputs)
+        })?;
         let selection = applied.schema().select_under(scope);
         Ok((selection, applied))
     }
@@ -265,7 +267,7 @@ where
             .map(|(_, parameter)| parameter.path().to_owned())
             .collect();
         let mut applied = trace_once_resident_selected(paths, self.mode, |cx| {
-            self.apply.invoke(cx, &self.inputs)
+            self.apply.invoke(cx.clone(), &self.inputs)
         })?;
         if applied.schema() != selection.schema() {
             return Err(<F as ModelHandler<I, Marker>>::Error::from(
@@ -299,9 +301,14 @@ impl InitResidency {
 ///
 /// A model function receives this context once while [`Model::trace`] records
 /// its parameter, input, state, RNG, and tensor operations.
+#[derive(Clone)]
 pub struct Cx {
-    graph: StateGraph,
+    inner: Arc<Mutex<CxInner>>,
     scope: Vec<String>,
+}
+
+struct CxInner {
+    graph: StateGraph,
     schema: ModelSchema,
     parameter_values: BTreeMap<String, Tensor>,
     residency: InitResidency,
@@ -310,36 +317,6 @@ pub struct Cx {
     resident_parameters: BTreeMap<String, StateSlot>,
     conditional_depth: usize,
     mode: ExecutionMode,
-}
-
-/// A temporary lexical effect scope.
-///
-/// It dereferences to [`Cx`] but adds no layer methods of its own, so nested
-/// model code can use any built-in or third-party builder without name
-/// collisions. Dropping the guard restores the parent path.
-pub struct Scope<'a> {
-    cx: &'a mut Cx,
-    parent_depth: usize,
-}
-
-impl Drop for Scope<'_> {
-    fn drop(&mut self) {
-        self.cx.scope.truncate(self.parent_depth);
-    }
-}
-
-impl Deref for Scope<'_> {
-    type Target = Cx;
-
-    fn deref(&self) -> &Self::Target {
-        self.cx
-    }
-}
-
-impl DerefMut for Scope<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.cx
-    }
 }
 
 struct StateDeclaration {
@@ -364,8 +341,9 @@ struct RngStream {
 }
 
 /// A named counter-based device RNG effect in the unified model context.
-pub struct Rng<'a> {
-    stream: &'a mut RngStream,
+pub struct Rng {
+    cx: Cx,
+    path: String,
 }
 
 impl Cx {
@@ -388,31 +366,33 @@ impl Cx {
 
     fn init_with_residency(residency: InitResidency, mode: ExecutionMode) -> Self {
         Self {
-            graph: StateGraph::default(),
             scope: Vec::new(),
-            schema: ModelSchema::default(),
-            parameter_values: BTreeMap::new(),
-            residency,
-            states: BTreeMap::new(),
-            rngs: BTreeMap::new(),
-            resident_parameters: BTreeMap::new(),
-            conditional_depth: 0,
-            mode,
+            inner: Arc::new(Mutex::new(CxInner {
+                graph: StateGraph::default(),
+                schema: ModelSchema::default(),
+                parameter_values: BTreeMap::new(),
+                residency,
+                states: BTreeMap::new(),
+                rngs: BTreeMap::new(),
+                resident_parameters: BTreeMap::new(),
+                conditional_depth: 0,
+                mode,
+            })),
         }
     }
 
     pub fn mode(&self) -> ExecutionMode {
-        self.mode
+        self.inner.lock().expect("trace context lock poisoned").mode
     }
 
     /// Declare/read an F32 parameter at the current lexical scope.
-    pub fn param(&mut self, name: &str, shape: &[i64]) -> Result<Tensor> {
+    pub fn param(&self, name: &str, shape: &[i64]) -> Result<Tensor> {
         self.param_dtype(name, shape, DType::F32)
     }
 
     /// Declare/read an F32 parameter with a deterministic initialization policy.
     pub fn param_initialized(
-        &mut self,
+        &self,
         name: &str,
         shape: &[i64],
         initializer: Initializer,
@@ -425,7 +405,7 @@ impl Cx {
     /// The current symbolic tensor surface supports F32 parameters, frozen
     /// BF16 storage exposed as F32 computation values, and raw U8 storage for
     /// explicitly dequantized inference layers. Other dtypes are rejected.
-    pub fn param_dtype(&mut self, name: &str, shape: &[i64], dtype: DType) -> Result<Tensor> {
+    pub fn param_dtype(&self, name: &str, shape: &[i64], dtype: DType) -> Result<Tensor> {
         let compute_dtype = match dtype {
             DType::F16 | DType::BF16 => DType::F32,
             _ => dtype,
@@ -436,7 +416,7 @@ impl Cx {
     /// Declare/read a parameter with independent checkpoint and computation
     /// element types. Any conversion is represented explicitly in the IR.
     pub fn param_with_dtypes(
-        &mut self,
+        &self,
         name: &str,
         shape: &[i64],
         storage_dtype: DType,
@@ -448,7 +428,7 @@ impl Cx {
     /// Declare/read a mixed-precision parameter with an initialization policy
     /// applied in its checkpoint storage type.
     pub fn param_with_dtypes_initialized(
-        &mut self,
+        &self,
         name: &str,
         shape: &[i64],
         storage_dtype: DType,
@@ -459,7 +439,7 @@ impl Cx {
     }
 
     fn param_dtype_initialized(
-        &mut self,
+        &self,
         name: &str,
         shape: &[i64],
         dtype: DType,
@@ -473,7 +453,7 @@ impl Cx {
     }
 
     fn param_with_dtypes_impl(
-        &mut self,
+        &self,
         name: &str,
         shape: &[i64],
         storage_dtype: DType,
@@ -496,13 +476,15 @@ impl Cx {
             compute_dtype,
             initializer,
         };
-        let (graph, schema, parameter_values, residency, resident_parameters) = (
-            &mut self.graph,
-            &mut self.schema,
-            &mut self.parameter_values,
-            &self.residency,
-            &mut self.resident_parameters,
-        );
+        let mut inner = self.inner.lock().expect("trace context lock poisoned");
+        let CxInner {
+            graph,
+            schema,
+            parameter_values,
+            residency,
+            resident_parameters,
+            ..
+        } = &mut *inner;
         if let Some(existing) = schema.get(&path) {
             ensure!(existing == &requested, IncompatibleParameterSnafu { path });
             return Ok(parameter_values
@@ -523,14 +505,14 @@ impl Cx {
         Ok(value)
     }
 
-    /// Enter a lexical parameter/effect scope without a closure.
-    pub fn scope(&mut self, name: impl Into<String>) -> Result<Scope<'_>> {
+    /// Derive an independent handle for a child lexical effect scope.
+    pub fn scope(&self, name: impl Into<String>) -> Result<Self> {
         self.scope_path([name])
     }
 
     /// Enter a repeated block path such as `blocks.17` without formatting it at
     /// every model call site.
-    pub fn scope_index(&mut self, collection: &str, index: usize) -> Result<Scope<'_>> {
+    pub fn scope_index(&self, collection: &str, index: usize) -> Result<Self> {
         validate_name(collection)?;
         self.scope_path([collection.to_owned(), index.to_string()])
     }
@@ -539,14 +521,14 @@ impl Cx {
     /// effect context through both branches. Parameters declared in either
     /// branch are hoisted into the model ABI and captured by the branch region.
     pub fn cond<Then, Else>(
-        &mut self,
+        &self,
         predicate: &Tensor,
         then_branch: Then,
         else_branch: Else,
     ) -> Result<Tensor>
     where
-        Then: FnOnce(&mut Cx) -> Result<Tensor>,
-        Else: FnOnce(&mut Cx) -> Result<Tensor>,
+        Then: FnOnce(Cx) -> Result<Tensor>,
+        Else: FnOnce(Cx) -> Result<Tensor>,
     {
         self.cond_many(
             predicate,
@@ -560,46 +542,65 @@ impl Cx {
     /// hidden region results. Each branch starts from the same state snapshot;
     /// the selected versions become visible to subsequent model operations.
     pub fn cond_many<Then, Else>(
-        &mut self,
+        &self,
         predicate: &Tensor,
         then_branch: Then,
         else_branch: Else,
     ) -> Result<Vec<Tensor>>
     where
-        Then: FnOnce(&mut Cx) -> Result<Vec<Tensor>>,
-        Else: FnOnce(&mut Cx) -> Result<Vec<Tensor>>,
+        Then: FnOnce(Cx) -> Result<Vec<Tensor>>,
+        Else: FnOnce(Cx) -> Result<Vec<Tensor>>,
     {
-        let initial_state = self.graph.symbolic_state_versions();
+        let initial_state = self
+            .inner
+            .lock()
+            .expect("trace context lock poisoned")
+            .graph
+            .symbolic_state_versions();
         let mut visible_results = None;
-        self.conditional_depth += 1;
+        self.inner
+            .lock()
+            .expect("trace context lock poisoned")
+            .conditional_depth += 1;
+        let then_cx = self.clone();
+        let else_cx = self.clone();
         let result: Result<Vec<Tensor>> = Tensor::cond_many_with(
             predicate,
-            self,
-            |cx| {
-                let mut outputs = then_branch(cx)?;
+            &mut (),
+            |_| {
+                let mut outputs = then_branch(then_cx.clone())?;
                 visible_results = Some(outputs.len());
-                outputs.extend(cx.graph.symbolic_state_versions());
-                cx.graph.replace_symbolic_state_versions(&initial_state)?;
+                let mut inner = then_cx.inner.lock().expect("trace context lock poisoned");
+                outputs.extend(inner.graph.symbolic_state_versions());
+                inner
+                    .graph
+                    .replace_symbolic_state_versions(&initial_state)?;
                 Ok(outputs)
             },
-            |cx| {
-                let mut outputs = else_branch(cx)?;
-                outputs.extend(cx.graph.symbolic_state_versions());
-                cx.graph.replace_symbolic_state_versions(&initial_state)?;
+            |_| {
+                let mut outputs = else_branch(else_cx.clone())?;
+                let mut inner = else_cx.inner.lock().expect("trace context lock poisoned");
+                outputs.extend(inner.graph.symbolic_state_versions());
+                inner
+                    .graph
+                    .replace_symbolic_state_versions(&initial_state)?;
                 Ok(outputs)
             },
         );
-        self.conditional_depth -= 1;
-        self.graph.replace_symbolic_state_versions(&initial_state)?;
+        let mut inner = self.inner.lock().expect("trace context lock poisoned");
+        inner.conditional_depth -= 1;
+        inner
+            .graph
+            .replace_symbolic_state_versions(&initial_state)?;
         let mut outputs = result?;
         let visible_results = visible_results.unwrap_or(0);
         let merged_state = outputs.split_off(visible_results);
-        self.graph.replace_symbolic_state_versions(&merged_state)?;
+        inner.graph.replace_symbolic_state_versions(&merged_state)?;
         Ok(outputs)
     }
 
-    /// Enter several lexical path segments with one RAII guard.
-    pub fn scope_path<I, S>(&mut self, segments: I) -> Result<Scope<'_>>
+    /// Derive an independent handle extended by several lexical path segments.
+    pub fn scope_path<I, S>(&self, segments: I) -> Result<Self>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -608,58 +609,75 @@ impl Cx {
         for segment in &segments {
             validate_name(segment)?;
         }
-        let parent_depth = self.scope.len();
-        self.scope.extend(segments);
-        Ok(Scope {
-            cx: self,
-            parent_depth,
+        let mut scope = self.scope.clone();
+        scope.extend(segments);
+        Ok(Self {
+            inner: self.inner.clone(),
+            scope,
         })
     }
 
     /// Create a visible F32 model input in this trace.
-    pub fn input(&mut self, shape: &[i64]) -> Result<Tensor> {
+    pub fn input(&self, shape: &[i64]) -> Result<Tensor> {
         self.input_dtype(shape, DType::F32)
     }
 
     /// Create a visible input with an explicit dtype.
-    pub fn input_dtype(&mut self, shape: &[i64], dtype: DType) -> Result<Tensor> {
+    pub fn input_dtype(&self, shape: &[i64], dtype: DType) -> Result<Tensor> {
         let requested = ModelInputSpec {
             shape: shape.to_vec(),
             dtype,
         };
-        self.schema.push_input(requested);
+        let mut inner = self.inner.lock().expect("trace context lock poisoned");
+        inner.schema.push_input(requested);
         match dtype {
-            DType::F32 | DType::I32 | DType::U8 => Ok(self.graph.input_with_dtype(shape, dtype)?),
-            DType::BF16 => Ok(self.graph.input_bf16_as_f32(shape)?),
+            DType::F32 | DType::I32 | DType::U8 => {
+                Ok(inner.graph.input_with_dtype(shape, dtype)?)
+            }
+            DType::BF16 => Ok(inner.graph.input_bf16_as_f32(shape)?),
             _ => UnsupportedInputDTypeSnafu { dtype }.fail(),
         }
     }
 
     /// Create a graph-local I32 coordinate tensor without adding an ABI input.
     pub fn iota_i32(&self, shape: &[i64], axis: usize) -> Result<Tensor> {
-        Ok(self.graph.iota_i32(shape, axis)?)
+        Ok(self
+            .inner
+            .lock()
+            .expect("trace context lock poisoned")
+            .graph
+            .iota_i32(shape, axis)?)
     }
 
     /// Create a graph-local F32 constant without adding an ABI input.
     pub fn constant(&self, shape: &[i64], values: &[f32]) -> Result<Tensor> {
-        Ok(self.graph.constant(shape, values)?)
+        Ok(self
+            .inner
+            .lock()
+            .expect("trace context lock poisoned")
+            .graph
+            .constant(shape, values)?)
     }
 
     /// Declare or read named resident state at the current lexical scope.
-    pub fn state(&mut self, name: &str, shape: &[i64], dtype: DType) -> Result<State> {
+    pub fn state(&self, name: &str, shape: &[i64], dtype: DType) -> Result<State> {
         self.state_initialized(name, shape, dtype, Initializer::zeros())
     }
 
     /// Declare resident state with an explicit session initialization policy.
     pub fn state_initialized(
-        &mut self,
+        &self,
         name: &str,
         shape: &[i64],
         dtype: DType,
         initializer: Initializer,
     ) -> Result<State> {
         ensure!(
-            self.conditional_depth == 0,
+            self.inner
+                .lock()
+                .expect("trace context lock poisoned")
+                .conditional_depth
+                == 0,
             ConditionalEffectSnafu {
                 effect: "state declaration"
             }
@@ -667,7 +685,8 @@ impl Cx {
         validate_name(name)?;
         let path = self.path(name);
         initializer.validate(&path, shape, dtype)?;
-        if let Some(existing) = self.states.get(&path) {
+        let mut inner = self.inner.lock().expect("trace context lock poisoned");
+        if let Some(existing) = inner.states.get(&path) {
             ensure!(
                 existing.shape == shape
                     && existing.dtype == dtype
@@ -679,14 +698,14 @@ impl Cx {
                 slot: existing.slot.clone(),
             });
         }
-        self.schema.push_state(StateSpec {
+        inner.schema.push_state(StateSpec {
             path: path.clone(),
             shape: shape.to_vec(),
             dtype,
             initializer,
         });
-        let slot = self.graph.state_named(&path, shape, dtype)?;
-        self.states.insert(
+        let slot = inner.graph.state_named(&path, shape, dtype)?;
+        inner.states.insert(
             path.clone(),
             StateDeclaration {
                 slot: slot.clone(),
@@ -699,16 +718,26 @@ impl Cx {
     }
 
     /// Borrow a named Threefry stream. Repeated calls continue the same stream.
-    pub fn rng(&mut self, name: &str) -> Result<Rng<'_>> {
+    pub fn rng(&self, name: &str) -> Result<Rng> {
         ensure!(
-            self.conditional_depth == 0,
+            self.inner
+                .lock()
+                .expect("trace context lock poisoned")
+                .conditional_depth
+                == 0,
             ConditionalEffectSnafu { effect: "RNG" }
         );
         validate_name(name)?;
         let path = self.path(name);
-        if !self.rngs.contains_key(&path) {
+        if !self
+            .inner
+            .lock()
+            .expect("trace context lock poisoned")
+            .rngs
+            .contains_key(&path)
+        {
             let words = {
-                let mut scope = self.scope(name)?;
+                let scope = self.scope(name)?;
                 [
                     scope.state("key0", &[], DType::I32)?,
                     scope.state("key1", &[], DType::I32)?,
@@ -720,31 +749,49 @@ impl Cx {
                 .iter()
                 .map(|word| word.read(self))
                 .collect::<Result<Vec<_>>>()?;
-            self.rngs.insert(
-                path.clone(),
-                RngStream {
-                    key: [values[0].clone(), values[1].clone()],
-                    counters: [words[2].clone(), words[3].clone()],
-                    next: [values[2].clone(), values[3].clone()],
-                    available: self.graph.constant(&[], &[1.0])?,
-                },
-            );
+            let available = self
+                .inner
+                .lock()
+                .expect("trace context lock poisoned")
+                .graph
+                .constant(&[], &[1.0])?;
+            self.inner
+                .lock()
+                .expect("trace context lock poisoned")
+                .rngs
+                .insert(
+                    path.clone(),
+                    RngStream {
+                        key: [values[0].clone(), values[1].clone()],
+                        counters: [words[2].clone(), words[3].clone()],
+                        next: [values[2].clone(), values[3].clone()],
+                        available,
+                    },
+                );
         }
         Ok(Rng {
-            stream: self.rngs.get_mut(&path).expect("inserted above"),
+            cx: self.clone(),
+            path,
         })
     }
 
     fn validate_state(&self, state: &State) -> Result<()> {
-        match self.states.get(&state.path) {
+        match self
+            .inner
+            .lock()
+            .expect("trace context lock poisoned")
+            .states
+            .get(&state.path)
+        {
             Some(declaration) if declaration.slot.identity() == state.slot.identity() => Ok(()),
             _ => ForeignStateSnafu.fail(),
         }
     }
 
-    fn finish_rngs(&mut self) -> Result<()> {
-        for stream in std::mem::take(&mut self.rngs).into_values() {
-            self.graph.write_many_if(
+    fn finish_rngs(&self) -> Result<()> {
+        let mut inner = self.inner.lock().expect("trace context lock poisoned");
+        for stream in std::mem::take(&mut inner.rngs).into_values() {
+            inner.graph.write_many_if(
                 &stream.available,
                 &[
                     (&stream.counters[0].slot, stream.next[0].clone()),
@@ -764,11 +811,14 @@ impl Cx {
     }
 
     fn parameter_tensors(&self) -> Vec<Tensor> {
-        self.schema
+        let inner = self.inner.lock().expect("trace context lock poisoned");
+        inner
+            .schema
             .parameters()
             .iter()
             .map(|parameter| {
-                self.parameter_values
+                inner
+                    .parameter_values
                     .get(parameter.path())
                     .expect("each schema parameter has a traced tensor")
                     .clone()
@@ -777,29 +827,35 @@ impl Cx {
     }
 
     fn state_slots(&self, schema: &ModelSchema) -> Vec<(String, StateSlot)> {
+        let inner = self.inner.lock().expect("trace context lock poisoned");
         schema
             .states()
             .iter()
             .map(|state| {
                 (
                     state.path().to_owned(),
-                    self.states[state.path()].slot.clone(),
+                    inner.states[state.path()].slot.clone(),
                 )
             })
             .collect()
     }
 
     fn resident_parameter_slots(&self, schema: &ModelSchema) -> Vec<Option<StateSlot>> {
+        let inner = self.inner.lock().expect("trace context lock poisoned");
         schema
             .parameters()
             .iter()
-            .map(|parameter| self.resident_parameters.get(parameter.path()).cloned())
+            .map(|parameter| inner.resident_parameters.get(parameter.path()).cloned())
             .collect()
     }
 
     #[cfg(test)]
     fn into_schema(self) -> ModelSchema {
-        self.schema
+        self.inner
+            .lock()
+            .expect("trace context lock poisoned")
+            .schema
+            .clone()
     }
 }
 
@@ -810,32 +866,51 @@ impl State {
 
     pub fn read(&self, cx: &Cx) -> Result<Tensor> {
         cx.validate_state(self)?;
-        Ok(cx.graph.read(&self.slot)?)
+        Ok(cx
+            .inner
+            .lock()
+            .expect("trace context lock poisoned")
+            .graph
+            .read(&self.slot)?)
     }
 
-    pub fn write(&self, cx: &mut Cx, value: &Tensor) -> Result<()> {
+    pub fn write(&self, cx: &Cx, value: &Tensor) -> Result<()> {
         cx.validate_state(self)?;
-        Ok(cx.graph.write(&self.slot, value)?)
+        Ok(cx
+            .inner
+            .lock()
+            .expect("trace context lock poisoned")
+            .graph
+            .write(&self.slot, value)?)
     }
 
-    pub fn add_(&self, cx: &mut Cx, value: &Tensor) -> Result<()> {
+    pub fn add_(&self, cx: &Cx, value: &Tensor) -> Result<()> {
         let next = self.read(cx)?.add(value)?;
         self.write(cx, &next)
     }
 }
 
-impl Rng<'_> {
+impl Rng {
     fn draw(&mut self, shape: &[i64]) -> Result<rxla_core::random::ThreefryBlocks> {
+        let (key, next) = {
+            let inner = self.cx.inner.lock().expect("trace context lock poisoned");
+            let stream = &inner.rngs[&self.path];
+            (stream.key.clone(), stream.next.clone())
+        };
         let draw = rxla_core::random::threefry2x32_blocks(
-            [&self.stream.key[0], &self.stream.key[1]],
-            [&self.stream.next[0], &self.stream.next[1]],
+            [&key[0], &key[1]],
+            [&next[0], &next[1]],
             shape,
         )?;
-        self.stream.available = self
-            .stream
+        let mut inner = self.cx.inner.lock().expect("trace context lock poisoned");
+        let stream = inner
+            .rngs
+            .get_mut(&self.path)
+            .expect("RNG handle owns its context");
+        stream.available = stream
             .available
             .mul(&draw.counter_wrapped.neg()?.add_scalar(1.0)?)?;
-        self.stream.next = draw.next_counter.clone();
+        stream.next = draw.next_counter.clone();
         Ok(draw)
     }
 
@@ -865,9 +940,15 @@ impl Rng<'_> {
             }
         );
         if probability == 0.0 || probability == 1.0 {
-            return Ok(self.stream.key[0]
-                .scalar(probability)?
-                .broadcast_to(shape)?);
+            let key = self
+                .cx
+                .inner
+                .lock()
+                .expect("trace context lock poisoned")
+                .rngs[&self.path]
+                .key[0]
+                .clone();
+            return Ok(key.scalar(probability)?.broadcast_to(shape)?);
         }
         let uniform = self.uniform_f32(shape)?;
         Ok(uniform.lt_mask(&uniform.scalar(probability)?.broadcast_to(shape)?)?)
@@ -969,26 +1050,26 @@ fn validate_name(name: &str) -> Result<()> {
 /// Interpret parameter effects as declarations and return the frozen schema.
 #[cfg(test)]
 fn init_with_error<T, E>(
-    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+    body: impl FnOnce(Cx) -> std::result::Result<T, E>,
 ) -> std::result::Result<(ModelSchema, T), E>
 where
     E: From<Error>,
 {
-    let mut cx = Cx::init();
-    let result = body(&mut cx)?;
+    let cx = Cx::init();
+    let result = body(cx.clone())?;
     cx.finish_rngs().map_err(E::from)?;
     Ok((cx.into_schema(), result))
 }
 
 #[cfg(test)]
-fn init<T>(body: impl FnOnce(&mut Cx) -> Result<T>) -> Result<(ModelSchema, T)> {
+fn init<T>(body: impl FnOnce(Cx) -> Result<T>) -> Result<(ModelSchema, T)> {
     init_with_error(body)
 }
 
 #[cfg(test)]
 fn apply<T: ModelOutputs>(
     schema: &ModelSchema,
-    body: impl FnOnce(&mut Cx) -> Result<T>,
+    body: impl FnOnce(Cx) -> Result<T>,
 ) -> Result<AppliedModel> {
     let applied = trace_once(body)?;
     assert_eq!(applied.schema(), schema, "test replay changed model schema");
@@ -997,7 +1078,7 @@ fn apply<T: ModelOutputs>(
 
 #[cfg(test)]
 fn trace_once<T, E>(
-    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+    body: impl FnOnce(Cx) -> std::result::Result<T, E>,
 ) -> std::result::Result<AppliedModel, E>
 where
     T: ModelOutputs,
@@ -1008,7 +1089,7 @@ where
 
 fn trace_once_mode<T, E>(
     mode: ExecutionMode,
-    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+    body: impl FnOnce(Cx) -> std::result::Result<T, E>,
 ) -> std::result::Result<AppliedModel, E>
 where
     T: ModelOutputs,
@@ -1019,7 +1100,7 @@ where
 
 fn trace_once_resident_all<T, E>(
     mode: ExecutionMode,
-    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+    body: impl FnOnce(Cx) -> std::result::Result<T, E>,
 ) -> std::result::Result<AppliedModel, E>
 where
     T: ModelOutputs,
@@ -1031,7 +1112,7 @@ where
 fn trace_once_resident_under<T, E>(
     scope: &str,
     mode: ExecutionMode,
-    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+    body: impl FnOnce(Cx) -> std::result::Result<T, E>,
 ) -> std::result::Result<AppliedModel, E>
 where
     T: ModelOutputs,
@@ -1043,7 +1124,7 @@ where
 fn trace_once_resident_selected<T, E>(
     paths: BTreeSet<String>,
     mode: ExecutionMode,
-    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+    body: impl FnOnce(Cx) -> std::result::Result<T, E>,
 ) -> std::result::Result<AppliedModel, E>
 where
     T: ModelOutputs,
@@ -1053,21 +1134,32 @@ where
 }
 
 fn trace_once_with<T, E>(
-    mut cx: Cx,
-    body: impl FnOnce(&mut Cx) -> std::result::Result<T, E>,
+    cx: Cx,
+    body: impl FnOnce(Cx) -> std::result::Result<T, E>,
 ) -> std::result::Result<AppliedModel, E>
 where
     T: ModelOutputs,
     E: From<Error>,
 {
-    let outputs = body(&mut cx)?.into_tensors();
+    let outputs = body(cx.clone())?.into_tensors();
     cx.finish_rngs().map_err(E::from)?;
-    let schema = cx.schema.clone();
+    let schema = cx
+        .inner
+        .lock()
+        .expect("trace context lock poisoned")
+        .schema
+        .clone();
     let parameters = cx.parameter_tensors();
     let states = cx.state_slots(&schema);
     let resident_parameters = cx.resident_parameter_slots(&schema);
+    let graph = cx
+        .inner
+        .lock()
+        .expect("trace context lock poisoned")
+        .graph
+        .clone();
     Ok(AppliedModel::new(
-        cx.graph,
+        graph,
         states,
         outputs,
         parameters,
@@ -1085,7 +1177,7 @@ mod tests {
     #[test]
     fn model_execution_mode_is_selected_once_for_the_trace() {
         let training_seen = Cell::new(None);
-        Model::new(|cx: &mut Cx| -> Result<Tensor> {
+        Model::new(|cx: Cx| -> Result<Tensor> {
             training_seen.set(Some(cx.mode()));
             cx.input(&[1])
         })
@@ -1095,7 +1187,7 @@ mod tests {
         assert_eq!(training_seen.get(), Some(ExecutionMode::Training));
 
         let inference_seen = Cell::new(None);
-        Model::new(|cx: &mut Cx| -> Result<Tensor> {
+        Model::new(|cx: Cx| -> Result<Tensor> {
             inference_seen.set(Some(cx.mode()));
             cx.input(&[1])
         })
@@ -1105,9 +1197,9 @@ mod tests {
         assert_eq!(inference_seen.get(), Some(ExecutionMode::Inference));
     }
 
-    fn classifier(cx: &mut Cx) -> Result<Tensor> {
+    fn classifier(cx: Cx) -> Result<Tensor> {
         let input = cx.input(&[2, 4])?;
-        let mut scope = cx.scope("head")?;
+        let scope = cx.scope("head")?;
         let weight = scope.param("weight", &[4, 3])?;
         Ok(input.matmul(&weight)?)
     }
@@ -1156,9 +1248,9 @@ mod tests {
     #[test]
     fn ordinary_model_trace_invokes_the_apply_body_once() {
         let calls = Cell::new(0);
-        let definition = Model::new(|cx: &mut Cx, input: Tensor| {
+        let definition = Model::new(|cx: Cx, input: Tensor| {
             calls.set(calls.get() + 1);
-            cx.scope("head")?.linear(3).apply(&input)
+            input.apply(&cx.layer("head", Linear::new(3))?)
         })
         .inputs(ModelInput::new([2, 4]));
 
@@ -1172,9 +1264,9 @@ mod tests {
     #[test]
     fn all_resident_trace_invokes_the_apply_body_once() {
         let calls = Cell::new(0);
-        let definition = Model::new(|cx: &mut Cx, input: Tensor| {
+        let definition = Model::new(|cx: Cx, input: Tensor| {
             calls.set(calls.get() + 1);
-            cx.scope("head")?.linear(3).apply(&input)
+            input.apply(&cx.layer("head", Linear::new(3))?)
         })
         .inputs(ModelInput::new([2, 4]));
 
@@ -1187,7 +1279,7 @@ mod tests {
 
     #[test]
     fn schema_guided_resident_trace_is_single_pass_and_structural() {
-        fn source(cx: &mut Cx) -> Result<Tensor> {
+        fn source(cx: Cx) -> Result<Tensor> {
             cx.param("weight", &[2])
         }
 
@@ -1195,7 +1287,7 @@ mod tests {
         let schema = source.schema().clone();
         let selection = schema.select_all();
         let calls = Cell::new(0);
-        let compatible = Model::new(|cx: &mut Cx| -> Result<_> {
+        let compatible = Model::new(|cx: Cx| -> Result<_> {
             calls.set(calls.get() + 1);
             cx.param("weight", &[2])
         })
@@ -1206,16 +1298,15 @@ mod tests {
         assert_eq!(compatible.parameter_tensors(&selection).unwrap().len(), 1);
         compatible.validate_resident_parameters(&selection).unwrap();
 
-        let incompatible =
-            Model::new(|cx: &mut Cx| cx.param("weight", &[3])).trace_resident(&selection);
+        let incompatible = Model::new(|cx: Cx| cx.param("weight", &[3])).trace_resident(&selection);
         assert!(matches!(incompatible, Err(Error::ModelSchemaMismatch)));
     }
 
     #[test]
-    fn scope_guards_restore_paths_and_validate_atomically() {
+    fn independent_scope_handles_preserve_parent_paths_and_validate_atomically() {
         let (schema, _) = init(|cx| {
             {
-                let mut block = cx.scope_path(["encoder", "0"])?;
+                let block = cx.scope_path(["encoder", "0"])?;
                 block.param("weight", &[2])?;
             }
             assert!(cx.scope_path(["unused", "bad.segment"]).is_err());
@@ -1242,7 +1333,7 @@ mod tests {
 
     #[test]
     fn model_conditional_hoists_branch_parameters_into_the_abi() {
-        let applied = Model::new(|cx: &mut Cx| -> Result<Tensor> {
+        let applied = Model::new(|cx: Cx| -> Result<Tensor> {
             let predicate = cx.input_dtype(&[], DType::I32)?;
             cx.cond(
                 &predicate,
@@ -1261,24 +1352,24 @@ mod tests {
 
     #[test]
     fn model_conditional_merges_state_versions_as_hidden_results() {
-        let applied = Model::new(|cx: &mut Cx| -> Result<Tensor> {
+        let applied = Model::new(|cx: Cx| -> Result<Tensor> {
             let state = cx.state("counter", &[], DType::F32)?;
-            let value = state.read(cx)?;
+            let value = state.read(&cx)?;
             let predicate = cx.input_dtype(&[], DType::I32)?;
             let visible = cx.cond(
                 &predicate,
                 |cx| {
                     let next = value.add_scalar(1.0)?;
-                    state.write(cx, &next)?;
+                    state.write(&cx, &next)?;
                     Ok(next)
                 },
                 |cx| {
                     let next = value.add_scalar(-1.0)?;
-                    state.write(cx, &next)?;
+                    state.write(&cx, &next)?;
                     Ok(next)
                 },
             )?;
-            Ok(visible.add(&state.read(cx)?)?)
+            Ok(visible.add(&state.read(&cx)?)?)
         })
         .trace()
         .unwrap();
@@ -1291,7 +1382,7 @@ mod tests {
 
     #[test]
     fn byte_inputs_can_be_preprocessed_inside_the_model_program() {
-        fn preprocess(cx: &mut Cx) -> Result<Tensor> {
+        fn preprocess(cx: Cx) -> Result<Tensor> {
             Ok(cx
                 .input_dtype(&[2, 2, 3], DType::U8)?
                 .cast(DType::F32)?
@@ -1310,7 +1401,7 @@ mod tests {
 
     #[test]
     fn selected_parameter_tensors_drive_partial_autodiff() {
-        fn product(cx: &mut Cx) -> Result<Tensor> {
+        fn product(cx: Cx) -> Result<Tensor> {
             let body = cx.scope("body")?.param("weight", &[2])?;
             let head = cx.scope("head")?.param("weight", &[2])?;
             Ok(body.mul(&head)?.sum(&[0], false)?)
@@ -1384,7 +1475,7 @@ mod tests {
     fn linear_infers_input_features_at_its_use_site() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 4])?;
-            cx.scope("head")?.linear(3).apply(&input)
+            input.apply(&cx.layer("head", Linear::new(3))?)
         })
         .unwrap();
         assert_eq!(output.shape(), [2, 3]);
@@ -1404,7 +1495,7 @@ mod tests {
 
     #[test]
     fn program_owns_the_model_body_and_layer_builders_own_scopes() {
-        let model = Model::new(|cx: &mut Cx| -> Result<_> {
+        let model = Model::new(|cx: Cx| -> Result<_> {
             let input = cx.input(&[2, 4])?;
             let hidden = cx
                 .scope("hidden")?
@@ -1412,7 +1503,7 @@ mod tests {
                 .bias(false)
                 .apply(&input)?
                 .relu()?;
-            cx.scope("head")?.linear(3).apply(&hidden)
+            hidden.apply(&cx.layer("head", Linear::new(3))?)
         });
 
         let applied = model.trace().unwrap();
@@ -1428,12 +1519,12 @@ mod tests {
 
     #[test]
     fn one_context_composes_parameters_and_resident_state() {
-        let model = Model::new(|cx: &mut Cx| -> Result<_> {
+        let model = Model::new(|cx: Cx| -> Result<_> {
             let input = cx.input(&[2, 4])?;
-            let output = cx.scope("head")?.linear(3).apply(&input)?;
+            let output = input.apply(&cx.layer("head", Linear::new(3))?)?;
             let count = cx.state("steps", &[], DType::I32)?;
-            let next = count.read(cx)?.wrapping_add_scalar(1)?;
-            count.write(cx, &next)?;
+            let next = count.read(&cx)?.wrapping_add_scalar(1)?;
+            count.write(&cx, &next)?;
             let noise = cx.rng("sampling")?.normal_f32(output.shape())?;
             Ok(output.add(&noise.mul_scalar(0.0)?)?)
         });
@@ -1457,7 +1548,7 @@ mod tests {
 
     #[test]
     fn invalid_random_probabilities_are_typed_errors() {
-        let result = Model::new(|cx: &mut Cx| {
+        let result = Model::new(|cx: Cx| {
             let input = cx.input(&[2])?;
             Ok(cx.rng("dropout")?.dropout(&input, f32::NAN)?.output)
         })
@@ -1475,7 +1566,7 @@ mod tests {
 
     #[test]
     fn transforms_append_named_resident_state() {
-        let mut applied = Model::new(|cx: &mut Cx| cx.input(&[2])).trace().unwrap();
+        let mut applied = Model::new(|cx: Cx| cx.input(&[2])).trace().unwrap();
         let moment = applied
             .transform_state("__transform.moment", &[2], DType::F32)
             .unwrap();
@@ -1495,10 +1586,10 @@ mod tests {
     #[test]
     fn selected_parameters_can_be_traced_as_resident_state() {
         let calls = Cell::new(0);
-        let definition = Model::new(|cx: &mut Cx, input: Tensor| {
+        let definition = Model::new(|cx: Cx, input: Tensor| {
             calls.set(calls.get() + 1);
-            let body = cx.scope("body")?.linear(3).bias(false).apply(&input)?;
-            cx.scope("head")?.linear(2).bias(false).apply(&body)
+            let body = input.apply(&cx.layer("body", Linear::new(3).bias(false))?)?;
+            body.apply(&cx.layer("head", Linear::new(2).bias(false))?)
         })
         .inputs(ModelInput::new([1, 3]));
         let (selection, applied) = definition.trace_resident_under("head").unwrap();
@@ -1515,7 +1606,7 @@ mod tests {
         assert_eq!(spec.path(), "head.weight");
         assert_eq!(prepared.state_type(slot).unwrap(), (DType::F32, vec![2, 3]));
 
-        let quantized = Model::new(|cx: &mut Cx| -> Result<_> {
+        let quantized = Model::new(|cx: Cx| -> Result<_> {
             Ok(cx
                 .param_dtype("weight", &[2], DType::U8)?
                 .cast(DType::F32)?)
@@ -1533,8 +1624,8 @@ mod tests {
             Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
         }
         .unwrap();
-        let definition = Model::new(|cx: &mut Cx, input: Tensor| {
-            cx.scope("head")?.linear(2).bias(false).apply(&input)
+        let definition = Model::new(|cx: Cx, input: Tensor| {
+            input.apply(&cx.layer("head", Linear::new(2).bias(false))?)
         })
         .inputs(ModelInput::new([1, 3]));
         let (_, applied) = definition.trace_resident_all().unwrap();
@@ -1575,10 +1666,10 @@ mod tests {
     #[test]
     #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
     fn unified_context_state_and_rng_execute_as_one_program() {
-        let model = Model::new(|cx: &mut Cx| -> Result<_> {
+        let model = Model::new(|cx: Cx| -> Result<_> {
             let steps = cx.state("steps", &[], DType::I32)?;
-            let next = steps.read(cx)?.wrapping_add_scalar(1)?;
-            steps.write(cx, &next)?;
+            let next = steps.read(&cx)?.wrapping_add_scalar(1)?;
+            steps.write(&cx, &next)?;
             let draw = cx.rng("sampling")?.uniform_f32(&[4])?;
             Ok([draw, next])
         });
@@ -1612,7 +1703,7 @@ mod tests {
             groups: 2,
             ..Default::default()
         };
-        let model = |cx: &mut Cx| {
+        let model = |cx: Cx| {
             let input = cx.input(&[1, 8, 8, 4])?;
             cx.scope("conv_in")?
                 .conv2d(6, [3, 3])
@@ -1637,9 +1728,9 @@ mod tests {
 
     #[test]
     fn group_norm_nhwc_infers_affine_channel_shape() {
-        let model = |cx: &mut Cx| {
+        let model = |cx: Cx| {
             let input = cx.input(&[1, 8, 8, 32])?;
-            cx.scope("norm")?.group_norm(8).apply(&input)
+            input.apply(&cx.layer("norm", GroupNorm::new(8))?)
         };
         let (schema, output) = init(model).unwrap();
         assert_eq!(output.shape(), [1, 8, 8, 32]);
@@ -1654,7 +1745,7 @@ mod tests {
     fn layer_norm_infers_trailing_affine_shape() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 7, 32])?;
-            cx.scope("norm")?.layer_norm(1).apply(&input)
+            input.apply(&cx.layer("norm", LayerNorm::new(1))?)
         })
         .unwrap();
         assert_eq!(output.shape(), [2, 7, 32]);
@@ -1678,7 +1769,7 @@ mod tests {
         }
         .expect("load CUDA plugin");
 
-        let model = |cx: &mut Cx| {
+        let model = |cx: Cx| {
             let input = cx.input(&[2, 3])?;
             Ok(cx
                 .scope("head")?

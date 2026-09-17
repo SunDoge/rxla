@@ -69,7 +69,7 @@ fn percentile(samples: &[f64], fraction: f64) -> f64 {
 fn run(args: Args) -> Result<()> {
     let client = unsafe { Client::load(&args.plugin) }?;
     let info = client.info()?;
-    let model = Model::new(|cx: &mut Cx, sample, timestep, context| {
+    let model = Model::new(|cx: Cx, sample, timestep, context| {
         unet(cx, &sample, &timestep, &context, &UnetConfig::tiny())
     })
     .inputs((

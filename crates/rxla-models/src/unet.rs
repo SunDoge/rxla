@@ -83,14 +83,14 @@ fn convolution(padding: i64, stride: i64) -> Conv2dOptions {
     }
 }
 
-fn indexed_scope<'a>(cx: &'a mut Cx, collection: &str, index: usize) -> Result<Scope<'a>> {
+fn indexed_scope(cx: &Cx, collection: &str, index: usize) -> Result<Cx> {
     Ok(cx.scope_path([collection.to_owned(), index.to_string()])?)
 }
 
 /// Conditional latent-diffusion UNet. Samples/results are NHWC; timestep input
 /// is `[B, block_channels[0]]`; context is `[B, tokens, context_width]`.
 pub fn unet(
-    cx: &mut Cx,
+    cx: Cx,
     sample: &Tensor,
     timestep: &Tensor,
     context: &Tensor,
@@ -113,8 +113,8 @@ pub fn unet(
         kind: ModelDefinitionError::UnetTimestepWidthOverflow,
     })?;
     let temb = {
-        let mut scope = cx.scope("time_embedding")?;
-        timestep_embedding(&mut scope, timestep, time_width)?
+        let scope = cx.scope("time_embedding")?;
+        timestep_embedding(scope, timestep, time_width)?
     };
     let mut hidden = cx
         .scope("conv_in")?
@@ -124,13 +124,13 @@ pub fn unet(
     let mut residuals = vec![hidden.clone()];
 
     for (stage, &out_channels) in config.block_channels.iter().enumerate() {
-        let mut block = indexed_scope(cx, "down_blocks", stage)?;
+        let block = indexed_scope(&cx, "down_blocks", stage)?;
         let mut value = hidden;
         for layer in 0..config.layers_per_block {
             {
-                let mut scope = indexed_scope(&mut block, "resnets", layer)?;
+                let scope = indexed_scope(&block, "resnets", layer)?;
                 value = resnet2d(
-                    &mut scope,
+                    scope,
                     &value,
                     &temb,
                     Resnet2dOptions::new(out_channels)
@@ -139,9 +139,9 @@ pub fn unet(
                 )?;
             }
             if config.down_cross_attention[stage] {
-                let mut scope = indexed_scope(&mut block, "attentions", layer)?;
+                let scope = indexed_scope(&block, "attentions", layer)?;
                 value = spatial_transformer(
-                    &mut scope,
+                    scope,
                     &value,
                     context,
                     SpatialTransformerOptions::new(out_channels / config.attention_heads)
@@ -151,7 +151,7 @@ pub fn unet(
             residuals.push(value.clone());
         }
         if stage + 1 < config.block_channels.len() {
-            let mut scope = block.scope_path(["downsamplers", "0"])?;
+            let scope = block.scope_path(["downsamplers", "0"])?;
             value = scope
                 .scope("conv")?
                 .conv2d(out_channels, [3, 3])
@@ -163,11 +163,11 @@ pub fn unet(
     }
 
     hidden = {
-        let mut mid = cx.scope("mid_block")?;
+        let mid = cx.scope("mid_block")?;
         let first = {
-            let mut scope = indexed_scope(&mut mid, "resnets", 0)?;
+            let scope = indexed_scope(&mid, "resnets", 0)?;
             resnet2d(
-                &mut scope,
+                scope,
                 &hidden,
                 &temb,
                 Resnet2dOptions::new(hidden.shape()[3])
@@ -176,18 +176,18 @@ pub fn unet(
             )?
         };
         let attended = {
-            let mut scope = indexed_scope(&mut mid, "attentions", 0)?;
+            let scope = indexed_scope(&mid, "attentions", 0)?;
             spatial_transformer(
-                &mut scope,
+                scope,
                 &first,
                 context,
                 SpatialTransformerOptions::new(first.shape()[3] / config.attention_heads)
                     .groups(config.norm_groups),
             )?
         };
-        let mut scope = indexed_scope(&mut mid, "resnets", 1)?;
+        let scope = indexed_scope(&mid, "resnets", 1)?;
         resnet2d(
-            &mut scope,
+            scope,
             &attended,
             &temb,
             Resnet2dOptions::new(attended.shape()[3])
@@ -199,7 +199,7 @@ pub fn unet(
     for up_stage in 0..config.block_channels.len() {
         let channel_stage = config.block_channels.len() - 1 - up_stage;
         let out_channels = config.block_channels[channel_stage];
-        let mut block = indexed_scope(cx, "up_blocks", up_stage)?;
+        let block = indexed_scope(&cx, "up_blocks", up_stage)?;
         let mut value = hidden;
         for layer in 0..=config.layers_per_block {
             let residual = residuals.pop().ok_or(Error::InvalidModel {
@@ -207,9 +207,9 @@ pub fn unet(
             })?;
             value = Tensor::concatenate(&[value, residual], 3)?;
             {
-                let mut scope = indexed_scope(&mut block, "resnets", layer)?;
+                let scope = indexed_scope(&block, "resnets", layer)?;
                 value = resnet2d(
-                    &mut scope,
+                    scope,
                     &value,
                     &temb,
                     Resnet2dOptions::new(out_channels)
@@ -218,9 +218,9 @@ pub fn unet(
                 )?;
             }
             if config.up_cross_attention[up_stage] {
-                let mut scope = indexed_scope(&mut block, "attentions", layer)?;
+                let scope = indexed_scope(&block, "attentions", layer)?;
                 value = spatial_transformer(
-                    &mut scope,
+                    scope,
                     &value,
                     context,
                     SpatialTransformerOptions::new(out_channels / config.attention_heads)
@@ -230,7 +230,7 @@ pub fn unet(
         }
         if up_stage + 1 < config.block_channels.len() {
             value = value.upsample_nearest2d([2, 2])?;
-            let mut scope = block.scope_path(["upsamplers", "0"])?;
+            let scope = block.scope_path(["upsamplers", "0"])?;
             value = scope
                 .scope("conv")?
                 .conv2d(out_channels, [3, 3])
@@ -261,7 +261,7 @@ mod tests {
     use super::*;
     use rxla_nn::Model;
 
-    fn tiny(cx: &mut Cx) -> Result<Tensor> {
+    fn tiny(cx: Cx) -> Result<Tensor> {
         let sample = cx.input(&[1, 8, 8, 4])?;
         let timestep = cx.input(&[1, 32])?;
         let context = cx.input(&[1, 5, 32])?;
