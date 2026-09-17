@@ -135,6 +135,37 @@ region-level QKV/projection lowering (or a fused kernel with compatible
 producer and consumer layouts), rather than deleting adjacent IR transpose
 operations.
 
+### cuTile Rust feasibility experiment
+
+NVIDIA `cutile-rs` v0.3.1 was built independently and JIT-compiled with the
+PyPI `nvidia-cuda-tileiras==13.3.36` package on the same RTX 5080. Its SAXPY
+and F16 fused-attention examples execute on `sm_120`; the supplied causal and
+non-causal attention correctness checks both pass. A clean release build took
+about 18 seconds and an incremental example build about one second.
+
+The stock benchmark kernel requires every tile dimension to be a power of two,
+so Hiera's `T=196/49` and `D=96` cannot be instantiated directly. The
+experiment padded sequence lengths to `256/64`, padded the head dimension to
+128, and added a real key-padding mask. These are isolated kernel timings, not
+RXLA end-to-end results:
+
+| Hiera shape | cuTile prototype workload | cuTile | Best existing measurement |
+| --- | --- | ---: | ---: |
+| `1,256,2,64` | exact | 0.0049 ms without mask | XLA 0.0053 ms |
+| `25,196,4,96` | `25,256,4,128`, masked | 0.0367 ms | PyTorch Flash 0.0395 ms |
+| `1024,64,1,96` | `1024,64,1,128` | 0.0480 ms | cuDNN 0.0293 ms |
+| `1024,16,2,96` | `1024,16,2,128` | 0.1286 ms | XLA 0.0283 ms |
+| `25,49,8,96` | `25,64,8,128`, masked | 0.0120 ms | cuDNN 0.0077 ms |
+
+The promising case is the repeated 196-token window: it remains faster than
+the measured PyTorch and cuDNN kernels despite doing the padded workload. This
+does not yet establish numerical equivalence because the benchmark generator
+did not zero the extra 32 head-dimension values. An RXLA candidate must zero
+Q/K/V padding, discard padded output dimensions, validate against the portable
+lowering, and include conversion plus custom-call overhead. The other shapes
+show that cuTile should be one target-aware candidate rather than the universal
+attention backend.
+
 ### Isolated JAX attention backends
 
 JAX 0.11.1's public `jax.nn.dot_product_attention` was measured on the same RTX
