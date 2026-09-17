@@ -78,6 +78,10 @@ pub enum ModelDefinitionError {
     InvalidQwenTokenShape,
     #[snafu(display("Qwen3.5 requires nonempty in-range I32 token IDs"))]
     InvalidQwenTokens,
+    #[snafu(display("invalid SAM 2 Hiera configuration"))]
+    InvalidSam2HieraConfiguration,
+    #[snafu(display("SAM 2 Hiera expects a nonempty NHWC F32 image"))]
+    InvalidSam2Image,
 }
 
 #[derive(Debug, Snafu)]
@@ -106,6 +110,7 @@ pub use taesd::taesd_decoder;
 mod qwen3_5;
 pub use qwen3_5::{Qwen3_5Config, qwen3_5};
 pub mod pp_ocr_v6;
+pub mod sam2;
 
 /// Learned two-layer projection for a sinusoidal timestep embedding.
 /// The input width is inferred at the point of use.

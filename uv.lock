@@ -21,6 +21,12 @@ wheels = [
 ]
 
 [[package]]
+name = "antlr4-python3-runtime"
+version = "4.9.3"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/3e/38/7859ff46355f76f8d19459005ca000b6e7012f2f1ca597746cbcd1fbfe5e/antlr4-python3-runtime-4.9.3.tar.gz", hash = "sha256:f224469b4168294902bb1efa80a8bf7855f24c99aef99cbefc1bcd3cce77881b" }
+
+[[package]]
 name = "anyio"
 version = "4.15.1"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
@@ -362,6 +368,20 @@ wheels = [
 ]
 
 [[package]]
+name = "hydra-core"
+version = "1.3.7"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+dependencies = [
+    { name = "antlr4-python3-runtime" },
+    { name = "omegaconf" },
+    { name = "packaging" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/5c/a9/fe2c936f36881e3197a8800f5bfba078d7846d54eb5d009b445eda1ee281/hydra_core-1.3.7.tar.gz", hash = "sha256:d4ff629c7e23b64a9db5fe5b027cf7c55b633b737f03be51ef41b77ed016f75e" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/25/0c/21890c10cc94da917c8e47efc1c55cd3e56a1d25ab5947bdd35abaf9fdc1/hydra_core-1.3.7-py3-none-any.whl", hash = "sha256:83606c4a05c770f1e026e0489875f28989829d151799eabd8cfa8cbe82164515" },
+]
+
+[[package]]
 name = "idna"
 version = "3.19"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
@@ -381,6 +401,17 @@ sdist = { url = "https://mirrors.aliyun.com/pypi/packages/6f/7e/1e7e8dc30634b93e
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/b3/55/ecca97ae19075f1fac62def77731e7f535e6c1fb8f92ff08160c5e6dade8/importlib_metadata-9.0.1-py3-none-any.whl", hash = "sha256:bba5600596a7e21f3eef53281cf28d6a5195634d2f2b78ff9501a3272c6eaab0" },
 ]
+
+[[package]]
+name = "iopath"
+version = "0.1.10"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+dependencies = [
+    { name = "portalocker" },
+    { name = "tqdm" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/72/73/b3d451dfc523756cf177d3ebb0af76dc7751b341c60e2a21871be400ae29/iopath-0.1.10.tar.gz", hash = "sha256:3311c16a4d9137223e20f141655759933e1eda24f8bff166af834af3c645ef01" }
 
 [[package]]
 name = "ipython"
@@ -894,6 +925,19 @@ wheels = [
 ]
 
 [[package]]
+name = "omegaconf"
+version = "2.3.1"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+dependencies = [
+    { name = "antlr4-python3-runtime" },
+    { name = "pyyaml" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/ce/3d/e4b57b8d9008c6ebe0d5eff901f91d5700cf7bdb8c8863df817463a7fd5e/omegaconf-2.3.1.tar.gz", hash = "sha256:e5e7de64aeebeddaf8e6d3f7a783b32ac2a01c0fbd9c878012caecb891a1f42a" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/a4/0e/152509871bf30df6fc38569f52a2db9b55dd41aae957adae50a053ac7778/omegaconf-2.3.1-py3-none-any.whl", hash = "sha256:3d701d14e9a8828f1edd28bb70b725908b34277cdd72cf7d6a83f94dadc6b6a0" },
+]
+
+[[package]]
 name = "opt-einsum"
 version = "3.4.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
@@ -980,6 +1024,15 @@ wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/18/f0/a5595c1e8c3ae44b9828cb2f0fa8155e5095ef04d6327b8f61cf44a3df85/pillow-12.3.0-cp315-cp315t-win32.whl", hash = "sha256:1657923d2d45afb66526e5b933e5b3052e6bdea196c90d3abb2424e18c77dae8" },
     { url = "https://mirrors.aliyun.com/pypi/packages/e4/04/62bcd9f844984c5938d3b05264a61d797a29d3e0812341a8204af70bbdee/pillow-12.3.0-cp315-cp315t-win_amd64.whl", hash = "sha256:8cd2f7bdda092d99c9fc2fb7391354f306d01443d22785d0cbfafa2e2c8bb418" },
     { url = "https://mirrors.aliyun.com/pypi/packages/3d/68/1f3066acedf37673694a7141381d8f811ae97f30d34413d236abe7d489f1/pillow-12.3.0-cp315-cp315t-win_arm64.whl", hash = "sha256:06ff022112bc9cbf83b60f8e028d94ad87b60621706487e65f673de61610ab59" },
+]
+
+[[package]]
+name = "portalocker"
+version = "4.3.2"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/ea/7a/6371904c17aba3c455eda47001db923d77ba02a858919424d52f56f1e618/portalocker-4.3.2.tar.gz", hash = "sha256:8de4a1330f55b3c9a1d50ab1b70a765f2f136d6399ae206411117ed98c3b8e2b" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/b8/b6/3ed645ea033d5eb16e42481fc2b4719bd3a4e36b818006f34e14cf938dce/portalocker-4.3.2-py3-none-any.whl", hash = "sha256:42f0362e7343af78b25eb095c0cde300e746a0ab6647a835cc30764918490c93" },
 ]
 
 [[package]]
@@ -1231,6 +1284,8 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "diffusers" },
+    { name = "hydra-core" },
+    { name = "iopath" },
     { name = "ipython" },
     { name = "jax", extra = ["cuda13"] },
     { name = "loguru" },
@@ -1246,6 +1301,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "diffusers", specifier = ">=0.35,<0.36" },
+    { name = "hydra-core", specifier = ">=1.3,<2" },
+    { name = "iopath", specifier = ">=0.1.10,<0.2" },
     { name = "ipython", specifier = ">=9.17.1" },
     { name = "jax", extras = ["cuda13"], specifier = ">=0.11.1" },
     { name = "loguru", specifier = ">=0.7.3" },

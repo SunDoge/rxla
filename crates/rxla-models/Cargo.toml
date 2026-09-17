@@ -9,6 +9,7 @@ readme.workspace = true
 description = "Reference vision and language model definitions for RXLA"
 
 [dependencies]
+derive_setters = { workspace = true }
 image = { workspace = true }
 rayon = "1.11.0"
 rxla-nn = { path = "../rxla-nn", version = "=0.1.0-alpha.1" }

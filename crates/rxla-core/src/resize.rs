@@ -1,5 +1,7 @@
 use super::*;
 
+type CubicSamples = ([Vec<i32>; 4], [Vec<f32>; 4]);
+
 fn validate_resize(input: &Tensor, size: [i64; 2], operation: &str) -> Result<[i64; 4]> {
     if input.shape.len() != 4
         || input.shape[1] <= 0
@@ -47,6 +49,37 @@ fn linear_samples(input: i64, output: i64) -> Result<(Vec<i32>, Vec<i32>, Vec<f3
         weight.push((source - low as f64) as f32);
     }
     Ok((lower, upper, weight))
+}
+
+fn cubic_weight(distance: f64) -> f32 {
+    let distance = distance.abs();
+    let a = -0.75;
+    if distance <= 1.0 {
+        ((a + 2.0) * distance.powi(3) - (a + 3.0) * distance.powi(2) + 1.0) as f32
+    } else if distance < 2.0 {
+        (a * distance.powi(3) - 5.0 * a * distance.powi(2) + 8.0 * a * distance - 4.0 * a) as f32
+    } else {
+        0.0
+    }
+}
+
+fn cubic_samples(input: i64, output: i64) -> Result<CubicSamples> {
+    if input > i64::from(i32::MAX) {
+        return Err(err("resize input dimension exceeds I32 range"));
+    }
+    let scale = input as f64 / output as f64;
+    let mut indices = std::array::from_fn(|_| Vec::with_capacity(output as usize));
+    let mut weights = std::array::from_fn(|_| Vec::with_capacity(output as usize));
+    for coordinate in 0..output {
+        let source = (coordinate as f64 + 0.5) * scale - 0.5;
+        let base = source.floor() as i64;
+        for tap in 0..4 {
+            let index = base + tap as i64 - 1;
+            indices[tap].push(index.clamp(0, input - 1) as i32);
+            weights[tap].push(cubic_weight(source - index as f64));
+        }
+    }
+    Ok((indices, weights))
 }
 
 impl Tensor {
@@ -131,6 +164,47 @@ impl Tensor {
         let left = vertical.take(&column0, 2)?;
         let right = vertical.take(&column1, 2)?;
         left.add(&right.sub(&left)?.mul(&column_weight)?)
+    }
+
+    /// Resize an F32 NHWC tensor with PyTorch-compatible bicubic interpolation,
+    /// half-pixel centers, edge-value padding and `align_corners=false`.
+    /// Antialias filtering is not applied when downsampling.
+    pub fn resize_bicubic2d(&self, size: [i64; 2]) -> Result<Self> {
+        let [batch, height, width, channels] = validate_resize(self, size, "resize_bicubic2d")?;
+        if self.dtype() != DType::F32 {
+            return Err(err("resize_bicubic2d requires F32 input; cast explicitly"));
+        }
+        if size == [height, width] {
+            return Ok(self.clone());
+        }
+
+        let interpolate_axis = |input: &Tensor,
+                                input_size: i64,
+                                output_size: i64,
+                                axis: usize,
+                                weight_shape: [i64; 4]|
+         -> Result<Tensor> {
+            let (indices, weights) = cubic_samples(input_size, output_size)?;
+            let graph = input.graph();
+            let mut output: Option<Tensor> = None;
+            for (indices, weights) in indices.into_iter().zip(weights) {
+                let indices = graph.constant_i32(&[output_size], &indices)?;
+                let weights = graph
+                    .constant(&[output_size], &weights)?
+                    .reshape(&weight_shape)?;
+                let selected = input.take(&indices, axis)?;
+                let term = selected.mul(&weights.broadcast_to(selected.shape())?)?;
+                output = Some(match output {
+                    Some(sum) => sum.add(&term)?,
+                    None => term,
+                });
+            }
+            output.ok_or_else(|| err("bicubic interpolation has no taps"))
+        };
+
+        let vertical = interpolate_axis(self, height, size[0], 1, [1, size[0], 1, 1])?;
+        interpolate_axis(&vertical, width, size[1], 2, [1, 1, size[1], 1])?
+            .broadcast_to(&[batch, size[0], size[1], channels])
     }
 
     /// Apply per-channel `(x - mean) / stddev` normalization to an F32 NHWC

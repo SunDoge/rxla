@@ -319,6 +319,7 @@ impl InitResidency {
 pub struct Cx {
     inner: Arc<Mutex<CxInner>>,
     path: ModelPath,
+    parameter_storage_dtype: DType,
 }
 
 struct CxInner {
@@ -381,6 +382,7 @@ impl Cx {
     fn init_with_residency(residency: InitResidency, mode: ExecutionMode) -> Self {
         Self {
             path: ModelPath::root(),
+            parameter_storage_dtype: DType::F32,
             inner: Arc::new(Mutex::new(CxInner {
                 graph: StateGraph::default(),
                 schema: ModelSchema::default(),
@@ -401,7 +403,7 @@ impl Cx {
 
     /// Declare/read an F32 parameter at the current lexical scope.
     pub fn param(&self, name: &str, shape: &[i64]) -> Result<Tensor> {
-        self.param_dtype(name, shape, DType::F32)
+        self.param_dtype(name, shape, self.parameter_storage_dtype)
     }
 
     /// Declare/read an F32 parameter with a deterministic initialization policy.
@@ -411,7 +413,22 @@ impl Cx {
         shape: &[i64],
         initializer: Initializer,
     ) -> Result<Tensor> {
-        self.param_dtype_initialized(name, shape, DType::F32, Some(initializer))
+        self.param_dtype_initialized(name, shape, self.parameter_storage_dtype, Some(initializer))
+    }
+
+    /// Select storage for subsequently declared floating-point parameters.
+    ///
+    /// The returned context shares effects and path identity with `self`; only
+    /// its declaration policy changes. F16/BF16 parameters remain F32 values in
+    /// the semantic graph, allowing a low-precision compiler target to cancel
+    /// the conversion instead of converting every weight on every execution.
+    pub fn with_parameter_storage_dtype(mut self, dtype: DType) -> Result<Self> {
+        ensure!(
+            matches!(dtype, DType::F16 | DType::BF16 | DType::F32),
+            UnsupportedParameterDTypeSnafu { dtype }
+        );
+        self.parameter_storage_dtype = dtype;
+        Ok(self)
     }
 
     /// Declare/read a parameter with its storage dtype.
@@ -628,6 +645,7 @@ impl Cx {
         Ok(Self {
             inner: self.inner.clone(),
             path,
+            parameter_storage_dtype: self.parameter_storage_dtype,
         })
     }
 
@@ -1273,6 +1291,21 @@ mod tests {
             error,
             Error::UnsupportedParameterDType { dtype: DType::I32 }
         ));
+    }
+
+    #[test]
+    fn context_parameter_storage_policy_survives_scoping() {
+        let (schema, value) = init(|cx| {
+            cx.with_parameter_storage_dtype(DType::F16)?
+                .scope("encoder")?
+                .param("weight", &[2, 3])
+        })
+        .unwrap();
+
+        let parameter = schema.get("encoder.weight").unwrap();
+        assert_eq!(parameter.storage_dtype(), DType::F16);
+        assert_eq!(parameter.compute_dtype(), DType::F32);
+        assert_eq!(value.dtype(), DType::F32);
     }
 
     #[test]

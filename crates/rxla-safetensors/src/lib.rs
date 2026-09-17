@@ -368,6 +368,56 @@ impl<R: Read + Seek> SafeTensors<R> {
         Ok(buffer)
     }
 
+    /// Decode F32/F16/BF16 and upload BF16, quantizing once during loading.
+    pub fn upload_bf16_converted(&mut self, client: &Client, name: &str) -> Result<Buffer> {
+        let tensor = self.read_f32(name)?;
+        let values = tensor
+            .values
+            .into_iter()
+            .map(bf16::from_f32)
+            .collect::<Vec<_>>();
+        let upload_start = Instant::now();
+        let buffer = client
+            .buffer(&tensor.shape, &values)
+            .map_err(|source| Error::Runtime { source })?;
+        self.stats.uploads = self.stats.uploads.saturating_add(1);
+        self.stats.uploaded_bytes = self
+            .stats
+            .uploaded_bytes
+            .saturating_add((values.len() as u64).saturating_mul(2));
+        self.stats.upload_time = self
+            .stats
+            .upload_time
+            .saturating_add(upload_start.elapsed());
+        Ok(buffer)
+    }
+
+    /// Decode a floating-point tensor and upload it as native F16 storage.
+    /// Conversion happens once while loading, keeping parameter casts out of
+    /// the compiled model's execution path.
+    pub fn upload_f16(&mut self, client: &Client, name: &str) -> Result<Buffer> {
+        let tensor = self.read_f32(name)?;
+        let values = tensor
+            .values
+            .into_iter()
+            .map(f16::from_f32)
+            .collect::<Vec<_>>();
+        let upload_start = Instant::now();
+        let buffer = client
+            .buffer(&tensor.shape, &values)
+            .map_err(|source| Error::Runtime { source })?;
+        self.stats.uploads = self.stats.uploads.saturating_add(1);
+        self.stats.uploaded_bytes = self
+            .stats
+            .uploaded_bytes
+            .saturating_add((values.len() as u64).saturating_mul(2));
+        self.stats.upload_time = self
+            .stats
+            .upload_time
+            .saturating_add(upload_start.elapsed());
+        Ok(buffer)
+    }
+
     /// Upload exact U8 quantized storage without host-side dequantization.
     pub fn upload_u8(&mut self, client: &Client, name: &str) -> Result<Buffer> {
         let tensor = self.read_u8(name)?;

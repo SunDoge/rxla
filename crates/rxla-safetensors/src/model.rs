@@ -83,7 +83,8 @@ impl<R: Read + Seek> SafeTensors<R> {
             match spec.dtype() {
                 DType::U8 if info.dtype == Dtype::U8 => {}
                 DType::F32 if matches!(info.dtype, Dtype::F32 | Dtype::F16 | Dtype::BF16) => {}
-                DType::BF16 if info.dtype == Dtype::BF16 => {}
+                DType::F16 if matches!(info.dtype, Dtype::F32 | Dtype::F16 | Dtype::BF16) => {}
+                DType::BF16 if matches!(info.dtype, Dtype::F32 | Dtype::F16 | Dtype::BF16) => {}
                 dtype => {
                     return Err(invalid(format!(
                         "tensor {source:?}: incompatible checkpoint dtype for {dtype:?} storage"
@@ -106,7 +107,8 @@ impl<R: Read + Seek> SafeTensors<R> {
                 let buffer = match spec.dtype() {
                     DType::U8 => self.upload_u8(client, &source)?,
                     DType::F32 => self.upload_f32(client, &source)?,
-                    DType::BF16 => self.upload_bf16(client, &source)?,
+                    DType::F16 => self.upload_f16(client, &source)?,
+                    DType::BF16 => self.upload_bf16_converted(client, &source)?,
                     dtype => return Err(invalid(format!("unsupported parameter dtype {dtype:?}"))),
                 };
                 Ok((spec.path().to_owned(), buffer))
