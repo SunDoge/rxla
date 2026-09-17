@@ -33,14 +33,40 @@ fn decode(bytes: &[u8]) -> Result<(Artifact, Vec<TensorType>, usize)> {
                 x if x == PrimitiveType::Bf16 as i32 => DType::BF16,
                 _ => return Err(err("unsupported artifact input dtype")),
             };
-            elements(&shape.dimensions)?;
-            if !shape.tuple_shapes.is_empty() || !shape.is_dynamic_dimension.is_empty() {
-                return Err(err("artifact inputs must be static arrays"));
+            if !shape.tuple_shapes.is_empty()
+                || (!shape.is_dynamic_dimension.is_empty()
+                    && shape.is_dynamic_dimension.len() != shape.dimensions.len())
+            {
+                return Err(err("artifact input shape metadata is malformed"));
             }
-            Ok(TensorType {
-                dims: shape.dimensions.clone(),
+            let dynamic_bounds = if shape.is_dynamic_dimension.is_empty() {
+                elements(&shape.dimensions)?;
+                vec![]
+            } else {
+                shape
+                    .dimensions
+                    .iter()
+                    .zip(&shape.is_dynamic_dimension)
+                    .map(|(&dimension, &dynamic)| if dynamic { dimension } else { -1 })
+                    .collect()
+            };
+            let dims = if shape.is_dynamic_dimension.is_empty() {
+                shape.dimensions.clone()
+            } else {
+                shape
+                    .dimensions
+                    .iter()
+                    .zip(&shape.is_dynamic_dimension)
+                    .map(|(&dimension, &dynamic)| if dynamic { -1 } else { dimension })
+                    .collect()
+            };
+            let ty = TensorType {
+                dims,
                 dtype,
-            })
+                dynamic_bounds,
+            };
+            validate_tensor_type(&ty)?;
+            Ok(ty)
         })
         .collect::<Result<Vec<_>>>()?;
     Ok((artifact, inputs, output_count))
@@ -64,7 +90,21 @@ impl Executable {
                         DType::BF16 => PrimitiveType::Bf16 as i32,
                         dtype => return Err(err(format!("cannot serialize dtype {dtype:?}"))),
                     },
-                    dimensions: input.dims.clone(),
+                    dimensions: input
+                        .dims
+                        .iter()
+                        .enumerate()
+                        .map(|(axis, &dimension)| input.bound(axis).unwrap_or(dimension))
+                        .collect(),
+                    is_dynamic_dimension: if input.dynamic_bounds.is_empty() {
+                        Vec::new()
+                    } else {
+                        input
+                            .dims
+                            .iter()
+                            .map(|&dimension| dimension == -1)
+                            .collect()
+                    },
                     ..Default::default()
                 })
             })
@@ -130,11 +170,17 @@ mod tests {
             |a| a.inputs[0].element_type = PrimitiveType::F64 as i32,
             |a| a.inputs[0].dimensions = vec![-1],
             |a| a.inputs[0].dimensions = vec![i64::MAX, i64::MAX],
-            |a| a.inputs[0].is_dynamic_dimension = vec![true, false],
+            |a| a.inputs[0].is_dynamic_dimension = vec![true],
         ] {
             let mut artifact = valid();
             mutate(&mut artifact);
             assert!(decode(&artifact.encode_to_vec()).is_err());
         }
+
+        let mut dynamic = valid();
+        dynamic.inputs[0].is_dynamic_dimension = vec![true, false];
+        let (_, inputs, _) = decode(&dynamic.encode_to_vec()).unwrap();
+        assert_eq!(inputs[0].dims, [-1, 3]);
+        assert_eq!(inputs[0].dynamic_bounds, [2, -1]);
     }
 }

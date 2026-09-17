@@ -23,7 +23,7 @@ impl IrGraph {
         path: &str,
         ty: &TensorType,
     ) -> Value {
-        let result = self.tensor_type(&ty.dims, ty.dtype);
+        let result = self.tensor_type_for(ty);
         let op = StateInputOp::from_operation(Operation::new(
             &mut self.ctx,
             StateInputOp::get_concrete_op_info(),
@@ -157,8 +157,23 @@ impl IrGraph {
     }
 
     pub(super) fn tensor_type(&self, dims: &[i64], dtype: DType) -> TypeHandle {
-        supported_dtype(dtype).expect("unsupported dtype must be rejected before IR construction");
-        RankedTensorType::get(&self.ctx, ShapeAttr::new(dims), ElementTypeAttr::new(dtype)).into()
+        self.tensor_type_for(&TensorType::static_shape(dims.to_vec(), dtype))
+    }
+
+    pub(super) fn tensor_type_for(&self, ty: &TensorType) -> TypeHandle {
+        let TensorType {
+            dims,
+            dtype,
+            dynamic_bounds,
+        } = ty;
+        supported_dtype(*dtype).expect("unsupported dtype must be rejected before IR construction");
+        RankedTensorType::get(
+            &self.ctx,
+            ShapeAttr::new(dims),
+            ElementTypeAttr::new(*dtype),
+            DynamicBoundsAttr::new(dynamic_bounds),
+        )
+        .into()
     }
 
     pub(super) fn push<O: PlironOp + OneResultInterface + Clone + 'static>(
@@ -203,6 +218,7 @@ impl IrGraph {
         Ok(TensorType {
             dims: ranked.shape.values(),
             dtype: ranked.element.value(),
+            dynamic_bounds: ranked.dynamic_bounds.values(),
         })
     }
 }

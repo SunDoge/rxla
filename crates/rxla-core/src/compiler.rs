@@ -58,6 +58,7 @@ impl LoweredProgram {
         self.inputs.get(index).map(|ty| InputSpec {
             shape: &ty.dims,
             dtype: ty.dtype,
+            dynamic_bounds: &ty.dynamic_bounds,
         })
     }
 
@@ -73,6 +74,7 @@ impl LoweredProgram {
         self.outputs.get(index).map(|ty| OutputSpec {
             shape: &ty.dims,
             dtype: ty.dtype,
+            dynamic_bounds: &ty.dynamic_bounds,
         })
     }
 

@@ -5,6 +5,7 @@ fn vector_type(size: i64, dtype: DType) -> TensorType {
     TensorType {
         dims: vec![size],
         dtype,
+        dynamic_bounds: vec![],
     }
 }
 
@@ -290,6 +291,7 @@ fn stablehlo_arguments_follow_abi_numbers_not_block_order() {
             &TensorType {
                 dims: vec![1],
                 dtype: DType::F32,
+                dynamic_bounds: vec![],
             },
         )
         .unwrap();
@@ -300,6 +302,7 @@ fn stablehlo_arguments_follow_abi_numbers_not_block_order() {
             &TensorType {
                 dims: vec![2],
                 dtype: DType::F32,
+                dynamic_bounds: vec![],
             },
         )
         .unwrap();
@@ -319,6 +322,7 @@ fn direct_builder_distinguishes_invalid_operands_from_unsupported_ops() {
     let ty = TensorType {
         dims: vec![1],
         dtype: DType::F32,
+        dynamic_bounds: vec![],
     };
     assert!(
         direct
@@ -551,6 +555,7 @@ fn construction_defers_whole_ir_verification_to_analysis_boundaries() {
         &TensorType {
             dims: vec![2],
             dtype: DType::F32,
+            dynamic_bounds: vec![],
         },
     );
 
@@ -637,18 +642,21 @@ fn tensor_type_verifier_accepts_dynamic_dims_and_rejects_invalid_types() {
     let dynamic = RankedTensorType {
         shape: ShapeAttr::new(&[-1, 0, 7]),
         element: ElementTypeAttr::new(DType::F32),
+        dynamic_bounds: DynamicBoundsAttr::new(&[8, -1, -1]),
     };
     assert!(dynamic.verify(&ctx).is_ok());
 
     let invalid_shape = RankedTensorType {
         shape: ShapeAttr::new(&[-2, 7]),
         element: ElementTypeAttr::new(DType::F32),
+        dynamic_bounds: DynamicBoundsAttr::new(&[-1, -1]),
     };
     assert!(invalid_shape.verify(&ctx).is_err());
 
     let invalid_dtype = RankedTensorType {
         shape: ShapeAttr::new(&[7]),
         element: ElementTypeAttr::new(DType::from_raw(u32::MAX)),
+        dynamic_bounds: DynamicBoundsAttr::new(&[]),
     };
     assert!(invalid_dtype.verify(&ctx).is_err());
 }

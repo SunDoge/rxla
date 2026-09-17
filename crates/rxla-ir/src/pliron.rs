@@ -84,8 +84,13 @@ impl IrGraph {
         self.parameter_number(number, dims, DType::F32)
     }
 
+    #[cfg(test)]
     fn parameter_number(&mut self, number: usize, dims: &[i64], dtype: DType) -> Value {
-        let ty = self.tensor_type(dims, dtype);
+        self.parameter_typed(number, &TensorType::static_shape(dims.to_vec(), dtype))
+    }
+
+    fn parameter_typed(&mut self, number: usize, result: &TensorType) -> Value {
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(ParameterOp, &mut self.ctx, vec![ty], vec![]);
         op.set_attr_number(&self.ctx, StringAttr::new(number.to_string()));
         self.push(op)
@@ -115,7 +120,7 @@ impl IrGraph {
     }
 
     fn iota_typed(&mut self, result: &TensorType, axis: usize) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(IotaOp, &mut self.ctx, vec![ty], vec![]);
         op.set_attr_iota_axis(&self.ctx, AxisAttr::new(axis));
         self.push(op)
@@ -128,20 +133,20 @@ impl IrGraph {
         result: &TensorType,
         operation: IntegerBinary,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(IntegerBinaryOp, &mut self.ctx, vec![ty], vec![lhs, rhs]);
         op.set_attr_integer_binary(&self.ctx, IntegerBinaryAttr::new(operation));
         self.push(op)
     }
 
     fn add_typed(&mut self, lhs: Value, rhs: Value, result: &TensorType) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(AddOp, &mut self.ctx, vec![ty], vec![lhs, rhs]);
         self.push(op)
     }
 
     fn multiply_typed(&mut self, lhs: Value, rhs: Value, result: &TensorType) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(MultiplyOp, &mut self.ctx, vec![ty], vec![lhs, rhs]);
         self.push(op)
     }
@@ -152,7 +157,7 @@ impl IrGraph {
         result: &TensorType,
         elementwise: bool,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         if elementwise {
             let op = construct_op!(
                 WithElementwiseDerivativeOp,
@@ -174,7 +179,7 @@ impl IrGraph {
         result: &TensorType,
         batch_rank: usize,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(MatmulOp, &mut self.ctx, vec![ty], vec![lhs, rhs]);
         op.set_attr_batch_rank(&self.ctx, BatchRankAttr::new(batch_rank));
         self.push(op)
@@ -187,7 +192,7 @@ impl IrGraph {
         result: &TensorType,
         options: Conv2dOptions,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(Conv2dOp, &mut self.ctx, vec![ty], vec![input, kernel]);
         op.set_attr_options(&self.ctx, Conv2dOptionsAttr::new(options));
         self.push(op)
@@ -200,7 +205,7 @@ impl IrGraph {
         result: &TensorType,
         options: Conv2dOptions,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(Conv2dOihwOp, &mut self.ctx, vec![ty], vec![input, kernel]);
         op.set_attr_oihw_options(&self.ctx, Conv2dOptionsAttr::new(options));
         self.push(op)
@@ -213,7 +218,7 @@ impl IrGraph {
         result: &TensorType,
         options: Conv2dOptions,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(
             Conv2dKernelGradientOp,
             &mut self.ctx,
@@ -231,7 +236,7 @@ impl IrGraph {
         result: &TensorType,
         options: ConvTranspose2dOptions,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(
             ConvTranspose2dOp,
             &mut self.ctx,
@@ -249,7 +254,7 @@ impl IrGraph {
         options: Pool2dOptions,
         maximum: bool,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         if maximum {
             let op = construct_op!(MaxPool2dOp, &mut self.ctx, vec![ty], vec![input]);
             op.set_attr_max_pool_options(&self.ctx, Pool2dOptionsAttr::new(options));
@@ -262,7 +267,7 @@ impl IrGraph {
     }
 
     fn broadcast_typed(&mut self, input: Value, result: &TensorType, axes: Vec<usize>) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(BroadcastOp, &mut self.ctx, vec![ty], vec![input]);
         op.set_attr_broadcast_axes(&self.ctx, AxesAttr::new(&axes));
         self.push(op)
@@ -274,28 +279,28 @@ impl IrGraph {
         result: &TensorType,
         permutation: Vec<usize>,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(TransposeOp, &mut self.ctx, vec![ty], vec![input]);
         op.set_attr_permutation(&self.ctx, AxesAttr::new(&permutation));
         self.push(op)
     }
 
     fn reverse_typed(&mut self, input: Value, result: &TensorType, axes: Vec<usize>) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(ReverseOp, &mut self.ctx, vec![ty], vec![input]);
         op.set_attr_reverse_axes(&self.ctx, AxesAttr::new(&axes));
         self.push(op)
     }
 
     fn cumsum_typed(&mut self, input: Value, result: &TensorType, axis: usize) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(CumsumOp, &mut self.ctx, vec![ty], vec![input]);
         op.set_attr_axis(&self.ctx, AxisAttr::new(axis));
         self.push(op)
     }
 
     fn slice_typed(&mut self, input: Value, result: &TensorType, spec: Vec<SliceAxis>) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(SliceOp, &mut self.ctx, vec![ty], vec![input]);
         op.set_attr_spec(&self.ctx, SliceSpecAttr::new(&spec));
         self.push(op)
@@ -307,7 +312,7 @@ impl IrGraph {
         result: &TensorType,
         spec: Vec<SliceAxis>,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(SliceGradientOp, &mut self.ctx, vec![ty], vec![input]);
         op.set_attr_gradient_spec(&self.ctx, SliceSpecAttr::new(&spec));
         self.push(op)
@@ -320,20 +325,20 @@ impl IrGraph {
         result: &TensorType,
         padding: Vec<[i64; 2]>,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(PadOp, &mut self.ctx, vec![ty], vec![input, fill]);
         op.set_attr_padding(&self.ctx, PaddingAttr::new(&padding));
         self.push(op)
     }
 
     fn dynamic_slice_typed(&mut self, operands: Vec<Value>, result: &TensorType) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(DynamicSliceOp, &mut self.ctx, vec![ty], operands);
         self.push(op)
     }
 
     fn dynamic_update_slice_typed(&mut self, operands: Vec<Value>, result: &TensorType) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(DynamicUpdateSliceOp, &mut self.ctx, vec![ty], operands);
         self.push(op)
     }
@@ -345,7 +350,7 @@ impl IrGraph {
         result: &TensorType,
         axis: usize,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(TakeOp, &mut self.ctx, vec![ty], vec![input, indices]);
         op.set_attr_take_axis(&self.ctx, AxisAttr::new(axis));
         self.push(op)
@@ -358,7 +363,7 @@ impl IrGraph {
         result: &TensorType,
         axis: usize,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(
             TakeAlongAxisOp,
             &mut self.ctx,
@@ -377,7 +382,7 @@ impl IrGraph {
         axis: usize,
         batched: bool,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(
             GatherGradientOp,
             &mut self.ctx,
@@ -394,7 +399,7 @@ impl IrGraph {
         result: &TensorType,
         axis: usize,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(ConcatenateOp, &mut self.ctx, vec![ty], operands);
         op.set_attr_concatenate_axis(&self.ctx, AxisAttr::new(axis));
         self.push(op)
@@ -407,14 +412,14 @@ impl IrGraph {
         result: &TensorType,
         comparison: Comparison,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(CompareMaskOp, &mut self.ctx, vec![ty], vec![lhs, rhs]);
         op.set_attr_comparison(&self.ctx, ComparisonAttr::new(comparison));
         self.push(op)
     }
 
     fn is_finite_mask_typed(&mut self, input: Value, result: &TensorType) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(IsFiniteMaskOp, &mut self.ctx, vec![ty], vec![input]);
         self.push(op)
     }
@@ -426,7 +431,7 @@ impl IrGraph {
         on_false: Value,
         result: &TensorType,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(
             SelectOp,
             &mut self.ctx,
@@ -437,7 +442,7 @@ impl IrGraph {
     }
 
     fn reduce_sum_typed(&mut self, input: Value, result: &TensorType, axes: Vec<usize>) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(ReduceSumOp, &mut self.ctx, vec![ty], vec![input]);
         op.set_attr_reduction_axes(&self.ctx, AxesAttr::new(&axes));
         self.push(op)
@@ -449,14 +454,14 @@ impl IrGraph {
         result: &TensorType,
         axes: Vec<usize>,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(ReduceMaximumOp, &mut self.ctx, vec![ty], vec![input]);
         op.set_attr_maximum_axes(&self.ctx, AxesAttr::new(&axes));
         self.push(op)
     }
 
     fn argmax_typed(&mut self, input: Value, result: &TensorType, axis: usize) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(ArgMaxOp, &mut self.ctx, vec![ty], vec![input]);
         op.set_attr_argmax_axis(&self.ctx, AxisAttr::new(axis));
         self.push(op)
@@ -469,7 +474,7 @@ impl IrGraph {
         axis: usize,
         descending: bool,
     ) -> Value {
-        let ty = self.tensor_type(&result.dims, result.dtype);
+        let ty = self.tensor_type_for(result);
         let op = construct_op!(SortedIndicesOp, &mut self.ctx, vec![ty], vec![input]);
         op.set_attr_sort(&self.ctx, SortAttr::new(axis, descending));
         self.push(op)

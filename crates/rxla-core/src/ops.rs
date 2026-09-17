@@ -316,20 +316,10 @@ impl Tensor {
         self.mul_scalar(alpha)?.add_scalar(beta)?.clamp(0., 1.)
     }
     pub fn add_scalar(&self, value: f32) -> Result<Self> {
-        self.add(
-            &self
-                .graph()
-                .constant(&[], &[value])?
-                .broadcast_to(&self.shape)?,
-        )
+        self.add(&self.graph().constant(&[], &[value])?.broadcast_as(self)?)
     }
     pub fn mul_scalar(&self, value: f32) -> Result<Self> {
-        self.mul(
-            &self
-                .graph()
-                .constant(&[], &[value])?
-                .broadcast_to(&self.shape)?,
-        )
+        self.mul(&self.graph().constant(&[], &[value])?.broadcast_as(self)?)
     }
     /// Elementwise max(x, 0), with gradient 1 for x > 0 and 0 for x <= 0.
     /// The zero-point convention includes both signed zeros; gradients at NaN
@@ -383,6 +373,33 @@ impl Tensor {
         }
         let offset = dims.len() - self.shape.len();
         self.broadcast_in_dim(dims, &(offset..dims.len()).collect::<Vec<_>>())
+    }
+
+    /// Broadcast to another tensor's logical shape, retaining any bounded
+    /// dynamic axes in that tensor's signature.
+    pub fn broadcast_as(&self, target: &Tensor) -> Result<Self> {
+        if !Arc::ptr_eq(&self.graph().0, &target.graph().0) {
+            return Err(err("broadcast target belongs to another graph"));
+        }
+        if target.dynamic_bounds.is_empty() {
+            return self.broadcast_to(target.shape());
+        }
+        if target.ndim() < self.ndim() {
+            return Err(err("broadcast target rank is too small"));
+        }
+        let offset = target.ndim() - self.ndim();
+        let axes = (offset..target.ndim()).collect::<Vec<_>>();
+        for (&axis, &size) in axes.iter().zip(self.shape.iter()) {
+            let target_size = target.shape[axis];
+            if size != 1 && size != target_size {
+                return Err(err("incompatible bounded broadcast dimension"));
+            }
+        }
+        if self.ty() == target.ty() {
+            return Ok(self.clone());
+        }
+        self.graph()
+            .node_typed(Op::Broadcast { axes }, vec![self.node_id()], target.ty())
     }
     pub fn broadcast_in_dim(&self, dims: &[i64], axes: &[usize]) -> Result<Self> {
         elements(dims)?;

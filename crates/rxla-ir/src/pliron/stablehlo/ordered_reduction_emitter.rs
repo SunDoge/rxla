@@ -90,6 +90,7 @@ fn emit_argmax(emission: &mut OperationEmission<'_>, argmax: &StableArgMaxOp) ->
     let index_type = stablehlo_type(&TensorType {
         dims: input.dims.clone(),
         dtype: DType::I32,
+        dynamic_bounds: input.dynamic_bounds.clone(),
     })?;
     let axis = argmax
         .get_attr_stable_argmax_axis(emission.ctx)
@@ -117,6 +118,7 @@ fn emit_argmax(emission: &mut OperationEmission<'_>, argmax: &StableArgMaxOp) ->
     let reduced_float_type = stablehlo_type(&TensorType {
         dims: emission.result_type.dims.clone(),
         dtype: DType::F32,
+        dynamic_bounds: emission.result_type.dynamic_bounds.clone(),
     })?;
     writeln!(emission.body, "    {reduced}:2 = stablehlo.reduce({} init: {negative_infinity}), ({indices} init: {zero}) across dimensions = [{axis}] : ({input_type}, {index_type}, tensor<f32>, tensor<i32>) -> ({reduced_float_type}, {})", emission.operands[0], emission.ty).unwrap();
     writeln!(emission.body, "     reducer(%arg_value_lhs: tensor<f32>, %arg_value_rhs: tensor<f32>) (%arg_index_lhs: tensor<i32>, %arg_index_rhs: tensor<i32>) {{").unwrap();

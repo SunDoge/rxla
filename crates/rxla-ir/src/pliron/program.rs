@@ -100,7 +100,7 @@ impl ProgramIr {
 
         let result_types = results
             .iter()
-            .map(|result| self.graph.tensor_type(&result.dims, result.dtype))
+            .map(|result| self.graph.tensor_type_for(result))
             .collect();
         let conditional = <IfOp as PlironOp>::from_operation(Operation::new(
             &mut self.graph.ctx,
@@ -224,6 +224,7 @@ impl ProgramIr {
         Ok(TensorType {
             dims: ranked.shape.values(),
             dtype: ranked.element.value(),
+            dynamic_bounds: ranked.dynamic_bounds.values(),
         })
     }
 
@@ -305,7 +306,7 @@ impl ProgramIr {
     ) -> Result<()> {
         self.index(id)?;
         let old = self.values[id];
-        let new = self.graph.parameter_number(number, &ty.dims, ty.dtype);
+        let new = self.graph.parameter_typed(number, ty);
         old.replace_all_uses_with(&self.graph.ctx, &new);
         self.values[id] = new;
         Ok(())

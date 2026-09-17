@@ -18,14 +18,16 @@ fn real_tensor_artifact_cross_process() {
             restored.input_spec(0),
             Some(InputSpec {
                 shape: &[3],
-                dtype: DType::F32
+                dtype: DType::F32,
+                dynamic_bounds: &[],
             })
         );
         assert_eq!(
             restored.input_spec(1),
             Some(InputSpec {
                 shape: &[],
-                dtype: DType::I32
+                dtype: DType::I32,
+                dynamic_bounds: &[],
             })
         );
         assert!(restored.input_spec(2).is_none());
@@ -93,7 +95,8 @@ fn real_signature_retains_unused_inputs_and_zero_input_programs() {
         executable.input_spec(0),
         Some(InputSpec {
             shape: &[0, 3],
-            dtype: DType::I32
+            dtype: DType::I32,
+            dynamic_bounds: &[],
         })
     );
     let input = client

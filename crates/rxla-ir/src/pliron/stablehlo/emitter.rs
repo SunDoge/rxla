@@ -681,15 +681,18 @@ mod tests {
             TensorType {
                 dims: vec![2],
                 dtype: DType::F32,
+                dynamic_bounds: vec![],
             },
             TensorType {
                 dims: vec![],
                 dtype: DType::I32,
+                dynamic_bounds: vec![],
             },
         ];
         let outputs = vec![TensorType {
             dims: vec![2],
             dtype: DType::F32,
+            dynamic_bounds: vec![],
         }];
 
         let wrapped =

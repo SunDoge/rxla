@@ -4952,7 +4952,22 @@ sizes can be requested as runtime SSA values. `Tensor::static_dim(axis)` perform
 an optional metadata query; `Tensor::dim(axis)` emits
 `stablehlo.get_dimension_size` and returns a scalar I32 Tensor, and
 `shape_tensor()` concatenates those values into a rank-one I32 Tensor. Such
-values can feed structured `cond` and later `while` operations. This does not yet
-expose unbounded dynamic input types: XLA does not generally support unbounded
-dynamism, so bounded dimensions need an explicit upper-bound type rather than
-overloading raw `-1` dimensions before they are admitted at the public API.
+values can feed structured `cond` and later `while` operations.
+
+Bounded dynamic signatures use `Dim::Bounded { upper }`; raw public `-1`
+dimensions remain invalid. The upper bounds are part of `TensorType`, the Pliron
+ranked-tensor type, semantic snapshots, cache/artifact metadata and emitted
+`#stablehlo.bounds`. `Tensor::dim_bound` and executable input/output specs expose
+them without confusing an upper bound with a runtime extent. Same-shape
+elementwise operations preserve bounds, and `broadcast_as` retains the target's
+bounded shape.
+
+This is currently an IR and compilation feature, not a promise that every PJRT
+plugin can construct and execute bounded-dynamic buffers. The development ZML
+CPU plugin compiles an identity signature, but ordinary elementwise compilation
+requires XLA's internal `PadToStatic` custom-call target, which that plugin does
+not register; a normal `[3]` PJRT buffer also does not carry the physical bound
+and dynamic-size metadata required by an executable expecting `f32[<=8]`.
+Consequently tests prove typed propagation and real CPU compilation separately,
+but do not claim dynamic-buffer execution until the PJRT upload abstraction can
+represent that metadata and the backend registers the required runtime targets.

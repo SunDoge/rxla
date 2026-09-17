@@ -33,6 +33,7 @@ macro_rules! verify_multiple_bytes {
 }
 
 verify_multiple_bytes!(ShapeAttr, 8, "shape");
+verify_multiple_bytes!(DynamicBoundsAttr, 8, "dynamic bounds");
 verify_exact_bytes!(ElementTypeAttr, 4, "element type");
 verify_exact_bytes!(Conv2dOptionsAttr, 72, "conv2d options");
 verify_exact_bytes!(ConvTranspose2dOptionsAttr, 80, "conv transpose options");
@@ -304,6 +305,28 @@ impl ShapeAttr {
         let (dims, remainder) = self.bytes.as_ref().as_chunks::<8>();
         assert!(remainder.is_empty(), "malformed shape attribute");
         dims.iter().map(|&dim| i64::from_le_bytes(dim)).collect()
+    }
+}
+
+impl DynamicBoundsAttr {
+    pub(super) fn new(bounds: &[i64]) -> Self {
+        Self {
+            bytes: BytesAttr::new(
+                bounds
+                    .iter()
+                    .flat_map(|bound| bound.to_le_bytes())
+                    .collect(),
+            ),
+        }
+    }
+
+    pub(super) fn values(&self) -> Vec<i64> {
+        let (bounds, remainder) = self.bytes.as_ref().as_chunks::<8>();
+        assert!(remainder.is_empty(), "malformed dynamic bounds attribute");
+        bounds
+            .iter()
+            .map(|&bound| i64::from_le_bytes(bound))
+            .collect()
     }
 }
 

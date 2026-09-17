@@ -131,6 +131,35 @@ impl Default for Pool2dOptions {
 pub struct TensorType {
     pub dims: Vec<i64>,
     pub dtype: DType,
+    /// Upper bounds for dynamic dimensions. An empty vector means a fully
+    /// static shape; otherwise it is rank-sized, uses `-1` for static axes and
+    /// a positive upper bound for every axis whose dimension is `-1`.
+    pub dynamic_bounds: Vec<i64>,
+}
+
+impl TensorType {
+    pub fn static_shape(dims: Vec<i64>, dtype: DType) -> Self {
+        Self {
+            dims,
+            dtype,
+            dynamic_bounds: Vec::new(),
+        }
+    }
+
+    pub fn bounded(dims: Vec<i64>, dtype: DType, dynamic_bounds: Vec<i64>) -> Self {
+        Self {
+            dims,
+            dtype,
+            dynamic_bounds,
+        }
+    }
+
+    pub fn bound(&self, axis: usize) -> Option<i64> {
+        self.dynamic_bounds
+            .get(axis)
+            .copied()
+            .filter(|&bound| bound >= 0)
+    }
 }
 
 /// Static half-open slice semantics retained as a typed Pliron attribute.

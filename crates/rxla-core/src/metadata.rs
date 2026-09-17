@@ -18,6 +18,14 @@ macro_rules! shape_queries {
                     .and_then(|&size| usize::try_from(size).ok())
             }
 
+            /// Compile-time upper bound for a dynamic axis. Static axes and
+            /// invalid axes return `None`.
+            pub fn dim_bound(&self, axis: usize) -> Option<usize> {
+                self.dynamic_bounds
+                    .get(axis)
+                    .and_then(|&bound| usize::try_from(bound).ok())
+            }
+
             /// Static element count; a scalar has one element and any zero
             /// extent makes the tensor empty. This is not a byte or memory-usage
             /// estimate and does not compile, execute or synchronize the graph.

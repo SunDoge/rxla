@@ -14,6 +14,7 @@ fn index_shape(dims: &[i64]) -> TensorType {
     TensorType {
         dims: dims.to_vec(),
         dtype: DType::I32,
+        dynamic_bounds: vec![],
     }
 }
 

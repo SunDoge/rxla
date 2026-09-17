@@ -665,6 +665,7 @@ pub enum TensorLayout<'a> {
 pub struct TensorDescriptor {
     trace: Option<TraceValue>,
     pub(crate) shape: SmallVec<i64, 5>,
+    pub(crate) dynamic_bounds: SmallVec<i64, 5>,
     dtype: DType,
     binding: OnceLock<Binding>,
 }
@@ -943,12 +944,17 @@ impl Tensor {
     }
 
     pub(super) fn symbolic(graph: Graph, id: rxla_ir::SsaId, shape: &[i64], dtype: DType) -> Self {
+        Self::symbolic_typed(graph, id, &TensorType::static_shape(shape.to_vec(), dtype))
+    }
+
+    pub(super) fn symbolic_typed(graph: Graph, id: rxla_ir::SsaId, ty: &TensorType) -> Self {
         let lazy = lazy_session_for_graph(&graph);
         Self {
             descriptor: Arc::new(TensorDescriptor {
                 trace: Some(TraceValue { graph, id, lazy }),
-                shape: SmallVec::from_slice_copy(shape),
-                dtype,
+                shape: SmallVec::from_slice_copy(&ty.dims),
+                dynamic_bounds: SmallVec::from_slice_copy(&ty.dynamic_bounds),
+                dtype: ty.dtype,
                 binding: OnceLock::new(),
             }),
         }
@@ -977,6 +983,7 @@ impl Tensor {
             descriptor: Arc::new(TensorDescriptor {
                 trace: None,
                 shape: SmallVec::from_slice_copy(layout.shape().as_slice()),
+                dynamic_bounds: SmallVec::new(),
                 dtype,
                 binding: OnceLock::from(Binding::Host { storage, layout }),
             }),
@@ -1020,6 +1027,7 @@ impl Tensor {
             descriptor: Arc::new(TensorDescriptor {
                 trace: None,
                 shape: SmallVec::from_slice_copy(&shape),
+                dynamic_bounds: SmallVec::new(),
                 dtype,
                 binding: OnceLock::from(Binding::Pjrt {
                     storage: Storage::pjrt(buffer),
@@ -1037,6 +1045,7 @@ impl Tensor {
         let id = session.graph.parameter(TensorType {
             dims: self.shape().to_vec(),
             dtype: self.dtype(),
+            dynamic_bounds: self.dynamic_bounds.to_vec(),
         })?;
         session
             .inputs
@@ -1051,6 +1060,7 @@ impl Tensor {
                     lazy: Some(session),
                 }),
                 shape: self.shape.clone(),
+                dynamic_bounds: self.dynamic_bounds.clone(),
                 dtype: self.dtype(),
                 binding: self
                     .binding
@@ -1132,6 +1142,7 @@ impl Tensor {
                 descriptor: Arc::new(TensorDescriptor {
                     trace: None,
                     shape: output.shape.clone(),
+                    dynamic_bounds: output.dynamic_bounds.clone(),
                     dtype: output.dtype(),
                     binding: OnceLock::from(binding.clone()),
                 }),
@@ -1141,6 +1152,7 @@ impl Tensor {
                 TensorType {
                     dims: output.shape().to_vec(),
                     dtype: output.dtype(),
+                    dynamic_bounds: output.dynamic_bounds.to_vec(),
                 },
                 backing,
             ));
@@ -1190,6 +1202,7 @@ impl Tensor {
             descriptor: Arc::new(TensorDescriptor {
                 trace: self.trace.clone(),
                 shape: self.shape.clone(),
+                dynamic_bounds: self.dynamic_bounds.clone(),
                 dtype: self.dtype(),
                 binding: OnceLock::from(binding),
             }),
@@ -1350,6 +1363,7 @@ impl Tensor {
         TensorType {
             dims: self.shape().to_vec(),
             dtype: self.dtype(),
+            dynamic_bounds: self.dynamic_bounds.to_vec(),
         }
     }
 }

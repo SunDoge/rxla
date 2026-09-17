@@ -12,6 +12,7 @@ fn value_type(value: Value, ctx: &Context) -> pliron::result::Result<TensorType>
     Ok(TensorType {
         dims: ranked.shape.values(),
         dtype: ranked.element.value(),
+        dynamic_bounds: ranked.dynamic_bounds.values(),
     })
 }
 

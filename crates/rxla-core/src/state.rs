@@ -569,6 +569,7 @@ impl PreparedStateGraph {
         Some(OutputSpec {
             shape: &ty.dims,
             dtype: ty.dtype,
+            dynamic_bounds: &ty.dynamic_bounds,
         })
     }
 

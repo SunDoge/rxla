@@ -309,6 +309,7 @@ impl DialectConversion for RxlaToStableHlo {
                 TensorType {
                     dims: ranked.shape.values(),
                     dtype: ranked.element.value(),
+                    dynamic_bounds: ranked.dynamic_bounds.values(),
                 }
             };
             if matches!(
@@ -355,6 +356,7 @@ impl DialectConversion for RxlaToStableHlo {
                 TensorType {
                     dims: ranked.shape.values(),
                     dtype: ranked.element.value(),
+                    dynamic_bounds: ranked.dynamic_bounds.values(),
                 }
             };
             let type_handle = |ctx: &Context, ty: &TensorType| -> TypeHandle {
@@ -362,6 +364,7 @@ impl DialectConversion for RxlaToStableHlo {
                     ctx,
                     ShapeAttr::new(&ty.dims),
                     ElementTypeAttr::new(ty.dtype),
+                    DynamicBoundsAttr::new(&ty.dynamic_bounds),
                 )
                 .into()
             };
@@ -408,6 +411,7 @@ impl DialectConversion for RxlaToStableHlo {
             let scalar_type = TensorType {
                 dims: vec![],
                 dtype: DType::F32,
+                dynamic_bounds: vec![],
             };
             let (scale_constant, scale_value) = insert!(StableConstantOp, scalar_type, vec![]);
             scale_constant.set_attr_stable_value(

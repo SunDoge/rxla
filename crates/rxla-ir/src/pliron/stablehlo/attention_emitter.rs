@@ -33,12 +33,14 @@ pub(super) fn emit_attention(emission: &mut OperationEmission<'_>) -> Result<boo
             stablehlo_type(&TensorType {
                 dims: ty.dims.clone(),
                 dtype: DType::F16,
+                dynamic_bounds: ty.dynamic_bounds.clone(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
     let output_f16_ty = stablehlo_type(&TensorType {
         dims: emission.result_type.dims.clone(),
         dtype: DType::F16,
+        dynamic_bounds: emission.result_type.dynamic_bounds.clone(),
     })?;
     let converted = emission
         .operands

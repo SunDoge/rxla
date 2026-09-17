@@ -60,6 +60,14 @@ mod typed_state;
 pub use rxla_ir::IrError;
 use rxla_ir::{Binary, Op, Reduction, SliceAxis, TensorType, Unary};
 pub use rxla_ir::{Conv2dOptions, ConvTranspose2dOptions, Pool2dOptions};
+
+/// One tensor axis in a traced signature. Rank and upper bounds remain compile-
+/// time information while a bounded axis obtains its actual size at execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dim {
+    Static(i64),
+    Bounded { upper: i64 },
+}
 /// Public tensor-layer failures. Subsystems own their concrete error types;
 /// this boundary only composes them for operations spanning multiple layers.
 #[derive(Debug, Snafu)]
@@ -103,6 +111,8 @@ pub enum Error {
     AsyncEvaluationDeviceCount { actual: usize },
     #[snafu(display("tensor graph lock is poisoned"))]
     GraphLockPoisoned,
+    #[snafu(display("invalid bounded tensor shape: {message}"))]
+    InvalidBoundedShape { message: String },
     #[snafu(display("storage can only be bound to a symbolic input"))]
     StorageBindingRequiresInput,
     #[snafu(display("declared tensor dtype {declared:?} does not match storage dtype {actual:?}"))]
@@ -306,6 +316,27 @@ fn elements(dims: &[i64]) -> Result<usize> {
         })
         .ok_or_else(|| err("invalid or overflowing shape"))
 }
+
+fn validate_tensor_type(ty: &TensorType) -> Result<()> {
+    if ty.dynamic_bounds.is_empty() {
+        elements(&ty.dims)?;
+        return Ok(());
+    }
+    if ty.dynamic_bounds.len() != ty.dims.len() {
+        return Err(Error::InvalidBoundedShape {
+            message: "bounds must have the same rank as the shape".into(),
+        });
+    }
+    for (axis, (&dim, &bound)) in ty.dims.iter().zip(&ty.dynamic_bounds).enumerate() {
+        let valid = (dim >= 0 && bound == -1) || (dim == -1 && bound > 0);
+        if !valid {
+            return Err(Error::InvalidBoundedShape {
+                message: format!("axis {axis} has dimension {dim} and bound {bound}"),
+            });
+        }
+    }
+    Ok(())
+}
 impl Graph {
     fn region_marker(&self) -> Result<usize> {
         Ok(self
@@ -339,7 +370,7 @@ impl Graph {
         Ok(ids
             .into_iter()
             .zip(types)
-            .map(|(id, ty)| Tensor::symbolic(self.clone(), id, &ty.dims, ty.dtype))
+            .map(|(id, ty)| Tensor::symbolic_typed(self.clone(), id, ty))
             .collect())
     }
 
@@ -361,7 +392,7 @@ impl Graph {
         operands: Vec<rxla_ir::SsaId>,
         ty: TensorType,
     ) -> Result<rxla_ir::SsaId> {
-        elements(&ty.dims)?;
+        validate_tensor_type(&ty)?;
         let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         let operand_types = graph
             .operand_types(&operands)
@@ -373,19 +404,27 @@ impl Graph {
         Ok(graph.append(&op, &operands, &ty)?)
     }
     fn node(&self, op: Op, operands: Vec<rxla_ir::SsaId>, dims: &[i64]) -> Result<Tensor> {
-        let dtype = {
+        let (dtype, dynamic_bounds) = {
             let graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
-            dtype_rules::infer(&op, &graph.operand_types(&operands)?)?
+            let dtype = dtype_rules::infer(&op, &graph.operand_types(&operands)?)?;
+            let bounds = operands
+                .first()
+                .and_then(|&operand| graph.value_type(operand).ok())
+                .filter(|ty| ty.dims == dims)
+                .map_or_else(Vec::new, |ty| ty.dynamic_bounds);
+            (dtype, bounds)
         };
-        let id = self.push_node(
-            op,
-            operands,
-            TensorType {
-                dims: dims.to_vec(),
-                dtype,
-            },
-        )?;
-        Ok(Tensor::symbolic(self.clone(), id, dims, dtype))
+        let ty = TensorType {
+            dims: dims.to_vec(),
+            dtype,
+            dynamic_bounds,
+        };
+        self.node_typed(op, operands, ty)
+    }
+
+    fn node_typed(&self, op: Op, operands: Vec<rxla_ir::SsaId>, ty: TensorType) -> Result<Tensor> {
+        let id = self.push_node(op, operands, ty.clone())?;
+        Ok(Tensor::symbolic_typed(self.clone(), id, &ty))
     }
     pub fn input(&self, dims: &[i64]) -> Result<Tensor> {
         self.input_dtype(dims, DType::F32)
@@ -395,8 +434,34 @@ impl Graph {
         let id = self.parameter(TensorType {
             dims: dims.to_vec(),
             dtype,
+            dynamic_bounds: vec![],
         })?;
         Ok(Tensor::symbolic(self.clone(), id, dims, dtype))
+    }
+    /// Declare an input whose dynamic axes have explicit compile-time upper bounds.
+    pub fn input_shape(&self, dims: &[Dim], dtype: DType) -> Result<Tensor> {
+        let mut shape = Vec::with_capacity(dims.len());
+        let mut bounds = Vec::with_capacity(dims.len());
+        let mut dynamic = false;
+        for dim in dims {
+            match *dim {
+                Dim::Static(value) => {
+                    shape.push(value);
+                    bounds.push(-1);
+                }
+                Dim::Bounded { upper } => {
+                    shape.push(-1);
+                    bounds.push(upper);
+                    dynamic = true;
+                }
+            }
+        }
+        if !dynamic {
+            bounds.clear();
+        }
+        let ty = TensorType::bounded(shape, dtype, bounds);
+        let id = self.parameter(ty.clone())?;
+        Ok(Tensor::symbolic_typed(self.clone(), id, &ty))
     }
     /// Declare BF16 input storage and explicitly convert it to an F32 Tensor
     /// inside the compiled graph. Useful for frozen BF16 weights. Finite BF16
@@ -412,11 +477,12 @@ impl Graph {
         let id = self.parameter(TensorType {
             dims: dims.to_vec(),
             dtype: DType::BF16,
+            dynamic_bounds: vec![],
         })?;
         self.node(Op::Bf16ToFloat, vec![id], dims)
     }
     fn parameter(&self, ty: TensorType) -> Result<rxla_ir::SsaId> {
-        elements(&ty.dims)?;
+        validate_tensor_type(&ty)?;
         let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         let number = graph.parameter_count()?;
         let op = Op::Parameter(number);
@@ -434,6 +500,7 @@ impl Graph {
         let ty = TensorType {
             dims: dims.to_vec(),
             dtype,
+            dynamic_bounds: vec![],
         };
         let mut graph = self.0.lock().map_err(|_| Error::GraphLockPoisoned)?;
         let number = graph.parameter_count()?;
@@ -741,6 +808,16 @@ impl Tensor {
 pub struct InputSpec<'a> {
     pub shape: &'a [i64],
     pub dtype: DType,
+    pub dynamic_bounds: &'a [i64],
+}
+
+impl InputSpec<'_> {
+    pub fn bound(&self, axis: usize) -> Option<i64> {
+        self.dynamic_bounds
+            .get(axis)
+            .copied()
+            .filter(|&bound| bound >= 0)
+    }
 }
 
 /// Borrowed static description of one ordered tensor result.
@@ -748,6 +825,7 @@ pub struct InputSpec<'a> {
 pub struct OutputSpec<'a> {
     pub shape: &'a [i64],
     pub dtype: DType,
+    pub dynamic_bounds: &'a [i64],
 }
 
 pub struct Executable {
@@ -777,6 +855,7 @@ impl Executable {
         self.inputs.get(index).map(|ty| InputSpec {
             shape: &ty.dims,
             dtype: ty.dtype,
+            dynamic_bounds: &ty.dynamic_bounds,
         })
     }
     /// Number of top-level tensor results. Shapes can be queried on returned
@@ -895,7 +974,17 @@ impl Executable {
         }
         for (index, (buffer, expected)) in inputs.iter().zip(&self.inputs).enumerate() {
             let actual = buffer.dimensions()?;
-            if actual != expected.dims {
+            let shape_matches = actual.len() == expected.dims.len()
+                && actual.iter().enumerate().all(|(axis, &dimension)| {
+                    if expected.dims[axis] == -1 {
+                        expected
+                            .bound(axis)
+                            .is_some_and(|bound| dimension >= 0 && dimension <= bound)
+                    } else {
+                        dimension == expected.dims[axis]
+                    }
+                });
+            if !shape_matches {
                 return Err(Error::ExecutableInputShape {
                     index,
                     expected: expected.dims.clone(),

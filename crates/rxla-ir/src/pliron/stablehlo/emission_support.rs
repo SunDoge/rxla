@@ -147,6 +147,7 @@ pub(super) fn value_type(ctx: &Context, value: Value) -> TensorType {
     TensorType {
         dims: ranked.shape.values(),
         dtype: ranked.element.value(),
+        dynamic_bounds: ranked.dynamic_bounds.values(),
     }
 }
 
@@ -234,13 +235,36 @@ pub(super) fn stablehlo_type(ty: &TensorType) -> Result<String> {
     let dimensions = ty
         .dims
         .iter()
-        .map(i64::to_string)
+        .map(|&dimension| {
+            if dimension == -1 {
+                "?".into()
+            } else {
+                dimension.to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join("x");
+    let bounds = if ty.dynamic_bounds.is_empty() {
+        String::new()
+    } else {
+        let values = ty
+            .dynamic_bounds
+            .iter()
+            .map(|&bound| {
+                if bound == -1 {
+                    "?".into()
+                } else {
+                    bound.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(", #stablehlo.bounds<{values}>")
+    };
     Ok(if dimensions.is_empty() {
         format!("tensor<{element}>")
     } else {
-        format!("tensor<{dimensions}x{element}>")
+        format!("tensor<{dimensions}x{element}{bounds}>")
     })
 }
 
@@ -248,13 +272,36 @@ pub(super) fn stablehlo_predicate_type(ty: &TensorType) -> String {
     let dimensions = ty
         .dims
         .iter()
-        .map(i64::to_string)
+        .map(|&dimension| {
+            if dimension == -1 {
+                "?".into()
+            } else {
+                dimension.to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join("x");
+    let bounds = if ty.dynamic_bounds.is_empty() {
+        String::new()
+    } else {
+        let values = ty
+            .dynamic_bounds
+            .iter()
+            .map(|&bound| {
+                if bound == -1 {
+                    "?".into()
+                } else {
+                    bound.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(", #stablehlo.bounds<{values}>")
+    };
     if dimensions.is_empty() {
         "tensor<i1>".into()
     } else {
-        format!("tensor<{dimensions}xi1>")
+        format!("tensor<{dimensions}xi1{bounds}>")
     }
 }
 
@@ -352,6 +399,7 @@ mod tests {
         let ty = TensorType {
             dims: vec![2, 3],
             dtype: DType::F32,
+            dynamic_bounds: vec![],
         };
         let bytes = [1., 2., 3., 4., 5., 6.]
             .into_iter()

@@ -36,6 +36,12 @@ pub(super) struct ShapeAttr {
     pub(super) bytes: BytesAttr,
 }
 
+#[pliron_attr(name = "rxla.dynamic_bounds", format = "$bytes")]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(super) struct DynamicBoundsAttr {
+    pub(super) bytes: BytesAttr,
+}
+
 #[pliron_attr(name = "rxla.element_type", format = "$bytes")]
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(super) struct ElementTypeAttr {
@@ -44,19 +50,21 @@ pub(super) struct ElementTypeAttr {
 
 #[pliron_type(
     name = "rxla.tensor",
-    format = "`<` $shape `x` $element `>`",
+    format = "`<` $shape `x` $element `,` $dynamic_bounds `>`",
     generate_get = true
 )]
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(super) struct RankedTensorType {
     pub(super) shape: ShapeAttr,
     pub(super) element: ElementTypeAttr,
+    pub(super) dynamic_bounds: DynamicBoundsAttr,
 }
 
 impl Verify for RankedTensorType {
     fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
         self.shape.verify(ctx)?;
         self.element.verify(ctx)?;
+        self.dynamic_bounds.verify(ctx)?;
         if self.shape.values().iter().any(|&dimension| dimension < -1) {
             return pliron::verify_err_noloc!(
                 "rxla tensor dimensions must be nonnegative or -1 for dynamic"
@@ -64,6 +72,22 @@ impl Verify for RankedTensorType {
         }
         if supported_dtype(self.element.value()).is_none() {
             return pliron::verify_err_noloc!("rxla tensor has an unsupported element type");
+        }
+        let bounds = self.dynamic_bounds.values();
+        let shape = self.shape.values();
+        if !bounds.is_empty()
+            && (bounds.len() != shape.len()
+                || shape
+                    .iter()
+                    .zip(&bounds)
+                    .any(|(&dim, &bound)| (dim == -1 && bound <= 0) || (dim >= 0 && bound != -1)))
+        {
+            return pliron::verify_err_noloc!(
+                "rxla dynamic bounds must be rank-sized, positive for dynamic axes and -1 for static axes"
+            );
+        }
+        if bounds.is_empty() && shape.contains(&-1) {
+            return pliron::verify_err_noloc!("rxla dynamic dimensions require upper bounds");
         }
         Ok(())
     }

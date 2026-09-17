@@ -11,8 +11,8 @@
 use crate::disk_cache::DiskCache;
 use crate::tensor_handle::EvaluationLease;
 use crate::{
-    Buffer, CacheLimits, CacheStats, Compiler, Error, Executable, ExecutionPlan, Graph, InputSpec,
-    LoweredProgram, OutputSpec, PendingExecution, PlanningPolicy, Result, Tensor, err,
+    Buffer, CacheLimits, CacheStats, Compiler, Dim, Error, Executable, ExecutionPlan, Graph,
+    InputSpec, LoweredProgram, OutputSpec, PendingExecution, PlanningPolicy, Result, Tensor, err,
 };
 use prost::Message;
 use rxla_pjrt::{Client, ClientOptions, DType};
@@ -66,6 +66,10 @@ impl Tracer {
 
     pub fn input_dtype(&self, shape: &[i64], dtype: DType) -> Result<Tensor> {
         self.graph.input_dtype(shape, dtype)
+    }
+
+    pub fn input_shape(&self, shape: &[Dim], dtype: DType) -> Result<Tensor> {
+        self.graph.input_shape(shape, dtype)
     }
 
     pub fn input_bf16_as_f32(&self, shape: &[i64]) -> Result<Tensor> {
@@ -1444,6 +1448,7 @@ mod tests {
                 crate::TensorType {
                     dims: vec![1, 2, 2, 1],
                     dtype: crate::DType::F32,
+                    dynamic_bounds: vec![],
                 },
             )
             .unwrap_err();

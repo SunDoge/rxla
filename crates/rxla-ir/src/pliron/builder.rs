@@ -62,7 +62,7 @@ impl IrGraph {
         macro_rules! unary {
             ($name:ident) => {{
                 let [input] = operands else { return None };
-                let ty = self.tensor_type(&result.dims, result.dtype);
+                let ty = self.tensor_type_for(result);
                 let op = construct_op!($name, &mut self.ctx, vec![ty], vec![*input]);
                 self.push(op)
             }};
@@ -70,13 +70,13 @@ impl IrGraph {
         macro_rules! binary {
             ($name:ident) => {{
                 let [lhs, rhs] = operands else { return None };
-                let ty = self.tensor_type(&result.dims, result.dtype);
+                let ty = self.tensor_type_for(result);
                 let op = construct_op!($name, &mut self.ctx, vec![ty], vec![*lhs, *rhs]);
                 self.push(op)
             }};
         }
         Some(match operation {
-            Op::Parameter(number) => self.parameter_number(*number, &result.dims, result.dtype),
+            Op::Parameter(number) => self.parameter_typed(*number, result),
             Op::StateInput {
                 number,
                 state_id,
@@ -97,7 +97,7 @@ impl IrGraph {
                 api_version,
                 result_dtype: _,
             } => {
-                let ty = self.tensor_type(&result.dims, result.dtype);
+                let ty = self.tensor_type_for(result);
                 let op = construct_op!(CustomCallOp, &mut self.ctx, vec![ty], operands.to_vec());
                 op.set_attr_custom_call_target(&self.ctx, StringAttr::new(target.clone()));
                 op.set_attr_custom_call_backend_config(
@@ -148,7 +148,7 @@ impl IrGraph {
                 if !matches!(operands, [_, _, _] | [_, _, _, _]) {
                     return None;
                 }
-                let ty = self.tensor_type(&result.dims, result.dtype);
+                let ty = self.tensor_type_for(result);
                 let op = construct_op!(AttentionOp, &mut self.ctx, vec![ty], operands.to_vec());
                 op.set_attr_attention_scale(&self.ctx, AttentionScaleAttr::new(*scale));
                 self.push(op)

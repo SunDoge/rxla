@@ -53,7 +53,8 @@ fn prepared_state_metadata_validates_schema_without_plugin() {
         visible.output_spec(0),
         Some(rxla_core::OutputSpec {
             shape: &[],
-            dtype: rxla_core::DType::I32
+            dtype: rxla_core::DType::I32,
+            dynamic_bounds: &[],
         })
     );
     assert!(visible.output_spec(1).is_none());

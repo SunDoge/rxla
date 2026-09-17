@@ -197,6 +197,7 @@ fn demote_float_results(ctx: &Context, root: Ptr<Operation>, dtype: DType) {
                         ctx,
                         ShapeAttr::new(&ty.dims),
                         ElementTypeAttr::new(dtype),
+                        DynamicBoundsAttr::new(&ty.dynamic_bounds),
                     )
                     .into(),
                 );

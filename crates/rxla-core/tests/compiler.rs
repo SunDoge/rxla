@@ -44,7 +44,11 @@ fn prepared_signature_reports_storage_types_and_compact_parameter_order() {
     {
         assert_eq!(
             full.output_spec(i),
-            Some(rxla_core::OutputSpec { shape, dtype })
+            Some(rxla_core::OutputSpec {
+                shape,
+                dtype,
+                dynamic_bounds: &[],
+            })
         );
     }
     assert!(full.output_spec(3).is_none());
@@ -60,7 +64,14 @@ fn prepared_signature_reports_storage_types_and_compact_parameter_order() {
     .into_iter()
     .enumerate()
     {
-        assert_eq!(full.input_spec(i), Some(InputSpec { shape, dtype }));
+        assert_eq!(
+            full.input_spec(i),
+            Some(InputSpec {
+                shape,
+                dtype,
+                dynamic_bounds: &[],
+            })
+        );
     }
     assert!(full.input_spec(3).is_none());
     assert!(full.input_spec(usize::MAX).is_none());
