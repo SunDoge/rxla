@@ -217,8 +217,7 @@ fn basic_block(
     channels: i64,
     stride: i64,
 ) -> NnResult<Tensor> {
-    let stage = cx.scope(format!("stage{stage_index}"))?;
-    let block = stage.scope(format!("block{block_index}"))?;
+    let block = cx.at(("stages", stage_index, "blocks", block_index))?;
     let conv1 = block.layer(
         "conv1",
         Conv2d::new(channels, [3, 3])

@@ -23,6 +23,8 @@ pub use layers::{
     BatchNorm, Conv2d, Embedding, GroupNorm, ImageLayout, Layer, LayerNorm, Linear, NamedLayer,
     QuantizedLinear, RmsNorm, TensorApply,
 };
+mod model_path;
+pub use model_path::{ModelPath, ModelPathSpec};
 mod outputs;
 pub use outputs::{ModelOutputValues, ModelOutputs};
 mod schema;
@@ -304,7 +306,7 @@ impl InitResidency {
 #[derive(Clone)]
 pub struct Cx {
     inner: Arc<Mutex<CxInner>>,
-    scope: Vec<String>,
+    path: ModelPath,
 }
 
 struct CxInner {
@@ -366,7 +368,7 @@ impl Cx {
 
     fn init_with_residency(residency: InitResidency, mode: ExecutionMode) -> Self {
         Self {
-            scope: Vec::new(),
+            path: ModelPath::root(),
             inner: Arc::new(Mutex::new(CxInner {
                 graph: StateGraph::default(),
                 schema: ModelSchema::default(),
@@ -507,14 +509,13 @@ impl Cx {
 
     /// Derive an independent handle for a child lexical effect scope.
     pub fn scope(&self, name: impl Into<String>) -> Result<Self> {
-        self.scope_path([name])
+        self.at(name.into())
     }
 
     /// Enter a repeated block path such as `blocks.17` without formatting it at
     /// every model call site.
     pub fn scope_index(&self, collection: &str, index: usize) -> Result<Self> {
-        validate_name(collection)?;
-        self.scope_path([collection.to_owned(), index.to_string()])
+        self.at((collection, index))
     }
 
     /// Build a structured conditional while threading this model's parameter
@@ -605,16 +606,27 @@ impl Cx {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let segments = segments.into_iter().map(Into::into).collect::<Vec<_>>();
-        for segment in &segments {
-            validate_name(segment)?;
+        let mut path = self.path.clone();
+        for segment in segments {
+            path = path.at(segment.into())?;
         }
-        let mut scope = self.scope.clone();
-        scope.extend(segments);
         Ok(Self {
             inner: self.inner.clone(),
-            scope,
+            path,
         })
+    }
+
+    /// Derive a context positioned at an arbitrary relative model path.
+    pub fn at<P: ModelPathSpec>(&self, path: P) -> Result<Self> {
+        Ok(Self {
+            inner: self.inner.clone(),
+            path: self.path.at(path)?,
+        })
+    }
+
+    /// Return the pure coordinate of this context in the model tree.
+    pub fn model_path(&self) -> &ModelPath {
+        &self.path
     }
 
     /// Create a visible F32 model input in this trace.
@@ -803,11 +815,9 @@ impl Cx {
     }
 
     fn path(&self, name: &str) -> String {
-        if self.scope.is_empty() {
-            name.to_owned()
-        } else {
-            format!("{}.{}", self.scope.join("."), name)
-        }
+        self.path
+            .parameter(name)
+            .expect("effect names are validated before paths are constructed")
     }
 
     fn parameter_tensors(&self) -> Vec<Tensor> {
@@ -1320,14 +1330,16 @@ mod tests {
     }
 
     #[test]
-    fn indexed_scopes_build_stable_repeated_block_paths() {
+    fn tuple_paths_build_stable_mixed_segment_trees() {
         let (schema, _) = init(|cx| {
-            cx.scope_index("blocks", 17)?.param("weight", &[2])?;
+            let block = cx.at(("encoder", "blocks", 17usize))?;
+            assert_eq!(block.model_path().to_string(), "encoder.blocks.17");
+            block.param("weight", &[2])?;
             cx.param("root", &[1])
         })
         .unwrap();
 
-        assert!(schema.get("blocks.17.weight").is_some());
+        assert!(schema.get("encoder.blocks.17.weight").is_some());
         assert!(schema.get("root").is_some());
     }
 
