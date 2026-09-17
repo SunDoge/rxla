@@ -49,8 +49,9 @@ impl Flux2Config {
         }
     }
 
-    #[cfg(test)]
-    fn tiny() -> Self {
+    /// Small shape-compatible topology for compiler and numerical conformance
+    /// tests. It preserves all FLUX.2 block kinds and four-axis RoPE.
+    pub fn tiny() -> Self {
         Self {
             in_channels: 8,
             context_in_dim: 12,
@@ -61,7 +62,7 @@ impl Flux2Config {
             axes_dims_rope: vec![2, 2, 2, 2],
             rope_theta: 2000.0,
             mlp_ratio: 2,
-            timestep_channels: 8,
+            timestep_channels: 256,
             epsilon: 1e-6,
         }
     }

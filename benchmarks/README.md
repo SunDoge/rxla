@@ -167,3 +167,35 @@ steps. It completed in `818.6 ms` after `687.6 ms` compilation; using its fixed
 seed, its final image differed from CUDA by maximum/mean absolute values of
 `0.000879` / `0.000142`. This is a compatibility check, not a CPU performance
 claim.
+
+## FLUX.2 Klein transformer conformance
+
+The tiny conformance topology retains both FLUX.2 block kinds, four-axis RoPE,
+shared modulation and the official checkpoint paths while reducing the hidden
+width and depth. Generate deterministic weights, inputs and the PyTorch oracle
+from an official `black-forest-labs/flux2` checkout:
+
+```sh
+uv run python benchmarks/flux2_oracle.py \
+  /path/to/flux2 /tmp/rxla-flux2-oracle
+```
+
+Run the same checkpoint and inputs through RXLA:
+
+```sh
+cargo run -p rxla-safetensors --features model --example flux2_oracle -- \
+  "$PJRT_CUDA_PLUGIN_PATH" \
+  /tmp/rxla-flux2-oracle/weights.safetensors \
+  /tmp/rxla-flux2-oracle/oracle.safetensors
+```
+
+September 18, 2026 results with F32 weights and inputs:
+
+| Backend | maximum absolute error | mean absolute error |
+| --- | ---: | ---: |
+| ZML CPU PJRT | 0.000000298 | 0.000000151 |
+| JAX CUDA 13 PJRT, RTX 5080 | 0.000000328 | 0.000000157 |
+
+These measurements validate numerical semantics rather than performance; the
+topology has 58,288 parameters. The full Klein 4B schema is separately traced
+in Rust tests as 149 tensors and 3,875,544,576 parameters.
