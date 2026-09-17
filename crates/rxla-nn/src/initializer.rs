@@ -275,9 +275,10 @@ mod tests {
             Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
         }
         .unwrap();
-        let definition =
-            Model::new(|cx: Cx, input: Tensor| input.apply(&cx.layer("head", Linear::new(2))?))
-                .inputs(crate::ModelInput::new([1, 3]));
+        let definition = Model::new(|cx: Cx, input: Tensor| {
+            input.apply(&cx.named_layer("head", Linear::new(2))?)
+        })
+        .inputs(crate::ModelInput::new([1, 3]));
         let model = definition.trace().unwrap();
         let schema = model.schema();
         let first = schema.initialize(&client, 42).unwrap();
@@ -309,9 +310,10 @@ mod tests {
             Err(Error::MissingInitializer { path }) if path == "external"
         ));
 
-        let definition =
-            Model::new(|cx: Cx, input: Tensor| input.apply(&cx.layer("norm", BatchNorm::new())?))
-                .inputs(crate::ModelInput::new([1, 2, 2, 3]));
+        let definition = Model::new(|cx: Cx, input: Tensor| {
+            input.apply(&cx.named_layer("norm", BatchNorm::new())?)
+        })
+        .inputs(crate::ModelInput::new([1, 2, 2, 3]));
         let (_, model) = definition.trace_resident_under("norm.weight").unwrap();
         let schema = model.schema();
         assert_eq!(model.resident_parameters().count(), 1);

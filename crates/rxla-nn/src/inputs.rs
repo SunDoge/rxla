@@ -5,10 +5,11 @@
 //!
 //! ```
 //! use rxla_core::{DType, Tensor};
-//! use rxla_nn::{Cx, Linear, Model, ModelInput, Result, TensorApply};
+//! use rxla_nn::{Cx, Linear, Model, ModelInput, Result, TensorApply, path};
 //!
 //! fn apply(cx: Cx, image: Tensor, label: Tensor) -> Result<(Tensor, Tensor)> {
-//!     let logits = image.apply(&cx.layer("head", Linear::new(10))?)?;
+//!     let head = path!(cx / "head")?.layer(Linear::new(10));
+//!     let logits = image.apply(&head)?;
 //!     let loss = logits.cross_entropy_with_indices(&label, 1)?.mean(&[0], false)?;
 //!     Ok((loss, logits))
 //! }

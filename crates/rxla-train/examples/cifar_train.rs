@@ -159,7 +159,7 @@ fn basic_block(
         .bias(false)
         .apply(input)?;
     let hidden = hidden
-        .apply(&block.layer("bn1", BatchNorm::new())?)?
+        .apply(&block.named_layer("bn1", BatchNorm::new())?)?
         .relu()?;
     let hidden = block
         .scope("conv2")?
@@ -170,7 +170,7 @@ fn basic_block(
         })
         .bias(false)
         .apply(&hidden)?;
-    let hidden = hidden.apply(&block.layer("bn2", BatchNorm::new())?)?;
+    let hidden = hidden.apply(&block.named_layer("bn2", BatchNorm::new())?)?;
     let residual = if stride == 1 {
         input.clone()
     } else {
@@ -195,7 +195,7 @@ fn classifier(cx: Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tenso
         .bias(false)
         .apply(&images)?;
     hidden = hidden
-        .apply(&cx.layer("stem_bn", BatchNorm::new())?)?
+        .apply(&cx.named_layer("stem_bn", BatchNorm::new())?)?
         .relu()?;
     for stage in 0..3 {
         let channels = 16 << stage;
@@ -205,7 +205,7 @@ fn classifier(cx: Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tenso
         }
     }
     let features = hidden.mean(&[1, 2], false)?;
-    let logits = features.apply(&cx.layer("head", Linear::new(CLASSES))?)?;
+    let logits = features.apply(&cx.named_layer("head", Linear::new(CLASSES))?)?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
         .mean(&[0], false)?;

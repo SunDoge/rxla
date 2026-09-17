@@ -111,8 +111,8 @@ mod tests {
 
     fn branched(cx: Cx) -> crate::Result<Tensor> {
         let input = cx.input(&[2, 4])?;
-        let body = input.apply(&cx.layer("body", Linear::new(4))?)?;
-        body.apply(&cx.layer("head", Linear::new(2))?)
+        let body = input.apply(&cx.named_layer("body", Linear::new(4))?)?;
+        body.apply(&cx.named_layer("head", Linear::new(2))?)
     }
 
     #[test]

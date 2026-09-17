@@ -121,13 +121,13 @@ fn attention(cx: Cx, input: &Tensor, groups: i64, epsilon: f32) -> Result<Tensor
         .epsilon(epsilon)
         .apply(input)?
         .reshape(&[*batch, height * width, *channels])?;
-    let q = hidden.apply(&cx.layer("to_q", Linear::new(*channels))?)?;
+    let q = hidden.apply(&cx.named_layer("to_q", Linear::new(*channels))?)?;
     let k = cx
         .scope("to_k")?
         .linear(*channels)
         .apply(&hidden)?
         .transpose(&[0, 2, 1])?;
-    let v = hidden.apply(&cx.layer("to_v", Linear::new(*channels))?)?;
+    let v = hidden.apply(&cx.named_layer("to_v", Linear::new(*channels))?)?;
     let attended = q
         .matmul(&k)?
         .mul_scalar(1.0 / (*channels as f32).sqrt())?

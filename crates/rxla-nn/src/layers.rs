@@ -475,12 +475,17 @@ impl Layer for RmsNorm {
 }
 
 impl Cx {
-    /// Bind a lightweight layer configuration to a stable lexical identity.
-    pub fn layer<L: Layer>(&self, name: &str, layer: L) -> Result<NamedLayer<L>> {
-        Ok(NamedLayer {
-            cx: self.scope(name)?,
+    /// Bind a lightweight layer configuration at this exact model path.
+    pub fn layer<L: Layer>(&self, layer: L) -> NamedLayer<L> {
+        NamedLayer {
+            cx: self.clone(),
             layer,
-        })
+        }
+    }
+
+    /// Convenience spelling for a single child layer.
+    pub fn named_layer<L: Layer>(&self, name: &str, layer: L) -> Result<NamedLayer<L>> {
+        Ok(self.scope(name)?.layer(layer))
     }
 }
 
@@ -973,9 +978,9 @@ mod tests {
     fn scoped_builders_preserve_parameter_identity() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 8])?;
-            let encoder = cx.layer("encoder", Linear::new(4))?;
+            let encoder = cx.named_layer("encoder", Linear::new(4))?;
             let hidden = encoder.apply(&input)?;
-            hidden.apply(&cx.layer("head", Linear::new(3))?)
+            hidden.apply(&cx.named_layer("head", Linear::new(3))?)
         })
         .unwrap();
 
@@ -990,8 +995,8 @@ mod tests {
     fn layer_configs_apply_named_effects_without_a_builder_type() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 8])?;
-            let encoder = cx.layer("encoder", Linear::new(4).bias(false))?;
-            let head = cx.layer("head", Linear::new(3))?;
+            let encoder = cx.named_layer("encoder", Linear::new(4).bias(false))?;
+            let head = cx.named_layer("head", Linear::new(3))?;
             let hidden = input.apply(&encoder)?;
             hidden.apply(&head)
         })
@@ -1009,7 +1014,7 @@ mod tests {
         let (schema, outputs) = init(|cx| {
             let first = cx.input(&[2, 8])?;
             let second = cx.input(&[2, 8])?;
-            let projection = cx.layer("projection", Linear::new(4))?;
+            let projection = cx.named_layer("projection", Linear::new(4))?;
             Ok::<_, Error>([first.apply(&projection)?, second.apply(&projection)?])
         })
         .unwrap();
@@ -1025,8 +1030,8 @@ mod tests {
         let (schema, outputs) = init(|cx| {
             let input = cx.input(&[2, 8])?;
             let config = Linear::new(8).bias(false);
-            let first = cx.layer("first", config.clone())?;
-            let second = cx.layer("second", config)?;
+            let first = cx.named_layer("first", config.clone())?;
+            let second = cx.named_layer("second", config)?;
             let hidden = input.apply(&first)?;
             Ok::<_, Error>([hidden.clone(), hidden.apply(&second)?])
         })
@@ -1068,7 +1073,7 @@ mod tests {
 
         impl ProjectionExt for Cx {
             fn projection(&self, width: i64) -> Result<NamedLayer<Linear>> {
-                self.layer("projection", Linear::new(width).bias(false))
+                self.named_layer("projection", Linear::new(width).bias(false))
             }
         }
 

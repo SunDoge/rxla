@@ -110,7 +110,7 @@ pub mod pp_ocr_v6;
 /// Learned two-layer projection for a sinusoidal timestep embedding.
 /// The input width is inferred at the point of use.
 pub fn timestep_embedding(cx: Cx, input: &Tensor, output_width: i64) -> Result<Tensor> {
-    let hidden = input.apply(&cx.layer("linear_1", Linear::new(output_width))?)?;
+    let hidden = input.apply(&cx.named_layer("linear_1", Linear::new(output_width))?)?;
     Ok(cx
         .scope("linear_2")?
         .linear(output_width)
@@ -304,23 +304,23 @@ fn feed_forward(cx: Cx, input: &Tensor) -> Result<Tensor> {
         .apply(input)?;
     let parts = projected.split(projected.shape().len() - 1, &[hidden, hidden])?;
     let gated = parts[0].mul(&parts[1].gelu()?)?;
-    Ok(gated.apply(&cx.scope("net")?.layer("2", Linear::new(width))?)?)
+    Ok(gated.apply(&cx.scope("net")?.named_layer("2", Linear::new(width))?)?)
 }
 
 fn transformer_block(cx: Cx, input: &Tensor, context: &Tensor, head_dim: i64) -> Result<Tensor> {
-    let normalized = input.apply(&cx.layer("norm1", LayerNorm::new(1))?)?;
+    let normalized = input.apply(&cx.named_layer("norm1", LayerNorm::new(1))?)?;
     let attention = {
         let scope = cx.scope("attn1")?;
         cross_attention(scope, &normalized, &normalized, head_dim)?
     };
     let hidden = input.add(&attention)?;
-    let normalized = hidden.apply(&cx.layer("norm2", LayerNorm::new(1))?)?;
+    let normalized = hidden.apply(&cx.named_layer("norm2", LayerNorm::new(1))?)?;
     let attention = {
         let scope = cx.scope("attn2")?;
         cross_attention(scope, &normalized, context, head_dim)?
     };
     let hidden = hidden.add(&attention)?;
-    let normalized = hidden.apply(&cx.layer("norm3", LayerNorm::new(1))?)?;
+    let normalized = hidden.apply(&cx.named_layer("norm3", LayerNorm::new(1))?)?;
     let ff = cx.scope("ff")?;
     Ok(hidden.add(&feed_forward(ff, &normalized)?)?)
 }

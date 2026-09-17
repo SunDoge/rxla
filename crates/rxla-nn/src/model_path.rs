@@ -23,10 +23,15 @@ impl ModelPath {
         self.segments.iter().map(String::as_str)
     }
 
-    pub fn at<P: ModelPathSpec>(&self, path: P) -> Result<Self> {
+    pub fn at<S: ModelPathSegment>(&self, segment: S) -> Result<Self> {
         let mut child = self.clone();
-        path.append_to(&mut child)?;
+        child.push(segment)?;
         Ok(child)
+    }
+
+    pub fn push<S: ModelPathSegment>(&mut self, segment: S) -> Result<&mut Self> {
+        segment.push_to(self)?;
+        Ok(self)
     }
 
     pub(crate) fn parameter(&self, name: &str) -> Result<String> {
@@ -61,80 +66,45 @@ impl fmt::Display for ModelPath {
     }
 }
 
-/// A path fragment accepted by [`crate::Cx::at`] and [`ModelPath::at`].
-///
-/// Tuple implementations allow names and indices to be mixed without
-/// allocating temporary strings: `cx.at(("blocks", index, "conv"))`.
-pub trait ModelPathSpec {
-    fn append_to(self, path: &mut ModelPath) -> Result<()>;
+/// One name or numeric index accepted by [`crate::Cx::at`] and
+/// [`ModelPath::push`].
+pub trait ModelPathSegment {
+    fn push_to(self, path: &mut ModelPath) -> Result<()>;
 }
 
-impl ModelPathSpec for &str {
-    fn append_to(self, path: &mut ModelPath) -> Result<()> {
+impl ModelPathSegment for &str {
+    fn push_to(self, path: &mut ModelPath) -> Result<()> {
         path.push_name(self.to_owned())
     }
 }
 
-impl ModelPathSpec for String {
-    fn append_to(self, path: &mut ModelPath) -> Result<()> {
+impl ModelPathSegment for String {
+    fn push_to(self, path: &mut ModelPath) -> Result<()> {
         path.push_name(self)
     }
 }
 
-impl ModelPathSpec for usize {
-    fn append_to(self, path: &mut ModelPath) -> Result<()> {
+impl ModelPathSegment for usize {
+    fn push_to(self, path: &mut ModelPath) -> Result<()> {
         path.push_index(self);
         Ok(())
     }
 }
-
-impl ModelPathSpec for ModelPath {
-    fn append_to(self, path: &mut ModelPath) -> Result<()> {
-        path.segments.extend(self.segments);
-        Ok(())
-    }
-}
-
-impl ModelPathSpec for &ModelPath {
-    fn append_to(self, path: &mut ModelPath) -> Result<()> {
-        path.segments.extend(self.segments.iter().cloned());
-        Ok(())
-    }
-}
-
-macro_rules! impl_tuple_path {
-    ($(($($part:ident),+)),+ $(,)?) => {
-        $(
-            impl<$($part: ModelPathSpec),+> ModelPathSpec for ($($part,)+) {
-                #[allow(non_snake_case)]
-                fn append_to(self, path: &mut ModelPath) -> Result<()> {
-                    let ($($part,)+) = self;
-                    $($part.append_to(path)?;)+
-                    Ok(())
-                }
-            }
-        )+
-    };
-}
-
-impl_tuple_path!(
-    (A, B),
-    (A, B, C),
-    (A, B, C, D),
-    (A, B, C, D, E),
-    (A, B, C, D, E, F),
-    (A, B, C, D, E, F, G),
-    (A, B, C, D, E, F, G, H),
-);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn tuples_mix_names_and_indices() {
-        let path = ModelPath::root()
-            .at(("encoder", "blocks", 17usize, "conv"))
+    fn pushes_mix_names_and_indices() {
+        let mut path = ModelPath::root();
+        path.push("encoder")
+            .unwrap()
+            .push("blocks")
+            .unwrap()
+            .push(17usize)
+            .unwrap()
+            .push("conv")
             .unwrap();
 
         assert_eq!(path.to_string(), "encoder.blocks.17.conv");
@@ -146,6 +116,6 @@ mod tests {
 
     #[test]
     fn invalid_names_fail_at_the_path_boundary() {
-        assert!(ModelPath::root().at(("encoder", "bad.name")).is_err());
+        assert!(ModelPath::root().at("bad.name").is_err());
     }
 }

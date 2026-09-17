@@ -18,4 +18,5 @@ pub use rxla_core::{
 };
 pub use rxla_ir as ir;
 pub use rxla_nn as nn;
+pub use rxla_nn::path;
 pub use rxla_pjrt as pjrt;

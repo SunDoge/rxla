@@ -1,9 +1,9 @@
 use rxla_core::Tensor;
-use rxla_nn::{Cx, Linear, Model, ModelInput, Result, TensorApply};
+use rxla_nn::{Cx, Linear, Model, ModelInput, Result, TensorApply, path};
 
 fn apply(cx: Cx, input: Tensor) -> Result<Tensor> {
-    let hidden = cx.layer("hidden", Linear::new(256))?;
-    let head = cx.layer("head", Linear::new(10))?;
+    let hidden = path!(cx / "hidden")?.layer(Linear::new(256));
+    let head = path!(cx / "head")?.layer(Linear::new(10));
     input.apply(&hidden)?.relu()?.apply(&head)
 }
 

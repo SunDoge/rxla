@@ -95,7 +95,7 @@ fn attention(cx: Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> Result
         .scaled_dot_product_attention(&k, &v, Some(causal_bias), None)?
         .transpose(&[0, 2, 1, 3])?
         .reshape(&[batch, length, width])?;
-    Ok(hidden.apply(&cx.layer("out_proj", Linear::new(width))?)?)
+    Ok(hidden.apply(&cx.named_layer("out_proj", Linear::new(width))?)?)
 }
 
 fn quick_gelu(input: &Tensor) -> Result<Tensor> {

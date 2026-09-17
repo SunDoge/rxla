@@ -24,7 +24,19 @@ pub use layers::{
     QuantizedLinear, RmsNorm, TensorApply,
 };
 mod model_path;
-pub use model_path::{ModelPath, ModelPathSpec};
+pub use model_path::{ModelPath, ModelPathSegment};
+
+/// Build a validated model-tree cursor by pushing each path segment in order.
+#[macro_export]
+macro_rules! path {
+    ($root:ident $(/ $segment:tt)+ $(/)?) => {{
+        (|| -> $crate::Result<$crate::Cx> {
+            let mut path = $root.clone();
+            $(path.__push_model_path_segment($segment)?;)+
+            Ok(path)
+        })()
+    }};
+}
 mod outputs;
 pub use outputs::{ModelOutputValues, ModelOutputs};
 mod schema;
@@ -515,7 +527,10 @@ impl Cx {
     /// Enter a repeated block path such as `blocks.17` without formatting it at
     /// every model call site.
     pub fn scope_index(&self, collection: &str, index: usize) -> Result<Self> {
-        self.at((collection, index))
+        let mut child = self.clone();
+        child.__push_model_path_segment(collection)?;
+        child.__push_model_path_segment(index)?;
+        Ok(child)
     }
 
     /// Build a structured conditional while threading this model's parameter
@@ -617,11 +632,16 @@ impl Cx {
     }
 
     /// Derive a context positioned at an arbitrary relative model path.
-    pub fn at<P: ModelPathSpec>(&self, path: P) -> Result<Self> {
-        Ok(Self {
-            inner: self.inner.clone(),
-            path: self.path.at(path)?,
-        })
+    pub fn at<S: ModelPathSegment>(&self, segment: S) -> Result<Self> {
+        let mut child = self.clone();
+        child.__push_model_path_segment(segment)?;
+        Ok(child)
+    }
+
+    #[doc(hidden)]
+    pub fn __push_model_path_segment<S: ModelPathSegment>(&mut self, segment: S) -> Result<()> {
+        self.path.push(segment)?;
+        Ok(())
     }
 
     /// Return the pure coordinate of this context in the model tree.
@@ -1260,7 +1280,7 @@ mod tests {
         let calls = Cell::new(0);
         let definition = Model::new(|cx: Cx, input: Tensor| {
             calls.set(calls.get() + 1);
-            input.apply(&cx.layer("head", Linear::new(3))?)
+            input.apply(&cx.named_layer("head", Linear::new(3))?)
         })
         .inputs(ModelInput::new([2, 4]));
 
@@ -1276,7 +1296,7 @@ mod tests {
         let calls = Cell::new(0);
         let definition = Model::new(|cx: Cx, input: Tensor| {
             calls.set(calls.get() + 1);
-            input.apply(&cx.layer("head", Linear::new(3))?)
+            input.apply(&cx.named_layer("head", Linear::new(3))?)
         })
         .inputs(ModelInput::new([2, 4]));
 
@@ -1330,9 +1350,9 @@ mod tests {
     }
 
     #[test]
-    fn tuple_paths_build_stable_mixed_segment_trees() {
+    fn path_macro_builds_stable_mixed_segment_trees() {
         let (schema, _) = init(|cx| {
-            let block = cx.at(("encoder", "blocks", 17usize))?;
+            let block = path!(cx / "encoder" / "blocks" / 17usize)?;
             assert_eq!(block.model_path().to_string(), "encoder.blocks.17");
             block.param("weight", &[2])?;
             cx.param("root", &[1])
@@ -1487,7 +1507,7 @@ mod tests {
     fn linear_infers_input_features_at_its_use_site() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 4])?;
-            input.apply(&cx.layer("head", Linear::new(3))?)
+            input.apply(&cx.named_layer("head", Linear::new(3))?)
         })
         .unwrap();
         assert_eq!(output.shape(), [2, 3]);
@@ -1515,7 +1535,7 @@ mod tests {
                 .bias(false)
                 .apply(&input)?
                 .relu()?;
-            hidden.apply(&cx.layer("head", Linear::new(3))?)
+            hidden.apply(&cx.named_layer("head", Linear::new(3))?)
         });
 
         let applied = model.trace().unwrap();
@@ -1533,7 +1553,7 @@ mod tests {
     fn one_context_composes_parameters_and_resident_state() {
         let model = Model::new(|cx: Cx| -> Result<_> {
             let input = cx.input(&[2, 4])?;
-            let output = input.apply(&cx.layer("head", Linear::new(3))?)?;
+            let output = input.apply(&cx.named_layer("head", Linear::new(3))?)?;
             let count = cx.state("steps", &[], DType::I32)?;
             let next = count.read(&cx)?.wrapping_add_scalar(1)?;
             count.write(&cx, &next)?;
@@ -1600,8 +1620,8 @@ mod tests {
         let calls = Cell::new(0);
         let definition = Model::new(|cx: Cx, input: Tensor| {
             calls.set(calls.get() + 1);
-            let body = input.apply(&cx.layer("body", Linear::new(3).bias(false))?)?;
-            body.apply(&cx.layer("head", Linear::new(2).bias(false))?)
+            let body = input.apply(&cx.named_layer("body", Linear::new(3).bias(false))?)?;
+            body.apply(&cx.named_layer("head", Linear::new(2).bias(false))?)
         })
         .inputs(ModelInput::new([1, 3]));
         let (selection, applied) = definition.trace_resident_under("head").unwrap();
@@ -1637,7 +1657,7 @@ mod tests {
         }
         .unwrap();
         let definition = Model::new(|cx: Cx, input: Tensor| {
-            input.apply(&cx.layer("head", Linear::new(2).bias(false))?)
+            input.apply(&cx.named_layer("head", Linear::new(2).bias(false))?)
         })
         .inputs(ModelInput::new([1, 3]));
         let (_, applied) = definition.trace_resident_all().unwrap();
@@ -1742,7 +1762,7 @@ mod tests {
     fn group_norm_nhwc_infers_affine_channel_shape() {
         let model = |cx: Cx| {
             let input = cx.input(&[1, 8, 8, 32])?;
-            input.apply(&cx.layer("norm", GroupNorm::new(8))?)
+            input.apply(&cx.named_layer("norm", GroupNorm::new(8))?)
         };
         let (schema, output) = init(model).unwrap();
         assert_eq!(output.shape(), [1, 8, 8, 32]);
@@ -1757,7 +1777,7 @@ mod tests {
     fn layer_norm_infers_trailing_affine_shape() {
         let (schema, output) = init(|cx| {
             let input = cx.input(&[2, 7, 32])?;
-            input.apply(&cx.layer("norm", LayerNorm::new(1))?)
+            input.apply(&cx.named_layer("norm", LayerNorm::new(1))?)
         })
         .unwrap();
         assert_eq!(output.shape(), [2, 7, 32]);
