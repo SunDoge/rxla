@@ -86,6 +86,10 @@ pub enum ModelDefinitionError {
     InvalidFlux2Configuration,
     #[snafu(display("FLUX.2 inputs do not match the configured topology"))]
     InvalidFlux2Input,
+    #[snafu(display("FLUX.2 schedule requires positive steps and image sequence length"))]
+    InvalidFlux2Schedule,
+    #[snafu(display("FLUX.2 scheduler step is out of range"))]
+    Flux2StepOutOfRange,
 }
 
 #[derive(Debug, Snafu)]

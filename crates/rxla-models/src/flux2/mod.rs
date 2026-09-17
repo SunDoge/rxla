@@ -5,6 +5,9 @@
 
 mod blocks;
 mod embedding;
+mod scheduler;
+
+pub use scheduler::{Flux2EulerScheduler, Flux2EulerStep};
 
 use self::blocks::{DoubleStreamModulation, Modulation, double_block, single_block};
 use self::embedding::{multi_axis_rope, timestep_embedding};
