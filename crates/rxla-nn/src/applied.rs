@@ -15,6 +15,7 @@ pub struct AppliedModel {
     state_graph: StateGraph,
     states: Vec<(String, StateSlot)>,
     outputs: Vec<Tensor>,
+    taps: BTreeMap<String, Tensor>,
     parameters: Vec<Tensor>,
     resident_parameters: Vec<Option<StateSlot>>,
     schema: ModelSchema,
@@ -328,6 +329,7 @@ impl AppliedModel {
         state_graph: StateGraph,
         states: Vec<(String, StateSlot)>,
         outputs: Vec<Tensor>,
+        taps: BTreeMap<String, Tensor>,
         parameters: Vec<Tensor>,
         resident_parameters: Vec<Option<StateSlot>>,
         schema: ModelSchema,
@@ -338,6 +340,7 @@ impl AppliedModel {
             state_graph,
             states,
             outputs,
+            taps,
             parameters,
             resident_parameters,
             schema,
@@ -355,6 +358,31 @@ impl AppliedModel {
 
     pub fn outputs(&self) -> &[Tensor] {
         &self.outputs
+    }
+
+    /// Named intermediate tensors retained during tracing without changing the
+    /// ordinary model output ABI.
+    pub fn taps(&self) -> impl ExactSizeIterator<Item = (&str, &Tensor)> {
+        self.taps.iter().map(|(path, value)| (path.as_str(), value))
+    }
+
+    /// Retrieve one graph-local intermediate for selective lowering/execution.
+    pub fn tap(&self, path: &str) -> Result<&Tensor> {
+        self.taps
+            .get(path)
+            .with_context(|| UnknownTapSnafu { path })
+    }
+
+    /// Clone ordinary outputs followed by selected taps in caller order.
+    pub fn outputs_with_taps(&self, paths: &[&str]) -> Result<Vec<Tensor>> {
+        let mut outputs = self.outputs.clone();
+        outputs.extend(
+            paths
+                .iter()
+                .map(|path| self.tap(path).cloned())
+                .collect::<Result<Vec<_>>>()?,
+        );
+        Ok(outputs)
     }
 
     /// Decode one ordinary model execution into a typed buffer structure.

@@ -86,6 +86,38 @@ fn semantic_snapshot_can_be_lowered_more_than_once() {
 }
 
 #[test]
+fn low_precision_sum_accumulates_in_f32() {
+    let mut program = ProgramIr::default();
+    let input_type = TensorType {
+        dims: vec![2, 3],
+        dtype: DType::F32,
+        dynamic_bounds: vec![],
+    };
+    let output_type = vector_type(2, DType::F32);
+    let input = program.append(&Op::Parameter(0), &[], &input_type).unwrap();
+    let sum = program
+        .append(
+            &Op::Reduce {
+                kind: Reduction::Sum,
+                axes: vec![1],
+            },
+            &[input],
+            &output_type,
+        )
+        .unwrap();
+
+    let snapshot = SemanticProgram::capture(&program, &[sum], true).unwrap();
+    let lowered = snapshot.lower(LoweringTarget::CudaF16Compute).unwrap();
+    assert!(lowered.code.contains("tensor<2x3xf16>) -> tensor<2x3xf32>"));
+    assert!(
+        lowered
+            .code
+            .contains("tensor<2x3xf32>, tensor<f32>) -> tensor<2xf32>")
+    );
+    assert!(lowered.code.contains("tensor<2xf32>) -> tensor<2xf16>"));
+}
+
+#[test]
 fn state_effects_survive_semantic_snapshots_and_discharge_to_pure_stablehlo() {
     let mut program = ProgramIr::default();
     let ty = vector_type(2, DType::F32);

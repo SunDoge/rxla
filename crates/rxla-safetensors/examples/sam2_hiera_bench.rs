@@ -5,7 +5,7 @@ use rxla_core::{Buffer, CacheLimits, Client, Compiler};
 use rxla_models::sam2::{HieraConfig, hiera};
 use rxla_nn::{Cx, Model, ModelInput, path};
 use rxla_safetensors::SafeTensors;
-use std::{path::PathBuf, time::Instant};
+use std::{io::Write, path::PathBuf, time::Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -23,6 +23,18 @@ struct Args {
     /// Internal CUDA compute precision; inputs and outputs remain F32.
     #[arg(long, value_enum, default_value_t = ComputePrecision::F16)]
     precision: ComputePrecision,
+    /// Write each final F32 stage to `<prefix>.stageN.f32` for oracle comparison.
+    #[arg(long)]
+    output_prefix: Option<PathBuf>,
+    /// Compile/export all 16 post-block debug taps instead of the four stages.
+    #[arg(long)]
+    tap_blocks: bool,
+    /// Disable XLA CUDA command buffers through PJRT compile options.
+    #[arg(long)]
+    direct_launches: bool,
+    /// Enable XLA's experimental second-generation GEMM fusion pass.
+    #[arg(long)]
+    gemm_fusion_v2: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -57,42 +69,82 @@ fn run(args: Args) -> Result<()> {
     .inputs(ModelInput::new([1, 1024, 1024, 3]))
     .trace()?;
     let compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let mut compiler = match args.precision {
+    let compiler = match args.precision {
         ComputePrecision::F32 => compiler,
         ComputePrecision::Bf16 => compiler.with_compute_dtype(rxla_core::DType::BF16),
         ComputePrecision::F16 => compiler.with_compute_dtype(rxla_core::DType::F16),
     };
+    let compiler = if args.direct_launches {
+        compiler.without_cuda_command_buffers()
+    } else {
+        compiler
+    };
+    let mut compiler = if args.gemm_fusion_v2 {
+        compiler.with_experimental_cuda_gemm_fusion_v2(true)
+    } else {
+        compiler
+    };
+    let (roots, labels) = if args.tap_blocks {
+        let labels = (0..16)
+            .map(|index| format!("block{index}"))
+            .collect::<Vec<_>>();
+        let roots = (0..16)
+            .map(|index| {
+                definition
+                    .tap(&format!("image_encoder.trunk.blocks.{index}.output"))
+                    .cloned()
+            })
+            .collect::<rxla_nn::Result<Vec<_>>>()?;
+        (roots, labels)
+    } else {
+        (
+            definition.outputs().to_vec(),
+            (0..4).map(|index| format!("stage{index}")).collect(),
+        )
+    };
     let compile_started = Instant::now();
-    let compiled = definition.compile(&mut compiler)?;
+    let executable = definition.compile_tensors(&mut compiler, &roots)?;
     let compile_ms = compile_started.elapsed().as_secs_f64() * 1e3;
 
     let mut checkpoint = SafeTensors::open(&args.weights)?;
     let load_started = Instant::now();
     let weights = checkpoint.load_parameter_schema(&client, definition.schema())?;
-    let runner = compiled.bind_parameters(weights.bindings())?;
     let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
-    let input = client.buffer(&[1, 1024, 1024, 3], &vec![0.0_f32; 1024 * 1024 * 3])?;
+    let input_values = (0..1024 * 1024 * 3)
+        .map(|index| ((index % 251) as f32 - 125.0) / 128.0)
+        .collect::<Vec<_>>();
+    let input = client.buffer(&[1, 1024, 1024, 3], &input_values)?;
+    let arguments = definition.bind(&input, weights.bindings())?;
 
     for _ in 0..args.warmup {
-        let _: [Buffer; 4] = runner.run(&input)?;
+        let _ = executable.execute(arguments.as_slice())?;
     }
     let mut samples = Vec::with_capacity(args.iterations);
     let mut outputs = None;
     for _ in 0..args.iterations {
         let started = Instant::now();
-        outputs = Some(runner.run::<_, [Buffer; 4]>(&input)?);
+        outputs = Some(executable.execute(arguments.as_slice())?);
         samples.push(started.elapsed().as_secs_f64() * 1e3);
     }
-    let checksum = outputs
+    let output_values = outputs
         .expect("positive iteration count checked")
-        .into_iter()
-        .map(|output| {
-            output
-                .to_vec::<f32>()
-                .map(|values| values.into_iter().map(f64::from).sum::<f64>())
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
+        .iter()
+        .map(Buffer::to_vec::<f32>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if let Some(prefix) = args.output_prefix {
+        for (label, values) in labels.iter().zip(&output_values) {
+            let path = format!("{}.{label}.f32", prefix.display());
+            let mut file = std::fs::File::create(path)?;
+            for value in values {
+                file.write_all(&value.to_le_bytes())?;
+            }
+        }
+    }
+    let checksum = output_values
+        .iter()
+        .flatten()
+        .copied()
+        .map(f64::from)
         .sum::<f64>();
     samples.sort_by(f64::total_cmp);
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;

@@ -77,6 +77,10 @@ pub(super) fn emit_aggregation(emission: &mut OperationEmission<'_>) -> Result<b
         };
         let source_type = stablehlo_type(&value_type(ctx, operation.get_operand(0)))?;
         let element_type = stablehlo_element_type(emission.result_type.dtype)?;
+        if !maximum && matches!(emission.result_type.dtype, DType::F16 | DType::BF16) {
+            emit_f32_accumulating_sum(emission, &axes)?;
+            return Ok(true);
+        }
         let initializer = match (maximum, emission.result_type.dtype) {
             (false, DType::I32) => "0",
             (true, DType::I32) => "-2147483648",
@@ -108,6 +112,47 @@ pub(super) fn emit_aggregation(emission: &mut OperationEmission<'_>) -> Result<b
         return Ok(false);
     }
     Ok(true)
+}
+
+fn emit_f32_accumulating_sum(emission: &mut OperationEmission<'_>, axes: &[usize]) -> Result<()> {
+    let operation = emission.operation.deref(emission.ctx);
+    let source = value_type(emission.ctx, operation.get_operand(0));
+    let source_f32 = stablehlo_type(&TensorType {
+        dtype: DType::F32,
+        ..source
+    })?;
+    let result_f32 = stablehlo_type(&TensorType {
+        dtype: DType::F32,
+        ..emission.result_type.clone()
+    })?;
+    let source_low = stablehlo_type(&value_type(emission.ctx, operation.get_operand(0)))?;
+    let converted = emission.auxiliary();
+    let initializer = emission.auxiliary();
+    let reduced = emission.auxiliary();
+    writeln!(
+        emission.body,
+        "    {converted} = stablehlo.convert {} : ({source_low}) -> {source_f32}",
+        emission.operands[0]
+    )
+    .unwrap();
+    writeln!(
+        emission.body,
+        "    {initializer} = stablehlo.constant dense<0.000000e+00> : tensor<f32>"
+    )
+    .unwrap();
+    let axes = axes
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    writeln!(emission.body, "    {reduced} = stablehlo.reduce({converted} init: {initializer}) applies stablehlo.add across dimensions = [{axes}] : ({source_f32}, tensor<f32>) -> {result_f32}").unwrap();
+    writeln!(
+        emission.body,
+        "    {} = stablehlo.convert {reduced} : ({result_f32}) -> {}",
+        emission.name, emission.ty
+    )
+    .unwrap();
+    Ok(())
 }
 
 fn emit_float_reduction(

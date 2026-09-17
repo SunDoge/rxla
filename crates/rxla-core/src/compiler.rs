@@ -177,6 +177,7 @@ pub struct Compiler {
     stats: CacheStats,
     f16_attention: bool,
     compute_dtype: Option<DType>,
+    xla_option_overrides: HashMap<String, OptionOverrideProto>,
     #[cfg(feature = "disk-cache")]
     disk: Option<DiskCache>,
 }
@@ -206,6 +207,7 @@ impl Compiler {
             stats: CacheStats::default(),
             f16_attention: false,
             compute_dtype: None,
+            xla_option_overrides: HashMap::new(),
             #[cfg(feature = "disk-cache")]
             disk: None,
         }
@@ -222,6 +224,31 @@ impl Compiler {
     /// CUDA is required; other platforms retain portable F32.
     pub fn with_compute_dtype(mut self, dtype: DType) -> Self {
         self.compute_dtype = Some(dtype);
+        self
+    }
+
+    /// Disable XLA GPU command-buffer lowering for this compiler.
+    /// This is encoded in PJRT compile options and does not mutate `XLA_FLAGS`;
+    /// a fresh compiler without this override uses the plugin's default policy.
+    pub fn without_cuda_command_buffers(mut self) -> Self {
+        self.xla_option_overrides.insert(
+            "xla_gpu_enable_command_buffer".into(),
+            OptionOverrideProto {
+                value: Some(option_override_proto::Value::StringField(String::new())),
+            },
+        );
+        self
+    }
+
+    /// Select XLA's experimental second-generation GEMM fusion pass on CUDA.
+    /// Backend availability and behavior follow the loaded PJRT plugin.
+    pub fn with_experimental_cuda_gemm_fusion_v2(mut self, enabled: bool) -> Self {
+        self.xla_option_overrides.insert(
+            "xla_gpu_experimental_gemm_fusion_v2".into(),
+            OptionOverrideProto {
+                value: Some(option_override_proto::Value::BoolField(enabled)),
+            },
+        );
         self
     }
 
@@ -286,6 +313,10 @@ impl Compiler {
     /// Lookup still hashes/compares key bytes and updates the LRU; callers that
     /// already own the desired executable should execute that handle directly.
     pub fn compile_lowered(&mut self, program: &LoweredProgram) -> Result<Arc<Executable>> {
+        if !self.xla_option_overrides.is_empty() {
+            let options = encode_compile_options(&self.client, self.xla_option_overrides.clone())?;
+            return self.compile_lowered_with_options(program, &options);
+        }
         let key = program.cache_key();
         self.compile_encoded(
             &program.code,

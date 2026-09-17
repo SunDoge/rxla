@@ -298,7 +298,9 @@ pub fn hiera(cx: Cx, image: &Tensor, config: &HieraConfig) -> Result<[Tensor; 4]
         let block = MultiScaleBlock::new(dim, dim_out, heads)
             .window_size(window)
             .q_stride(q_pool_blocks.contains(&index).then_some(config.q_stride));
-        hidden = block.call(path!(cx / "blocks" / block_name)?, &hidden)?;
+        let block_cx = path!(cx / "blocks" / block_name)?;
+        hidden = block.call(block_cx.clone(), &hidden)?;
+        hidden = block_cx.tap("output", &hidden)?;
         dim = dim_out;
         if stage_ends.contains(&index) {
             outputs.push(hidden.transpose(&[0, 3, 1, 2])?);

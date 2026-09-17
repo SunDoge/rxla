@@ -13,7 +13,7 @@ pub use rxla_pjrt::{
 };
 use rxla_xla_proto::xla::{
     CompileOptionsProto, DeviceAssignmentProto, ExecutableBuildOptionsProto, HloModuleProto,
-    PrimitiveType,
+    OptionOverrideProto, PrimitiveType, option_override_proto,
 };
 use snafu::Snafu;
 pub use state::{
@@ -665,6 +665,23 @@ fn compile_program_with_options(
     output_count: usize,
     compile_options: Option<&[u8]>,
 ) -> Result<Executable> {
+    let default_options = encode_compile_options(client, Default::default())?;
+    let raw = client.compile(
+        rxla_pjrt::Program::new(format, code),
+        compile_options.unwrap_or(&default_options),
+    )?;
+    Ok(Executable {
+        raw,
+        client: client.clone(),
+        inputs: inputs.to_vec(),
+        output_count,
+    })
+}
+
+fn encode_compile_options(
+    client: &Client,
+    env_option_overrides: std::collections::HashMap<String, OptionOverrideProto>,
+) -> Result<Vec<u8>> {
     let selected_device = client
         .info()?
         .addressable_devices
@@ -687,19 +704,10 @@ fn compile_program_with_options(
             }),
             ..Default::default()
         }),
+        env_option_overrides,
         ..Default::default()
     };
-    let default_options = default_options.encode_to_vec();
-    let raw = client.compile(
-        rxla_pjrt::Program::new(format, code),
-        compile_options.unwrap_or(&default_options),
-    )?;
-    Ok(Executable {
-        raw,
-        client: client.clone(),
-        inputs: inputs.to_vec(),
-        output_count,
-    })
+    Ok(default_options.encode_to_vec())
 }
 impl Tensor {
     pub fn shape(&self) -> &[i64] {

@@ -107,6 +107,10 @@ pub enum Error {
     UnknownParameter { path: String },
     #[snafu(display("duplicate parameter binding {path:?}"))]
     DuplicateBinding { path: String },
+    #[snafu(display("debug tap {path:?} is already declared"))]
+    DuplicateTap { path: String },
+    #[snafu(display("debug tap {path:?} is absent from the model trace"))]
+    UnknownTap { path: String },
     #[snafu(display("missing parameter binding {path:?}"))]
     MissingBinding { path: String },
     #[snafu(display("model expected {expected} inputs, received {actual}"))]
@@ -326,6 +330,7 @@ struct CxInner {
     graph: StateGraph,
     schema: ModelSchema,
     parameter_values: BTreeMap<String, Tensor>,
+    taps: BTreeMap<String, Tensor>,
     residency: InitResidency,
     states: BTreeMap<String, StateDeclaration>,
     rngs: BTreeMap<String, RngStream>,
@@ -387,6 +392,7 @@ impl Cx {
                 graph: StateGraph::default(),
                 schema: ModelSchema::default(),
                 parameter_values: BTreeMap::new(),
+                taps: BTreeMap::new(),
                 residency,
                 states: BTreeMap::new(),
                 rngs: BTreeMap::new(),
@@ -429,6 +435,24 @@ impl Cx {
         );
         self.parameter_storage_dtype = dtype;
         Ok(self)
+    }
+
+    /// Retain a named intermediate tensor as an optional compilation root.
+    ///
+    /// Taps do not alter ordinary model outputs or execution. Tooling can later
+    /// retrieve them from [`AppliedModel::tap`] and compile exactly the desired
+    /// intermediates through [`AppliedModel::compile_tensors`]. The name is
+    /// relative to this context's model path.
+    pub fn tap(&self, name: &str, value: &Tensor) -> Result<Tensor> {
+        validate_name(name)?;
+        let path = self.path(name);
+        let mut inner = self.inner.lock().expect("trace context lock poisoned");
+        ensure!(
+            !inner.taps.contains_key(&path),
+            DuplicateTapSnafu { path: path.clone() }
+        );
+        inner.taps.insert(path, value.clone());
+        Ok(value.clone())
     }
 
     /// Declare/read a parameter with its storage dtype.
@@ -1198,6 +1222,12 @@ where
         .schema
         .clone();
     let parameters = cx.parameter_tensors();
+    let taps = cx
+        .inner
+        .lock()
+        .expect("trace context lock poisoned")
+        .taps
+        .clone();
     let states = cx.state_slots(&schema);
     let resident_parameters = cx.resident_parameter_slots(&schema);
     let graph = cx
@@ -1210,6 +1240,7 @@ where
         graph,
         states,
         outputs,
+        taps,
         parameters,
         resident_parameters,
         schema,
@@ -1306,6 +1337,38 @@ mod tests {
         assert_eq!(parameter.storage_dtype(), DType::F16);
         assert_eq!(parameter.compute_dtype(), DType::F32);
         assert_eq!(value.dtype(), DType::F32);
+    }
+
+    #[test]
+    fn named_taps_are_optional_compilation_roots() {
+        let applied = Model::new(|cx: Cx, input: Tensor| {
+            let hidden = input.relu()?;
+            cx.scope("encoder")?.tap("hidden", &hidden)?;
+            hidden.add_scalar(1.0).map_err(Error::from)
+        })
+        .inputs(ModelInput::new([2, 3]))
+        .trace()
+        .unwrap();
+
+        assert_eq!(
+            applied.taps().map(|(path, _)| path).collect::<Vec<_>>(),
+            ["encoder.hidden"]
+        );
+        assert_eq!(applied.tap("encoder.hidden").unwrap().shape(), [2, 3]);
+        assert_eq!(
+            applied
+                .outputs_with_taps(&["encoder.hidden"])
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(matches!(
+            applied.tap("missing"),
+            Err(Error::UnknownTap { .. })
+        ));
+        applied
+            .prepare_tensors(&[applied.tap("encoder.hidden").unwrap().clone()])
+            .unwrap();
     }
 
     #[test]
