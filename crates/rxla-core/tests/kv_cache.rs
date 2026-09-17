@@ -1,5 +1,5 @@
 use rxla_core::{CacheLimits, Client, Compiler, KvCache, StateGraph};
-use std::rc::Rc;
+use std::sync::Arc;
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -36,7 +36,7 @@ fn real_new_session_shares_weights_but_not_cache_or_rebindings() {
             ),
         ]
     };
-    let shared = Rc::new(client.buffer(&[1, 1], &[10.]).unwrap());
+    let shared = Arc::new(client.buffer(&[1, 1], &[10.]).unwrap());
     let mut a = program.session(fresh()).unwrap();
     a.bind_parameters(vec![(weight.clone(), shared.clone())])
         .unwrap();
@@ -47,7 +47,7 @@ fn real_new_session_shares_weights_but_not_cache_or_rebindings() {
     };
     run(&mut a, 1., 2.);
     let mut b = a.new_session(fresh()).unwrap();
-    assert_eq!(Rc::strong_count(&shared), 3);
+    assert_eq!(Arc::strong_count(&shared), 3);
     assert!(std::ptr::eq(
         a.parameter(&weight).unwrap(),
         b.parameter(&weight).unwrap()
@@ -67,15 +67,15 @@ fn real_new_session_shares_weights_but_not_cache_or_rebindings() {
     let mut invalid = fresh();
     invalid[0].1 = client.buffer(&[], &[0.]).unwrap();
     assert!(a.new_session(invalid).is_err());
-    assert_eq!(Rc::strong_count(&shared), 3);
+    assert_eq!(Arc::strong_count(&shared), 3);
     assert_eq!(a.state(&position).unwrap().to_vec::<i32>().unwrap(), [1]);
 
     a.bind_parameters(vec![(
         weight.clone(),
-        Rc::new(client.buffer(&[1, 1], &[20.]).unwrap()),
+        Arc::new(client.buffer(&[1, 1], &[20.]).unwrap()),
     )])
     .unwrap();
-    assert_eq!(Rc::strong_count(&shared), 2);
+    assert_eq!(Arc::strong_count(&shared), 2);
     run(&mut b, 7., 3.);
     run(&mut a, 2., 4.);
     run(&mut b, 8., 5.);

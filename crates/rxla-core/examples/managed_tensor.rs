@@ -1,11 +1,14 @@
 //! Explicit managed input -> resident input -> repeated compiled execution.
 use rxla_core::{CacheLimits, Client, Compiler, DType, Storage, Tracer};
 use rxla_pjrt::{ByteStrides, Shape, StridedLayout};
-use std::{cell::Cell, rc::Rc};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 struct Owner {
     data: Vec<u8>,
-    dropped: Rc<Cell<bool>>,
+    dropped: Arc<AtomicBool>,
 }
 impl AsRef<[u8]> for Owner {
     fn as_ref(&self) -> &[u8] {
@@ -14,7 +17,7 @@ impl AsRef<[u8]> for Owner {
 }
 impl Drop for Owner {
     fn drop(&mut self) {
-        self.dropped.set(true);
+        self.dropped.store(true, Ordering::Release);
     }
 }
 
@@ -54,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let graph = Tracer::default();
     let x = graph.input(&[3, 2])?;
     let y = x.mul(&x)?;
-    let dropped = Rc::new(Cell::new(false));
+    let dropped = Arc::new(AtomicBool::new(false));
     let owner = Owner {
         data: (0..6).flat_map(|n| (n as f32).to_ne_bytes()).collect(),
         dropped: dropped.clone(),
@@ -63,10 +66,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = x.with_host_storage(Storage::host(DType::F32, owner), layout)?;
     let resident = host.to_device(&client)?;
     drop(host);
-    assert!(dropped.get()); // Upload lifetime does not leak the external owner.
+    assert!(dropped.load(Ordering::Acquire)); // Upload lifetime does not leak the external owner.
     let a = resident.to_buffer(&client)?;
     let b = resident.to_buffer(&client)?;
-    assert!(Rc::ptr_eq(&a, &b)); // Same native wrapper, not a second upload.
+    assert!(Arc::ptr_eq(&a, &b)); // Same native wrapper, not a second upload.
     drop((a, b));
     let mut compiler = Compiler::new(client, CacheLimits::default());
     for _ in 0..3 {

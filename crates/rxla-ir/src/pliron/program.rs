@@ -11,6 +11,18 @@ pub struct ProgramIr {
     pub(super) values: PrimaryMap<SsaId, Value>,
 }
 
+#[cfg(test)]
+mod thread_safety_tests {
+    use super::ProgramIr;
+
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn program_ir_is_send() {
+        assert_send::<ProgramIr>();
+    }
+}
+
 /// Graph-local identity of a canonical Pliron SSA value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SsaId(u32);

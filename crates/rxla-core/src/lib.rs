@@ -234,30 +234,36 @@ fn err(message: impl Into<String>) -> Error {
     }
 }
 
+struct GraphInner {
+    ir: Mutex<rxla_ir::ProgramIr>,
+    lazy: std::sync::OnceLock<std::sync::Weak<tensor_handle::LazySession>>,
+}
+
+impl std::ops::Deref for GraphInner {
+    type Target = Mutex<rxla_ir::ProgramIr>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ir
+    }
+}
+
 #[derive(Clone)]
-pub(crate) struct Graph(Arc<Mutex<rxla_ir::ProgramIr>>);
+pub(crate) struct Graph(Arc<GraphInner>);
 
 impl Default for Graph {
     fn default() -> Self {
-        #[allow(
-            clippy::arc_with_non_send_sync,
-            reason = "Pliron contexts are intentionally thread-affine; prepared programs cross threads"
-        )]
-        Self(Arc::new(Mutex::new(rxla_ir::ProgramIr::default())))
+        Self(Arc::new(GraphInner {
+            ir: Mutex::new(rxla_ir::ProgramIr::default()),
+            lazy: std::sync::OnceLock::new(),
+        }))
     }
 }
-/// One-pointer, immutable tensor descriptor with optional managed input storage.
-/// Clones share the descriptor; attaching storage creates a new descriptor.
-/// Native storage makes Tensor thread-affine. Send prepared graph snapshots to
-/// workers instead; no automatic evaluation/upload is performed by operators.
-///
-/// ```compile_fail
-/// fn require_send<T: Send>() {}
-/// require_send::<rxla_core::Tensor>();
-/// ```
+/// One-pointer, immutable, thread-safe tensor descriptor with optional managed
+/// input storage. Clones share the descriptor; attaching storage creates a new
+/// descriptor. Operators remain lazy and perform no automatic upload.
 #[derive(Clone)]
 pub struct Tensor {
-    descriptor: std::rc::Rc<TensorDescriptor>,
+    descriptor: Arc<TensorDescriptor>,
 }
 
 fn elements(dims: &[i64]) -> Result<usize> {

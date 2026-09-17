@@ -1,5 +1,5 @@
 use rxla_core::{CacheLimits, Client, Compiler, StateGraph};
-use std::rc::Rc;
+use std::sync::Arc;
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -22,8 +22,8 @@ fn real_parameter_switch_is_atomic_and_dtype_checked() {
     let mut session = first
         .session(vec![(s.clone(), client.buffer(&[], &[0.]).unwrap())])
         .unwrap();
-    let old = Rc::new(client.buffer(&[], &[2.]).unwrap());
-    let new = Rc::new(
+    let old = Arc::new(client.buffer(&[], &[2.]).unwrap());
+    let new = Arc::new(
         client
             .buffer(&[], &[rxla_core::bf16::from_bits(0x4040)])
             .unwrap(),

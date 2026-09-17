@@ -1,6 +1,6 @@
 //! Stateful facade, functional compilation, and non-donating session execution.
 use super::*;
-use std::{rc::Rc, sync::Arc};
+use std::sync::Arc;
 
 /// Identity of an F32 or I32 state slot. Clones identify the same slot, not copies.
 #[derive(Clone)]
@@ -78,7 +78,7 @@ enum Argument {
 enum InputBinding {
     Unused,
     Dynamic(usize),
-    Fixed(Rc<Buffer>),
+    Fixed(Arc<Buffer>),
 }
 
 /// Records symbolic state versions without modifying live runtime buffers.
@@ -413,7 +413,7 @@ impl StateGraph {
     pub fn compile(&self, compiler: &mut Compiler, outputs: &[Tensor]) -> Result<StateProgram> {
         let all_outputs = self.outputs_with_state(outputs);
         let executable = compiler.compile_graph_outputs(&self.graph, &all_outputs)?;
-        Ok(StateProgram(Rc::new(Plan {
+        Ok(StateProgram(Arc::new(Plan {
             executable,
             owner: self.owner.clone(),
             arguments: self.arguments.clone(),
@@ -448,7 +448,7 @@ impl StateGraph {
                 input_parameters[*index] = Some(parameter);
             }
         }
-        Ok(StateProgram(Rc::new(Plan {
+        Ok(StateProgram(Arc::new(Plan {
             executable,
             owner: self.owner.clone(),
             arguments,
@@ -595,7 +595,7 @@ impl PreparedStateGraph {
     /// without repeating graph lowering/encoding. Reuses executable cache keys
     /// with ordinary state compilation, but retains this snapshot's slot schema.
     pub fn compile(&self, compiler: &mut Compiler) -> Result<StateProgram> {
-        Ok(StateProgram(Rc::new(Plan {
+        Ok(StateProgram(Arc::new(Plan {
             executable: compiler.compile_lowered(&self.lowered)?,
             owner: self.owner.clone(),
             arguments: self.arguments.clone(),
@@ -608,7 +608,7 @@ impl PreparedStateGraph {
 }
 /// A compiled state transition; clones share code, never session state.
 #[derive(Clone)]
-pub struct StateProgram(Rc<Plan>);
+pub struct StateProgram(Arc<Plan>);
 impl StateProgram {
     /// Original visible-input registration numbers required by this plan, in
     /// runtime order before fixed binding. Hidden state inputs are not listed.
@@ -841,8 +841,8 @@ pub struct Session {
 
 fn input_parameter_bindings(
     program: &StateProgram,
-    bindings: Vec<(Parameter, Rc<Buffer>)>,
-) -> Result<Vec<(usize, Rc<Buffer>)>> {
+    bindings: Vec<(Parameter, Arc<Buffer>)>,
+) -> Result<Vec<(usize, Arc<Buffer>)>> {
     let mut indexed = Vec::with_capacity(bindings.len());
     for (parameter, buffer) in bindings {
         if !Arc::ptr_eq(&parameter.owner, &program.0.owner) {
@@ -867,7 +867,7 @@ impl Session {
         &mut self,
         program: &StateProgram,
         mapping: &[(StateSlot, StateSlot)],
-        bindings: Vec<(Parameter, Rc<Buffer>)>,
+        bindings: Vec<(Parameter, Arc<Buffer>)>,
     ) -> Result<()> {
         let indexed = input_parameter_bindings(program, bindings)?;
         self.switch_program(program, mapping, indexed)
@@ -889,7 +889,7 @@ impl Session {
         &mut self,
         program: &StateProgram,
         mapping: &[(StateSlot, StateSlot)],
-        fixed_inputs: Vec<(usize, Rc<Buffer>)>,
+        fixed_inputs: Vec<(usize, Arc<Buffer>)>,
     ) -> Result<()> {
         let source_slots: Vec<_> = mapping.iter().map(|(source, _)| source.clone()).collect();
         let destination_slots: Vec<_> = mapping
@@ -934,7 +934,7 @@ impl Session {
     /// `StateProgram::session`; invalid state leaves this session unchanged.
     /// Supplied buffers are consumed, including on error.
     ///
-    /// Fixed buffers are shared read-only via Rc; later rebinding either session
+    /// Fixed buffers are shared read-only via Arc; later rebinding either session
     /// does not affect the other. Dynamic inputs keep their existing order.
     /// This does not copy the current state, initialize missing slots, compile,
     /// execute, or transfer tensor payloads. It is not a snapshot/fork or a
@@ -987,8 +987,8 @@ impl Session {
     /// empty clears it. Unbound inputs retain registration order for `run`.
     /// Parameters removed by `compile_pruned` cannot be bound.
     /// Parameter handles need not remain alive after binding. Buffers are shared
-    /// read-only via Rc; no compilation, execution, or tensor copies occur.
-    pub fn bind_parameters(&mut self, bindings: Vec<(Parameter, Rc<Buffer>)>) -> Result<()> {
+    /// read-only via Arc; no compilation, execution, or tensor copies occur.
+    pub fn bind_parameters(&mut self, bindings: Vec<(Parameter, Arc<Buffer>)>) -> Result<()> {
         self.bind_inputs(input_parameter_bindings(&self.program, bindings)?)
     }
     /// Replace the set of fixed visible inputs (e.g. resident inference weights).
@@ -1001,9 +1001,9 @@ impl Session {
     /// Buffers are shared by ownership, not copied or embedded as graph constants.
     /// All bindings are validated before replacement; errors leave both previous
     /// bindings and mutable state intact. No compilation or execution occurs.
-    pub fn bind_inputs(&mut self, bindings: Vec<(usize, Rc<Buffer>)>) -> Result<()> {
+    pub fn bind_inputs(&mut self, bindings: Vec<(usize, Arc<Buffer>)>) -> Result<()> {
         let plan = &self.program.0;
-        let mut fixed: Vec<Option<Rc<Buffer>>> = (0..plan.input_count).map(|_| None).collect();
+        let mut fixed: Vec<Option<Arc<Buffer>>> = (0..plan.input_count).map(|_| None).collect();
         for (index, buffer) in bindings {
             let slot = fixed
                 .get_mut(index)
@@ -1083,7 +1083,7 @@ impl Session {
     /// or device/allocator memory. Even the same client receives fresh buffers.
     /// On failure, partial destination copies are dropped and this session is
     /// unchanged. This is a quiescent snapshot, not live migration or zero-copy
-    /// transport; the returned buffers remain thread-affine.
+    /// transport; the returned buffers retain their destination client ownership.
     pub fn copy_state_to_client_via_host(
         &self,
         destination: &Client,

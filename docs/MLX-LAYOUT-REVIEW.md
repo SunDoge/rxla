@@ -36,7 +36,7 @@ external imports. We have not audited every transpose/slice backend path.
 | --- | --- | --- |
 | Semantic values | `crates/rxla-core/src/pliron_ir/`: typed SSA values, transpose permutation and slice steps | Keep storage-independent math; slice steps are not byte strides |
 | StableHLO boundary | Pliron conversion exports logical tensor types; PJRT chooses physical layouts | Audit optimized layouts and boundary constraints; do not confuse logical element strides with buffer byte strides |
-| Runtime storage | `crates/rxla-pjrt/src/runtime.rs::BufferInner` owns an opaque native buffer and client via Rc | Keep thread-affine native ownership; add owned physical-layout inspection before advertising views |
+| Runtime storage | `crates/rxla-pjrt/src/runtime.rs::BufferInner` owns an opaque native buffer and client via Arc | Keep thread-safe native ownership; add owned physical-layout inspection before advertising views |
 | Upload/download | Upload accepts dense typed slices with exact logical element count; neither path sets explicit layout fields | Non-contiguous host input is a missing adapter capability; downloaded host order must not be confused with device order |
 | Completion | `PendingExecution` retains inputs/executable/outputs and waits on an event | Preserve this foundation; ready can mean failed, so completion status must still be checked |
 | Layout ABI | Generated PJRT types include tiled/strided layouts and GetMemoryLayout | Generated fields alone do not prove plugin capability, zero-copy import or arbitrary device-view support |

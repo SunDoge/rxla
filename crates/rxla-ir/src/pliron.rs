@@ -24,7 +24,7 @@ use crate::{IrError, PlanningFacts, Result, Sharding, ShardingConstraint};
 use pliron::basic_block::BasicBlock;
 use pliron::{
     builtin::{
-        attributes::{BytesAttr, StringAttr},
+        attributes::StringAttr,
         op_interfaces::{
             IsTerminatorInterface, NOpdsInterface, NResultsInterface, OneOpdInterface,
             OneResultInterface, SameOperandsAndResultType, SameOperandsType, SameResultsType,

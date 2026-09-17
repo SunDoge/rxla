@@ -6,13 +6,13 @@ This is not a complete MLX-style auto-evaluating array API.
 ## Ownership model
 
 ```text
-Tensor (one Rc pointer)
+Tensor (one Arc pointer)
   -> immutable TensorDescriptor
        -> optional private tracing identity { session, node ID }
        -> SmallVec<i64, 5> logical shape + explicit dtype
        -> optional input binding
             host:   Storage owner + checked StridedLayout
-            native: Storage owner -> Rc<Buffer> -> PJRT allocation + client
+            native: Storage owner -> Arc<Buffer> -> PJRT allocation + client
 
 PendingExecution -> native input/output/executable owners until completion
 ```
@@ -25,19 +25,20 @@ alias detector: independently wrapping the same external allocation may create
 distinct owners. No writable aliases, donation or copy-on-write are provided.
 
 The descriptor is immutable and exposed only as an opaque Deref target; its
-fields are crate-private and no DerefMut exists. Rc is deliberate: std already
+fields are crate-private and no DerefMut exists. Arc is deliberate: std already
 provides a one-allocation control block and a one-pointer handle, without custom
 unsafe refcount logic. A custom intrusive pointer remains optional future work
 requiring allocation/clone benchmarks, overflow/drop tests and a safety audit;
-there is no demonstrated performance gain from replacing Rc at this point.
+there is no demonstrated performance gain from replacing Arc at this point.
 
-Native storage makes **all Tensor handles !Send/!Sync**, including unbound ones.
-This is an intentional API change; no unsafe Send/Sync bypass exists. Tracers and
-prepared host snapshots retain their existing separation from native storage.
-Build/prepare on the caller, send the snapshot to a worker and keep native
-Tensor/Storage owners on that worker. Host-only cross-thread owners can still
-be passed separately (for example Arc byte storage). Integer values use the same
-`Tensor` descriptor with `DType::I32`.
+Tensor and Storage are `Send + Sync`. Pliron 0.18 makes context auxiliary data
+`Send`, and a compile-time assertion verifies `ProgramIr: Send`; no unsafe trait
+implementation is added for the IR. Each graph retains a weak link to its lazy
+session, so moving a Tensor to another thread does not silently start a different
+graph. Host owners and raw-allocation deleters must be `Send + Sync`. PJRT buffers
+already use Arc-backed thread-safe ownership; in-flight submit/wait handles keep
+their separate runtime contract. Integer values use the same Tensor descriptor
+with `DType::I32`.
 
 ## Managed ownership and execution
 
@@ -54,7 +55,7 @@ F32/I32/BF16. Shape transforms and gathers preserve
 dtype; integer arithmetic stays exact. Unsupported BF16 arithmetic and non-F32
 autodiff are rejected. to_f32 is explicit conversion, not a bitcast.
 
-`Storage::device(Rc<Buffer>)` retains an existing native owner without copying.
+`Storage::device(Arc<Buffer>)` retains an existing native owner without copying.
 `with_host_storage` validates shape, dtype, element size and view bounds;
 `with_device_storage` validates native shape/dtype against the descriptor. Host
 binding also rejects same-width dtype mismatches (I32 versus F32). Both reject computed
@@ -97,7 +98,7 @@ three resident executions and pending completion after dropping Tensor/compiler
 owners. The example passes on the configured CPU and CUDA plugins.
 
 The full CPU gate (`scripts/check-xla.sh --offline --with-plugin`) also passes,
-including default/cache tests, doctests (Tensor's !Send contract), state and
+including default/cache tests, compile-time Send/Sync assertions, state and
 worker tests, Clippy and the independent prepared-state consumer. Log:
 `/tmp/xla-managed-tensor-full-cpu.log`. This is not a full-model speed comparison.
 

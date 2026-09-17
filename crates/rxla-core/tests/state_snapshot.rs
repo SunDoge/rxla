@@ -118,12 +118,12 @@ fn prepared_state_keeps_bf16_binding_identity_and_session_isolation() {
     let mut second = program
         .session(vec![(total.clone(), client.buffer(&[], &[10.]).unwrap())])
         .unwrap();
-    let first_weight = std::rc::Rc::new(
+    let first_weight = std::sync::Arc::new(
         client
             .buffer(&[], &[rxla_core::bf16::from_bits(0x4000)])
             .unwrap(),
     ); // 2
-    let second_weight = std::rc::Rc::new(
+    let second_weight = std::sync::Arc::new(
         client
             .buffer(&[], &[rxla_core::bf16::from_bits(0x4040)])
             .unwrap(),
@@ -140,11 +140,11 @@ fn prepared_state_keeps_bf16_binding_identity_and_session_isolation() {
     for invalid in [
         vec![(
             weight.clone(),
-            std::rc::Rc::new(client.buffer(&[], &[2.]).unwrap()),
+            std::sync::Arc::new(client.buffer(&[], &[2.]).unwrap()),
         )],
         vec![(
             unused,
-            std::rc::Rc::new(client.buffer(&[3], &[0.; 3]).unwrap()),
+            std::sync::Arc::new(client.buffer(&[3], &[0.; 3]).unwrap()),
         )],
         vec![(foreign, second_weight.clone())],
     ] {
@@ -167,7 +167,7 @@ fn prepared_state_keeps_bf16_binding_identity_and_session_isolation() {
     first
         .bind_parameters(vec![(
             weight.clone(),
-            std::rc::Rc::new(
+            std::sync::Arc::new(
                 client
                     .buffer(&[], &[rxla_core::bf16::from_bits(0x40a0)])
                     .unwrap(),

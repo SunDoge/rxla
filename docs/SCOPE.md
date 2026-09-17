@@ -38,7 +38,8 @@ descriptors, SmallVec shape metadata and managed U8/F16/F32/I32/BF16 host/native
 input bindings. Every runtime dtype uses `Tensor`; the former `Index` and
 `Output` compatibility names have been removed. Shape operations
 preserve dtype, unsupported arithmetic is rejected, and autodiff remains F32-only.
-Tensor is now thread-affine; prepared snapshots remain the cross-thread path.
+Tensor and Storage are now Arc-backed and `Send + Sync`; prepared snapshots remain
+the preferred serialization and worker-handoff boundary.
 CPU/CUDA managed-input and Tensor-first lazy evaluation paths pass. Device views,
 device DLPack import/export and donation remain pending.
 

@@ -1,4 +1,35 @@
 use super::*;
+
+/// Compact byte payload used by RXLA's typed semantic attributes.
+///
+/// Pliron 0.18 removed the former builtin byte attribute. Keeping the payload
+/// in the RXLA dialect makes its ownership and wire representation explicit.
+#[pliron_attr(
+    name = "rxla.bytes",
+    format = "`[` vec($0, CharSpace(`,`)) `]`",
+    verifier = "succ"
+)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(super) struct BytesAttr(Vec<u8>);
+
+impl BytesAttr {
+    pub(super) fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl AsRef<Vec<u8>> for BytesAttr {
+    fn as_ref(&self) -> &Vec<u8> {
+        &self.0
+    }
+}
+
+impl From<BytesAttr> for Vec<u8> {
+    fn from(value: BytesAttr) -> Self {
+        value.0
+    }
+}
+
 #[pliron_attr(name = "rxla.shape", format = "$bytes")]
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(super) struct ShapeAttr {

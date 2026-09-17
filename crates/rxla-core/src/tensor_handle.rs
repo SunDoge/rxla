@@ -5,27 +5,31 @@ use rxla_pjrt::{BufferMemoryLayout, HostView, Shape, StridedLayout};
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
-    cell::{OnceCell, RefCell},
+    cell::RefCell,
     collections::HashSet,
     ops::Deref,
     ptr::NonNull,
-    rc::{Rc, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
-struct LazySession {
+pub(crate) struct LazySession {
     graph: Graph,
-    inputs: RefCell<Vec<Tensor>>,
-    in_flight: RefCell<HashSet<rxla_ir::SsaId>>,
+    inputs: Mutex<Vec<Tensor>>,
+    in_flight: Mutex<HashSet<rxla_ir::SsaId>>,
 }
 
 pub(crate) struct EvaluationLease {
-    session: Rc<LazySession>,
+    session: Arc<LazySession>,
     ids: Vec<rxla_ir::SsaId>,
 }
 
 impl Drop for EvaluationLease {
     fn drop(&mut self) {
-        let mut in_flight = self.session.in_flight.borrow_mut();
+        let mut in_flight = self
+            .session
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for id in &self.ids {
             in_flight.remove(id);
         }
@@ -36,39 +40,41 @@ thread_local! {
     static LAZY_SESSION: RefCell<Weak<LazySession>> = const { RefCell::new(Weak::new()) };
 }
 
-fn current_lazy_session() -> Rc<LazySession> {
+fn current_lazy_session() -> Arc<LazySession> {
     LAZY_SESSION.with(|slot| {
         if let Some(session) = slot.borrow().upgrade() {
             return session;
         }
-        let session = Rc::new(LazySession {
+        let session = Arc::new(LazySession {
             graph: Graph::default(),
-            inputs: RefCell::new(Vec::new()),
-            in_flight: RefCell::new(HashSet::new()),
+            inputs: Mutex::new(Vec::new()),
+            in_flight: Mutex::new(HashSet::new()),
         });
-        *slot.borrow_mut() = Rc::downgrade(&session);
+        session
+            .graph
+            .0
+            .lazy
+            .set(Arc::downgrade(&session))
+            .expect("new lazy graph has no registered session");
+        *slot.borrow_mut() = Arc::downgrade(&session);
         session
     })
 }
 
-fn lazy_session_for_graph(graph: &Graph) -> Option<Rc<LazySession>> {
-    LAZY_SESSION.with(|slot| {
-        slot.borrow()
-            .upgrade()
-            .filter(|session| std::sync::Arc::ptr_eq(&session.graph.0, &graph.0))
-    })
+fn lazy_session_for_graph(graph: &Graph) -> Option<Arc<LazySession>> {
+    graph.0.lazy.get().and_then(Weak::upgrade)
 }
 
-/// Allocation ownership, independent of tensor shape, strides and offset.
-/// Clones share the owner. Native allocations remain on their owning thread.
+/// Thread-safe allocation ownership, independent of tensor shape, strides and offset.
+/// Clones share the owner.
 #[derive(Clone)]
-pub struct Storage(Rc<StorageInner>);
+pub struct Storage(Arc<StorageInner>);
 enum StorageInner {
     Host {
         dtype: DType,
-        owner: Box<dyn AsRef<[u8]>>,
+        owner: Box<dyn AsRef<[u8]> + Send + Sync>,
     },
-    Device(Rc<Buffer>),
+    Device(Arc<Buffer>),
 }
 
 struct TypedOwner<T: TensorElement>(Vec<T>);
@@ -94,8 +100,16 @@ struct BorrowedOwner {
 struct RawOwner {
     pointer: NonNull<u8>,
     len: usize,
-    deleter: Option<Box<dyn FnOnce()>>,
+    deleter: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
+
+// SAFETY: constructors require the pointed-to bytes to stay immutable and
+// readable for the full shared lifetime. RawOwner alone invokes the Send + Sync
+// deleter exactly once after the final Arc release.
+unsafe impl Send for RawOwner {}
+unsafe impl Sync for RawOwner {}
+unsafe impl Send for BorrowedOwner {}
+unsafe impl Sync for BorrowedOwner {}
 
 impl AsRef<[u8]> for RawOwner {
     fn as_ref(&self) -> &[u8] {
@@ -162,7 +176,7 @@ pub type StorageResult<T> = std::result::Result<T, StorageError>;
 /// bytes, with no padding that may be uninitialized. `DTYPE.size_bytes()` must
 /// equal `size_of::<Self>()`, and the representation must match PJRT's host
 /// transfer representation for `DTYPE`.
-pub unsafe trait TensorElement: Copy + 'static {
+pub unsafe trait TensorElement: Copy + Send + Sync + 'static {
     const DTYPE: DType;
 }
 
@@ -235,7 +249,7 @@ unsafe impl TensorElement for bf16 {
     const DTYPE: DType = DType::BF16;
 }
 
-/// Builder for a materialized host Tensor in the thread-local lazy program.
+/// Builder for a materialized host Tensor in the current lazy program.
 pub struct TensorBuilder {
     shape: Shape,
     dtype: DType,
@@ -327,12 +341,12 @@ impl TensorBuilder {
     ///
     /// `pointer..pointer + byte_len` must remain a readable, immutable host
     /// allocation until `deleter` is invoked. The deleter must release that
-    /// allocation, must be safe to invoke on this thread, and must not unwind.
+    /// allocation, must be safe to invoke from any thread, and must not unwind.
     pub unsafe fn from_raw_parts(
         self,
         pointer: NonNull<u8>,
         byte_len: usize,
-        deleter: impl FnOnce() + 'static,
+        deleter: impl FnOnce() + Send + Sync + 'static,
     ) -> TensorBuildResult<Tensor> {
         let dtype = self.dtype;
         self.from_storage(Storage::host(
@@ -384,15 +398,15 @@ impl Storage {
     /// No payload copy occurs here. The owner must keep its logical contents
     /// stable while used as an input; no mutation is exposed by this API.
     /// Storage keeps the provider alive until its final owning handle is dropped.
-    pub fn host(dtype: DType, owner: impl AsRef<[u8]> + 'static) -> Self {
-        Self(Rc::new(StorageInner::Host {
+    pub fn host(dtype: DType, owner: impl AsRef<[u8]> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(StorageInner::Host {
             dtype,
             owner: Box::new(owner),
         }))
     }
     /// Retain a native allocation; no metadata query or payload copy.
-    pub fn device(buffer: Rc<Buffer>) -> Self {
-        Self(Rc::new(StorageInner::Device(buffer)))
+    pub fn device(buffer: Arc<Buffer>) -> Self {
+        Self(Arc::new(StorageInner::Device(buffer)))
     }
     pub fn kind(&self) -> StorageKind {
         match &*self.0 {
@@ -402,7 +416,7 @@ impl Storage {
     }
     /// Owner identity, not an overlap test for independently imported allocations.
     pub fn shares_owner_with(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.0, &other.0)
     }
     pub fn host_bytes(&self) -> Option<&[u8]> {
         match &*self.0 {
@@ -410,7 +424,7 @@ impl Storage {
             _ => None,
         }
     }
-    pub fn buffer(&self) -> Option<&Rc<Buffer>> {
+    pub fn buffer(&self) -> Option<&Arc<Buffer>> {
         match &*self.0 {
             StorageInner::Device(buffer) => Some(buffer),
             _ => None,
@@ -444,7 +458,7 @@ impl Storage {
     /// Explicitly pack/upload host bytes in native endian order according to dtype.
     /// I32 and BF16 never pass through F32. Typed, aligned scratch exists only at
     /// this native transfer boundary, not in the retained storage representation.
-    pub fn upload(&self, layout: &StridedLayout, client: &Client) -> StorageResult<Rc<Buffer>> {
+    pub fn upload(&self, layout: &StridedLayout, client: &Client) -> StorageResult<Arc<Buffer>> {
         let selected = client
             .info()?
             .addressable_devices
@@ -459,7 +473,7 @@ impl Storage {
         layout: &StridedLayout,
         client: &Client,
         device: usize,
-    ) -> StorageResult<Rc<Buffer>> {
+    ) -> StorageResult<Arc<Buffer>> {
         let view = self.view(layout.clone())?;
         let shape = layout.shape().as_slice();
         let buffer = match self.dtype()? {
@@ -490,7 +504,7 @@ impl Storage {
             )?,
             dtype => return Err(StorageError::UnsupportedStorageDType { dtype }),
         };
-        Ok(Rc::new(buffer))
+        Ok(Arc::new(buffer))
     }
 }
 
@@ -545,14 +559,14 @@ pub struct TensorDescriptor {
     trace: Option<TraceValue>,
     pub(crate) shape: SmallVec<i64, 5>,
     dtype: DType,
-    binding: OnceCell<Binding>,
+    binding: OnceLock<Binding>,
 }
 
 #[derive(Clone)]
 struct TraceValue {
     graph: Graph,
     id: rxla_ir::SsaId,
-    lazy: Option<Rc<LazySession>>,
+    lazy: Option<Arc<LazySession>>,
 }
 
 impl Deref for Tensor {
@@ -577,18 +591,27 @@ impl Tensor {
             if trace
                 .lazy
                 .as_ref()
-                .is_none_or(|other| !Rc::ptr_eq(other, &session))
+                .is_none_or(|other| !Arc::ptr_eq(other, &session))
             {
                 return Err(Error::LazySessionMismatch);
             }
             if !ids.contains(&trace.id) {
-                if session.in_flight.borrow().contains(&trace.id) {
+                if session
+                    .in_flight
+                    .lock()
+                    .map_err(|_| Error::GraphLockPoisoned)?
+                    .contains(&trace.id)
+                {
                     return Err(Error::EvaluationInFlight { index });
                 }
                 ids.push(trace.id);
             }
         }
-        session.in_flight.borrow_mut().extend(ids.iter().copied());
+        session
+            .in_flight
+            .lock()
+            .map_err(|_| Error::GraphLockPoisoned)?
+            .extend(ids.iter().copied());
         Ok(EvaluationLease { session, ids })
     }
 
@@ -662,11 +685,11 @@ impl Tensor {
     pub(super) fn symbolic(graph: Graph, id: rxla_ir::SsaId, shape: &[i64], dtype: DType) -> Self {
         let lazy = lazy_session_for_graph(&graph);
         Self {
-            descriptor: Rc::new(TensorDescriptor {
+            descriptor: Arc::new(TensorDescriptor {
                 trace: Some(TraceValue { graph, id, lazy }),
                 shape: SmallVec::from_slice_copy(shape),
                 dtype,
-                binding: OnceCell::new(),
+                binding: OnceLock::new(),
             }),
         }
     }
@@ -674,7 +697,7 @@ impl Tensor {
     pub fn dtype(&self) -> DType {
         self.descriptor.dtype
     }
-    /// Create a materialized host leaf in the thread's private lazy session.
+    /// Create a materialized host leaf in the current private lazy session.
     /// The checked layout owns the logical shape; storage owns the payload
     /// without copying it.
     pub fn from_host_storage(
@@ -691,11 +714,11 @@ impl Tensor {
         }
         storage.view(layout.clone())?;
         let value = Self {
-            descriptor: Rc::new(TensorDescriptor {
+            descriptor: Arc::new(TensorDescriptor {
                 trace: None,
                 shape: SmallVec::from_slice_copy(layout.shape().as_slice()),
                 dtype,
-                binding: OnceCell::from(Binding::Host { storage, layout }),
+                binding: OnceLock::from(Binding::Host { storage, layout }),
             }),
         };
         value.into_lazy()
@@ -720,25 +743,25 @@ impl Tensor {
     }
     /// Wrap an executor result as a materialized leaf in the implicit lazy graph.
     pub(crate) fn materialized(buffer: Buffer) -> Result<Self> {
-        Self::from_device_buffer(Rc::new(buffer))?.into_lazy()
+        Self::from_device_buffer(Arc::new(buffer))?.into_lazy()
     }
 
     /// Wrap an executor result only for publication into existing lazy roots.
     /// Unlike `materialized`, this does not register a temporary graph input.
     pub(crate) fn materialized_detached(buffer: Buffer) -> Result<Self> {
-        Self::from_device_buffer(Rc::new(buffer))
+        Self::from_device_buffer(Arc::new(buffer))
     }
 
-    fn from_device_buffer(buffer: Rc<Buffer>) -> Result<Self> {
+    fn from_device_buffer(buffer: Arc<Buffer>) -> Result<Self> {
         let shape = buffer.dimensions()?;
         let dtype = buffer.dtype()?;
         let layout = buffer.memory_layout()?;
         Ok(Self {
-            descriptor: Rc::new(TensorDescriptor {
+            descriptor: Arc::new(TensorDescriptor {
                 trace: None,
                 shape: SmallVec::from_slice_copy(&shape),
                 dtype,
-                binding: OnceCell::from(Binding::Device {
+                binding: OnceLock::from(Binding::Device {
                     storage: Storage::device(buffer),
                     layout,
                 }),
@@ -755,9 +778,13 @@ impl Tensor {
             dims: self.shape().to_vec(),
             dtype: self.dtype(),
         })?;
-        session.inputs.borrow_mut().push(self.clone());
+        session
+            .inputs
+            .lock()
+            .map_err(|_| Error::GraphLockPoisoned)?
+            .push(self.clone());
         Ok(Self {
-            descriptor: Rc::new(TensorDescriptor {
+            descriptor: Arc::new(TensorDescriptor {
                 trace: Some(TraceValue {
                     graph: session.graph.clone(),
                     id,
@@ -769,7 +796,7 @@ impl Tensor {
                     .binding
                     .get()
                     .cloned()
-                    .map_or_else(OnceCell::new, OnceCell::from),
+                    .map_or_else(OnceLock::new, OnceLock::from),
             }),
         })
     }
@@ -780,7 +807,10 @@ impl Tensor {
             .lazy
             .as_ref()
             .ok_or(Error::ExplicitTraceEvaluation)?;
-        let inputs = session.inputs.borrow();
+        let inputs = session
+            .inputs
+            .lock()
+            .map_err(|_| Error::GraphLockPoisoned)?;
         parameters
             .iter()
             .map(|&index| {
@@ -829,7 +859,7 @@ impl Tensor {
             let Some(session) = &trace.lazy else {
                 return Err(Error::ExplicitTraceEvaluation);
             };
-            if !std::rc::Rc::ptr_eq(session, first_session) {
+            if !Arc::ptr_eq(session, first_session) {
                 return Err(Error::LazySessionMismatch);
             }
             if replacements
@@ -839,11 +869,11 @@ impl Tensor {
                 continue;
             }
             let backing = Tensor {
-                descriptor: Rc::new(TensorDescriptor {
+                descriptor: Arc::new(TensorDescriptor {
                     trace: None,
                     shape: output.shape.clone(),
                     dtype: output.dtype(),
-                    binding: OnceCell::from(binding.clone()),
+                    binding: OnceLock::from(binding.clone()),
                 }),
             };
             replacements.push((
@@ -861,7 +891,10 @@ impl Tensor {
             .0
             .lock()
             .map_err(|_| Error::GraphLockPoisoned)?;
-        let mut inputs = first_session.inputs.borrow_mut();
+        let mut inputs = first_session
+            .inputs
+            .lock()
+            .map_err(|_| Error::GraphLockPoisoned)?;
         for (id, ty, backing) in replacements {
             if graph.parameter_number(id)?.is_some() {
                 continue;
@@ -874,8 +907,8 @@ impl Tensor {
         drop(graph);
 
         for (output, binding) in outputs.iter().zip(bindings) {
-            // Tensor handles are thread-affine. A pre-existing binding means an
-            // alias or earlier eval already materialized this immutable value.
+            // A pre-existing binding means an alias or earlier eval already
+            // materialized this immutable value.
             let _ = output.binding.set(binding);
         }
         Ok(())
@@ -894,11 +927,11 @@ impl Tensor {
     }
     fn with_binding(&self, binding: Binding) -> Self {
         Self {
-            descriptor: Rc::new(TensorDescriptor {
+            descriptor: Arc::new(TensorDescriptor {
                 trace: self.trace.clone(),
                 shape: self.shape.clone(),
                 dtype: self.dtype(),
-                binding: OnceCell::from(binding),
+                binding: OnceLock::from(binding),
             }),
         }
     }
@@ -977,7 +1010,7 @@ impl Tensor {
     /// Explicitly upload/pack a managed host input, or retain its same-client
     /// device buffer. Native byte order is used; no implicit cross-client copy.
     /// Repeated host calls upload again: use to_device once for resident reuse.
-    pub fn to_buffer(&self, client: &Client) -> Result<Rc<Buffer>> {
+    pub fn to_buffer(&self, client: &Client) -> Result<Arc<Buffer>> {
         match self.binding.get() {
             Some(Binding::Device { storage, .. }) => {
                 let buffer = storage.buffer().ok_or(Error::ExpectedDeviceStorage)?;
@@ -991,7 +1024,11 @@ impl Tensor {
         }
     }
 
-    pub(crate) fn to_buffer_on_device(&self, client: &Client, device: usize) -> Result<Rc<Buffer>> {
+    pub(crate) fn to_buffer_on_device(
+        &self,
+        client: &Client,
+        device: usize,
+    ) -> Result<Arc<Buffer>> {
         match self.binding.get() {
             Some(Binding::Device { storage, .. }) => {
                 let buffer = storage.buffer().ok_or(Error::ExpectedDeviceStorage)?;
@@ -1080,11 +1117,27 @@ impl Compiler {
 mod tests {
     use super::*;
     use rxla_pjrt::{ByteStrides, Shape};
-    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn tensor_and_storage_are_send_sync_and_keep_the_lazy_session() {
+        assert_send_sync::<Tensor>();
+        assert_send_sync::<Storage>();
+
+        let input = Tensor::from_slice([1], DType::F32, [1.0]).unwrap();
+        let original = input.clone();
+        let output = std::thread::spawn(move || input.add_scalar(1.0).unwrap())
+            .join()
+            .unwrap();
+        assert!(Arc::ptr_eq(&original.graph().0, &output.graph().0));
+        assert!(output.is_implicit_lazy());
+    }
 
     struct Owner {
         bytes: Vec<u8>,
-        drops: Rc<Cell<usize>>,
+        drops: Arc<AtomicUsize>,
     }
     impl AsRef<[u8]> for Owner {
         fn as_ref(&self) -> &[u8] {
@@ -1093,14 +1146,14 @@ mod tests {
     }
     impl Drop for Owner {
         fn drop(&mut self) {
-            self.drops.set(self.drops.get() + 1);
+            self.drops.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     #[test]
     fn one_pointer_handle_and_managed_view_lifetime() {
         assert_eq!(std::mem::size_of::<Tensor>(), std::mem::size_of::<usize>());
-        let drops = Rc::new(Cell::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
         let storage = Storage::host(
             DType::F32,
             Owner {
@@ -1111,7 +1164,7 @@ mod tests {
         let graph = Graph::default();
         let input = graph.input(&[3, 2]).unwrap();
         let clone = input.clone();
-        assert!(Rc::ptr_eq(&input.descriptor, &clone.descriptor));
+        assert!(Arc::ptr_eq(&input.descriptor, &clone.descriptor));
         assert!(!input.shape.spilled());
         let layout = StridedLayout::new(
             Shape::new(&[3, 2]).unwrap(),
@@ -1123,17 +1176,17 @@ mod tests {
         let bound = input.with_host_storage(storage.clone(), layout).unwrap();
         let alias = bound.clone();
         assert!(input.storage().is_none());
-        assert!(Rc::ptr_eq(&bound.descriptor, &alias.descriptor));
+        assert!(Arc::ptr_eq(&bound.descriptor, &alias.descriptor));
         assert!(bound.storage().unwrap().shares_owner_with(&storage));
         drop(bound);
         drop(storage);
-        assert_eq!(drops.get(), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
         assert_eq!(
             alias.host_view().unwrap().element(&[2, 1]).unwrap(),
             5f32.to_ne_bytes()
         );
         drop(alias);
-        assert_eq!(drops.get(), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1367,7 +1420,7 @@ mod tests {
 
     #[test]
     fn tensor_builder_raw_owner_invokes_deleter_once_after_last_clone() {
-        let drops = Rc::new(Cell::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
         let allocation = vec![1.0_f32, 2.0];
         let pointer = NonNull::new(allocation.as_ptr().cast_mut().cast::<u8>()).unwrap();
         let observed = drops.clone();
@@ -1378,15 +1431,15 @@ mod tests {
                 .unwrap()
                 .from_raw_parts(pointer, 8, move || {
                     drop(allocation);
-                    observed.set(observed.get() + 1);
+                    observed.fetch_add(1, Ordering::Relaxed);
                 })
                 .unwrap()
         };
         let alias = tensor.clone();
         drop(tensor);
-        assert_eq!(drops.get(), 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
         drop(alias);
-        assert_eq!(drops.get(), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 
     #[test]

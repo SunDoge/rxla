@@ -169,7 +169,7 @@ semantic IR shape vectors remain unchanged.
 `Tensor` now uses a one-pointer immutable descriptor with inline shape metadata
 and optional managed F32/I32/BF16 input storage. See [ownership and migration notes](TENSOR-STORAGE-DESIGN.md)
 and `crates/rxla-core/examples/managed_tensor.rs`. Native-backed Tensor handles are
-thread-affine (the Tensor type is now !Send/!Sync); send prepared snapshots to
+Arc-backed and `Send + Sync`; send prepared snapshots to
 workers instead. Binding and uploads remain explicit, not automatic evaluation.
 
 Storage retains type-erased bytes plus an explicit dtype: `Storage::host(dtype,
@@ -1952,7 +1952,7 @@ tied-weight F16/BF16 load and execution test.
 For identity-based F32 weight binding, use `graph.parameter(shape)` and build
 operations with `parameter.tensor()`. Cloning a `Parameter` preserves its input
 identity, including tied weights. `session.bind_parameters(vec![(parameter,
-Rc::new(buffer))])` replaces the complete fixed-input set without numeric offsets.
+Arc::new(buffer))])` replaces the complete fixed-input set without numeric offsets.
 It rejects foreign/duplicate handles and validates buffer client, shape and dtype
 before commit. Empty bindings clear the set; unbound inputs keep registration
 order. Values remain runtime arguments and changing weights does not recompile.
@@ -2116,12 +2116,12 @@ is persisted: graph-local identities, the original-input mapping, weights and
 state are rebuilt/rebound by the caller. This is a same-plugin/same-host CPU
 compatibility test, not cross-version or cross-device cache portability.
 
-`session.bind_inputs(Vec<(usize, Rc<Buffer>)>)` fixes selected visible inputs,
+`session.bind_inputs(Vec<(usize, Arc<Buffer>)>)` fixes selected visible inputs,
 such as inference weights, once. Indices are the original visible input order,
 excluding hidden state parameters. Subsequent `run` calls supply only unbound
 inputs in their original relative order; `input_count()` reports that count.
 For example, TinyLlama binds 201 weight buffers and then calls
-`session.run(&[&token])` at every step, with position in an I32 state slot. `Rc` lets independent sessions
+`session.run(&[&token])` at every step, with position in an I32 state slot. `Arc` lets independent sessions
 share read-only weights without copying while owning separate mutable KV states.
 
 `session.new_session(initial_state)` creates another session with the same
@@ -2172,7 +2172,7 @@ are rejected before commit, preserving previous bindings and state. Rebinding
 does not recompile or embed weight values in HLO/cache keys. `replace_state`
 does not change input bindings. Execution still validates the full parameter list;
 this is an ownership/API improvement, not a claim of reduced runtime validation
-cost or cross-thread sharing (the current runtime is deliberately thread-affine).
+cost or automatic cross-client sharing.
 
 `Session::into_state(self)` consumes a session and returns all owned state buffers
 with their slot identities, without needing replacement buffers. Resume with
@@ -2814,7 +2814,7 @@ both sides must appear exactly once with matching dtype/shape. This supports
 different registration orders and pruned input ABIs. Resident buffers transfer
 ownership without graph execution, recompilation, or tensor payload copies.
 Fixed input bindings are explicitly replaced using destination registration
-numbers and `Rc<Buffer>` handles; an empty set clears them. Remaining retained
+numbers and `Arc<Buffer>` handles; an empty set clears them. Remaining retained
 inputs become dynamic in destination order. There is no implicit semantic name
 matching, state-count migration, or cross-client tensor transfer.
 
@@ -3574,7 +3574,7 @@ training buffers explicitly, and keep the existing trusted-plugin/namespace
 compatibility contract. It does not remove Rust builds or graph construction.
 
 `Compiler::new(client, CacheLimits::default())` creates a client-local LRU cache;
-`compile(&graph, &output)` and `compile_many` return shared `Rc<Executable>` handles.
+`compile(&graph, &output)` and `compile_many` return shared `Arc<Executable>` handles.
 The defaults retain at most 32 entries and 16 MiB of serialized HLO keys. Key bytes
 do **not** include backend executable memory or temporary compilation allocations.
 Zero entry capacity disables retention. Oversized graphs compile but bypass caching.

@@ -83,7 +83,7 @@ Mutation requires exclusive session access. Training owns its parameter updates
 and optimizer state separately; not every tensor field is a differentiable parameter.
 
 The implemented `Session::bind_inputs` retains selected read-only runtime inputs
-as `Rc<Buffer>` owners, allowing sessions to share weights while their mutable
+as `Arc<Buffer>` owners, allowing sessions to share weights while their mutable
 state remains independently owned. The low-level binding indices refer to visible
 input registration order. `StateGraph::parameter` now registers an F32 input with
 a `Parameter` identity and symbolic `tensor()` accessor. Clones preserve identity,
@@ -192,9 +192,9 @@ silently dropping their gradient. The broader policies below remain necessary.
 - Concurrency: no overlapping exclusive state update. Independent sessions may
   eventually schedule concurrently. Persistent PJRT plugin, client, buffer and
   executable handles are `Send + Sync`, following PJRT's thread-safe native
-  handle contract; graph-owned sessions remain thread-affine because their
-  transactional state uses `Rc`. In-flight submission handles are also still
-  thread-affine. Native execution cancellation and in-flight memory budgeting
+  handle contract; graph and session ownership now follows the same Arc-based
+  contract. Mutation still requires exclusive `&mut Session` access. In-flight
+  submission handles remain thread-affine. Native execution cancellation and in-flight memory budgeting
   remain separate scheduling concerns.
 - External effects: not ordinary dead-code-eliminable tensor operations. Ordering
   and retry behavior need separate contracts before adding callbacks or I/O.

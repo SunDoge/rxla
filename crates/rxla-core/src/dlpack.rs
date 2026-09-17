@@ -36,6 +36,12 @@ struct Owner<M: ManagedTensorBase> {
     len: usize,
 }
 
+// SAFETY: import consumes the managed tensor, validates CPU storage, and RXLA
+// exposes the allocation only through immutable byte views. The DLPack deleter
+// owns the transferred allocation and may run after the handle moves threads.
+unsafe impl<M: ManagedTensorBase> Send for Owner<M> {}
+unsafe impl<M: ManagedTensorBase> Sync for Owner<M> {}
+
 impl<M: ManagedTensorBase> AsRef<[u8]> for Owner<M> {
     fn as_ref(&self) -> &[u8] {
         // SAFETY: the Managed handle retains the producer allocation and its

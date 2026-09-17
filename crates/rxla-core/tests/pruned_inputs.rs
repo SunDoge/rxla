@@ -1,5 +1,5 @@
 use rxla_core::{CacheLimits, Client, Compiler, StateGraph};
-use std::rc::Rc;
+use std::sync::Arc;
 
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
@@ -35,7 +35,7 @@ fn real_pruned_inputs_preserve_identities_hidden_updates_and_state_transfer() {
     assert!(pruned.session(vec![]).is_err()); // old state inputs pruned, schema intact
     let mut session = pruned.session(fresh()).unwrap();
     assert_eq!(session.input_count(), 3);
-    let shared = Rc::new(client.buffer(&[], &[2.]).unwrap());
+    let shared = Arc::new(client.buffer(&[], &[2.]).unwrap());
     session
         .bind_parameters(vec![(weight.clone(), shared.clone())])
         .unwrap();
@@ -45,7 +45,7 @@ fn real_pruned_inputs_preserve_identities_hidden_updates_and_state_transfer() {
         session
             .bind_parameters(vec![(
                 dead.clone(),
-                Rc::new(client.buffer(&[3], &[0.; 3]).unwrap())
+                Arc::new(client.buffer(&[3], &[0.; 3]).unwrap())
             )])
             .is_err()
     );

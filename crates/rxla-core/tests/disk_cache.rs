@@ -120,7 +120,7 @@ fn real_flags_partition_cache_across_processes() {
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_pruned_cache_restores_with_different_original_input_numbers() {
-    use std::rc::Rc;
+    use std::sync::Arc;
     const CHILD: &str = "XLA_PRUNED_DISK_CACHE_TEST_PATH";
     let child_path = std::env::var_os(CHILD);
     let is_child = child_path.is_some();
@@ -176,7 +176,7 @@ fn real_pruned_cache_restores_with_different_original_input_numbers() {
             (total.clone(), client.buffer(&[], &[initial]).unwrap()),
         ]
     };
-    let shared = Rc::new(client.buffer(&[], &[factor]).unwrap());
+    let shared = Arc::new(client.buffer(&[], &[factor]).unwrap());
     let mut session = program.session(fresh()).unwrap();
     session
         .bind_parameters(vec![(weight.clone(), shared.clone())])
@@ -401,7 +401,7 @@ fn real_training_cache_restores_code_not_optimizer_state() {
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_cached_integer_position_restarts_with_fresh_state_in_child() {
-    use std::rc::Rc;
+    use std::sync::Arc;
     const CHILD: &str = "XLA_INTEGER_STATE_DISK_TEST_PATH";
     let child_path = std::env::var_os(CHILD);
     let temp = tempfile::tempdir().unwrap();
@@ -447,7 +447,7 @@ fn real_cached_integer_position_restarts_with_fresh_state_in_child() {
     };
     let mut first = program.session(initial()).unwrap();
     let mut second = program.session(initial()).unwrap();
-    let buffer = Rc::new(client.buffer(&[1], &[factor]).unwrap());
+    let buffer = Arc::new(client.buffer(&[1], &[factor]).unwrap());
     first
         .bind_parameters(vec![(weight.clone(), buffer.clone())])
         .unwrap();
@@ -526,7 +526,7 @@ fn real_cached_integer_position_restarts_with_fresh_state_in_child() {
 #[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_cached_state_program_rebinds_fresh_sessions_across_processes() {
-    use std::rc::Rc;
+    use std::sync::Arc;
     const CHILD: &str = "XLA_STATE_DISK_CACHE_TEST_PATH";
     let child_path = std::env::var_os(CHILD);
     let temp = tempfile::tempdir().unwrap();
@@ -587,7 +587,7 @@ fn real_cached_state_program_rebinds_fresh_sessions_across_processes() {
     } else {
         (0., 2.)
     };
-    let shared_weight = Rc::new(client.buffer(&[1], &[factor]).unwrap());
+    let shared_weight = Arc::new(client.buffer(&[1], &[factor]).unwrap());
     let mut unrelated = StateGraph::default();
     let foreign_k = unrelated.state(&[4]).unwrap();
     let foreign_v = unrelated.state(&[4]).unwrap();
