@@ -14,7 +14,7 @@ pub(crate) fn infer(op: &Op, types: &[DType]) -> Result<DType> {
         Op::Convert { dtype } => (
             types.len() == 1
                 && matches!(first, DType::U8 | DType::F16 | DType::BF16 | DType::F32)
-                && matches!(*dtype, DType::F16 | DType::BF16 | DType::F32),
+                && matches!(*dtype, DType::I32 | DType::F16 | DType::BF16 | DType::F32),
             *dtype,
         ),
         Op::IntegerBinary(_) => (types == [DType::I32, DType::I32], DType::I32),

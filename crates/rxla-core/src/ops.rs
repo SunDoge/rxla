@@ -2,8 +2,9 @@ use super::*;
 use rxla_ir::Comparison;
 
 impl Tensor {
-    /// Explicit floating-point element conversion. RXLA never inserts dtype
-    /// promotion implicitly; shape and device placement are unchanged.
+    /// Explicit numeric element conversion. RXLA never inserts dtype promotion
+    /// implicitly; shape and device placement are unchanged. F32 to I32 follows
+    /// StableHLO conversion semantics and is nondifferentiable.
     pub fn cast(&self, dtype: DType) -> Result<Self> {
         if dtype == self.dtype() {
             return Ok(self.clone());

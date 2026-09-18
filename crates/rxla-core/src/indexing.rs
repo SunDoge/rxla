@@ -126,6 +126,55 @@ fn validate_dynamic_indices(
 }
 
 impl Tensor {
+    /// Construct I32 coordinates in this tensor's trace. This is the Tensor-first
+    /// form of [`Graph::iota_i32`] for library code that intentionally does not
+    /// expose or carry a graph handle.
+    pub fn iota_i32(&self, dims: &[i64], axis: usize) -> Result<Tensor> {
+        self.graph().iota_i32(dims, axis)
+    }
+
+    /// Find insertion positions for I32 `needles` in this sorted rank-one I32
+    /// tensor. `right=false` returns the first equal position; `right=true`
+    /// returns the position after the last equal value. The result has the
+    /// needles' shape and is built as a fixed logarithmic sequence of gathers,
+    /// comparisons and selects, so it remains compatible with static XLA shapes.
+    pub fn searchsorted_i32(&self, needles: &Tensor, right: bool) -> Result<Tensor> {
+        if self.dtype() != DType::I32 || needles.dtype() != DType::I32 {
+            return Err(err("searchsorted requires I32 values and needles"));
+        }
+        if self.shape().len() != 1 {
+            return Err(err("searchsorted values must be rank one"));
+        }
+        if !Arc::ptr_eq(&self.graph().0, &needles.graph().0) {
+            return Err(err("cross-graph searchsorted operands"));
+        }
+        let length = self.shape()[0];
+        if length > i32::MAX as i64 {
+            return Err(err("searchsorted values exceed I32 index range"));
+        }
+        if length == 0 {
+            return self.graph().scalar_i32(0)?.broadcast_to(needles.shape());
+        }
+        let mut low = self.graph().scalar_i32(0)?.broadcast_to(needles.shape())?;
+        let mut high = self
+            .graph()
+            .scalar_i32(length as i32)?
+            .broadcast_to(needles.shape())?;
+        let iterations = (i32::BITS - (length as u32).leading_zeros()) as usize;
+        for _ in 0..iterations {
+            let middle = low.wrapping_add(&high)?.shift_right_logical(1)?;
+            let values = self.take(&middle, 0)?;
+            let advance = if right {
+                values.le_mask(needles)?
+            } else {
+                values.lt_mask(needles)?
+            };
+            low = advance.select(&middle.wrapping_add_scalar(1)?, &low)?;
+            high = advance.select(&high, &middle)?;
+        }
+        Ok(low)
+    }
+
     fn integer_binary(&self, rhs: &Self, op: IntegerBinary) -> Result<Self> {
         if self.dtype() != DType::I32 || rhs.dtype() != DType::I32 {
             return Err(err("integer bitwise operands must be I32"));
