@@ -1,0 +1,53 @@
+{
+  "dataset": "/data/datasets/coco2017.lance",
+  "rows": 123287,
+  "samples": 4096,
+  "encoded_bytes": 664971737,
+  "rayon_threads": 24,
+  "measurements": [
+    {
+      "name": "lance_read",
+      "seconds_median": 0.064051819,
+      "seconds_all": [
+        0.097744587,
+        0.064051819,
+        0.059493088
+      ],
+      "samples_per_second": 63948.22292244347,
+      "encoded_mib_per_second": 9900.834615063028
+    },
+    {
+      "name": "serial_jpeg_decode",
+      "seconds_median": 5.427432945,
+      "seconds_all": [
+        5.387288061,
+        5.427432945,
+        5.427580645
+      ],
+      "samples_per_second": 754.6845887379269,
+      "encoded_mib_per_second": 116.84464334049026
+    },
+    {
+      "name": "rayon_jpeg_decode",
+      "seconds_median": 0.382646834,
+      "seconds_all": [
+        0.382646834,
+        0.376284643,
+        0.388677404
+      ],
+      "samples_per_second": 10704.387534537918,
+      "encoded_mib_per_second": 1657.3153371836122
+    },
+    {
+      "name": "lance_read_and_rayon_decode",
+      "seconds_median": 0.464266976,
+      "seconds_all": [
+        0.464266976,
+        0.449352813,
+        0.480016285
+      ],
+      "samples_per_second": 8822.509917224868,
+      "encoded_mib_per_second": 1365.952134215447
+    }
+  ]
+}

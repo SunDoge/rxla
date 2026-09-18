@@ -105,3 +105,59 @@ storage.
 
 Raw timings and environment versions are recorded in
 [`benchmarks/coco-lance-results.json`](../benchmarks/coco-lance-results.json).
+
+## Rust and Rayon follow-up
+
+The Rust follow-up uses Lance's native `ReadBlobsBuilder`, the `image` crate's
+JPEG decoder, and Rayon. It does not cross the Python boundary. Build it with
+the protoc already managed by mise:
+
+```bash
+cd benchmarks/coco_lance_rust
+PROTOC=/home/me/.local/share/mise/installs/protoc/35.1/bin/protoc \
+  cargo build --release
+./target/release/coco-lance-bench \
+  /data/datasets/coco2017.lance \
+  --samples 4096 \
+  --repeats 3 \
+  --json-output ../coco-lance-rust-results.json
+```
+
+On 4,096 random images totalling 664,971,737 encoded bytes:
+
+| Operation | Threads | Median | Images/s |
+|---|---:|---:|---:|
+| Native Lance Blob v2 read | internal | 64.1 ms | 63,948 |
+| Rust JPEG decode | 1 | 5.427 s | 754.7 |
+| Rayon JPEG decode | 24 | 382.6 ms | 10,704 |
+| Native Lance read + Rayon decode | 24 | 464.3 ms | 8,823 |
+
+The serial Rust result is close to the Python/Pillow end-to-end result, while
+Rayon makes the complete path about 11.4 times faster than the recorded Python
+path. This confirms that JPEG decoding and lack of concurrency—not Lance blob
+I/O—caused the roughly 770 images/s result.
+
+Thread scaling for the complete read-and-decode operation was:
+
+| Rayon threads | Median | Images/s |
+|---:|---:|---:|
+| 4 | 1.446 s | 2,833 |
+| 8 | 781.0 ms | 5,245 |
+| 16 | 546.5 ms | 7,495 |
+| 24 | 464.3 ms | 8,823 |
+
+Scaling remains useful through 24 threads, although it is sublinear after 8
+threads. A real loader should use a bounded Rayon pool so decoding does not
+compete with model-side CPU work.
+
+There is an important integration cost: Lance 11 does not expose a lightweight
+read-only dataset crate. `lance-file` and `lance-io` are split out, but the
+high-level `Dataset::open` and planned `read_blobs` API is in the umbrella
+`lance` crate, which unconditionally includes DataFusion, indexing, and text
+search dependencies even with default features disabled. The benchmark is
+therefore a standalone crate outside the rxla workspace. Adding Lance to rxla's
+public runtime dependency graph would currently impose an unreasonable clean
+build cost.
+
+Raw Rust timings are recorded in
+[`benchmarks/coco-lance-rust-results.json`](../benchmarks/coco-lance-rust-results.json).
