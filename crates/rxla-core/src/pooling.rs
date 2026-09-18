@@ -4,7 +4,7 @@ impl Tensor {
     /// Max pooling over H/W, independently for every batch/channel. Padding is
     /// negative infinity, including windows entirely outside the input. Output
     /// sizes use floor division; no ceil mode, dilation or argmax indices.
-    /// Max-pool training is outside the current Pliron training surface.
+    /// Reverse mode uses an explicit offset-wise scatter and divides ties evenly.
     pub fn max_pool2d(&self, options: Pool2dOptions) -> Result<Self> {
         let output = self.pool2d_shape(options)?;
         self.graph()
@@ -54,12 +54,7 @@ impl Tensor {
         }
         // Treat channels as independent batches, not a dense C-by-C identity
         // kernel. A scalar broadcast creates the all-ones spatial kernel.
-        let batch = input_shape[0]
-            .checked_mul(input_shape[3])
-            .ok_or_else(|| err("pool gradient batch/channel size overflow"))?;
-        let channels_first =
-            self.transpose([0, 3, 1, 2])?
-                .reshape([batch, self.shape[1], self.shape[2], 1])?;
+        let channels_first = Rearrange::new("n h w c -> (n c) h w 1").apply(self)?;
         let kernel = self.graph().constant(&[], &[1.])?.broadcast_to([
             options.window[0],
             options.window[1],
@@ -74,23 +69,103 @@ impl Tensor {
             *extra = ((padded - i128::from(options.window[axis]))
                 % i128::from(options.strides[axis])) as i64;
         }
-        channels_first
-            .conv_transpose2d(
-                &kernel,
-                ConvTranspose2dOptions {
-                    strides: options.strides,
-                    padding: options.padding,
-                    output_padding,
-                    ..Default::default()
-                },
-            )?
-            .reshape([
-                input_shape[0],
-                input_shape[3],
-                input_shape[1],
-                input_shape[2],
-            ])?
-            .transpose([0, 2, 3, 1])
+        let scattered = channels_first.conv_transpose2d(
+            &kernel,
+            ConvTranspose2dOptions {
+                strides: options.strides,
+                padding: options.padding,
+                output_padding,
+                ..Default::default()
+            },
+        )?;
+        Rearrange::new("(n c) h w 1 -> n h w c")
+            .axis("n", input_shape[0])
+            .apply(&scattered)
+    }
+
+    pub(super) fn max_pool2d_gradient(
+        &self,
+        input: &Tensor,
+        options: Pool2dOptions,
+    ) -> Result<Self> {
+        if input.shape().contains(&0) || self.shape().contains(&0) {
+            return input.scalar(0.0)?.broadcast_to(input.shape());
+        }
+        let pooled = input.max_pool2d(options)?;
+        let padded = input.pad(
+            &[[0, 0], options.padding[0], options.padding[1], [0, 0]],
+            f32::NEG_INFINITY,
+        )?;
+        let mut masks = Vec::with_capacity((options.window[0] * options.window[1]) as usize);
+        let limits = [input.shape()[0], 0, 0, input.shape()[3]];
+        for row in 0..options.window[0] {
+            for column in 0..options.window[1] {
+                let mut offset_limits = limits;
+                offset_limits[1] = row + (pooled.shape()[1] - 1) * options.strides[0] + 1;
+                offset_limits[2] = column + (pooled.shape()[2] - 1) * options.strides[1] + 1;
+                let values = padded.slice(
+                    &[0, row, column, 0],
+                    &offset_limits,
+                    &[1, options.strides[0], options.strides[1], 1],
+                )?;
+                masks.push(values.eq_mask(&pooled)?);
+            }
+        }
+        let mut ties = pooled.scalar(0.0)?.broadcast_to(pooled.shape())?;
+        for mask in &masks {
+            ties = ties.add(mask)?;
+        }
+        let shared = self.div(&ties)?;
+        let mut result = input.scalar(0.0)?.broadcast_to(input.shape())?;
+        for (offset, mask) in masks.into_iter().enumerate() {
+            let row = offset as i64 / options.window[1];
+            let column = offset as i64 % options.window[1];
+            let contribution = shared.mul(&mask)?;
+            result = result.add(&contribution.scatter_pool_offset(
+                input.shape(),
+                options,
+                [row, column],
+            )?)?;
+        }
+        Ok(result)
+    }
+
+    fn scatter_pool_offset(
+        &self,
+        input_shape: &[i64],
+        options: Pool2dOptions,
+        offset: [i64; 2],
+    ) -> Result<Self> {
+        let channels_first = Rearrange::new("n h w c -> (n c) h w 1").apply(self)?;
+        let rows = self.iota_i32(&[options.window[0], options.window[1], 1, 1], 0)?;
+        let columns = self.iota_i32(&[options.window[0], options.window[1], 1, 1], 1)?;
+        let row = rows
+            .scalar_i32(offset[0] as i32)?
+            .broadcast_to(rows.shape())?;
+        let column = columns
+            .scalar_i32(offset[1] as i32)?
+            .broadcast_to(columns.shape())?;
+        let kernel = rows.eq_mask(&row)?.mul(&columns.eq_mask(&column)?)?;
+        let mut output_padding = [0; 2];
+        for (axis, extra) in output_padding.iter_mut().enumerate() {
+            let padded = i128::from(input_shape[axis + 1])
+                + i128::from(options.padding[axis][0])
+                + i128::from(options.padding[axis][1]);
+            *extra = ((padded - i128::from(options.window[axis]))
+                % i128::from(options.strides[axis])) as i64;
+        }
+        let scattered = channels_first.conv_transpose2d(
+            &kernel,
+            ConvTranspose2dOptions {
+                strides: options.strides,
+                padding: options.padding,
+                output_padding,
+                ..Default::default()
+            },
+        )?;
+        Rearrange::new("(n c) h w 1 -> n h w c")
+            .axis("n", input_shape[0])
+            .apply(&scattered)
     }
 
     fn pool2d_shape(&self, options: Pool2dOptions) -> Result<TensorType> {

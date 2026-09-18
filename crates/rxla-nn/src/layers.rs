@@ -34,22 +34,54 @@ impl<L: Layer> NamedLayer<L> {
     }
 }
 
-/// Tensor-first application of layer configurations.
+/// An operation accepted by [`TensorApply::apply`].
+pub trait TensorOperation {
+    fn apply_to(self, input: &Tensor) -> Result<Tensor>;
+}
+
+impl<L: Layer> TensorOperation for &NamedLayer<L> {
+    fn apply_to(self, input: &Tensor) -> Result<Tensor> {
+        self.apply(input)
+    }
+}
+
+impl TensorOperation for rxla_core::Rearrange<'_> {
+    fn apply_to(self, input: &Tensor) -> Result<Tensor> {
+        Ok(self.apply(input)?)
+    }
+}
+
+/// Tensor-first application of layers and parameter-free operations.
 pub trait TensorApply {
-    /// Apply a reusable layer already bound to its model-tree path.
-    fn apply<L: Layer>(&self, layer: &NamedLayer<L>) -> Result<Tensor>;
+    fn apply<O: TensorOperation>(&self, operation: O) -> Result<Tensor>;
 
     /// Bind a layer configuration to `cx` and immediately apply it.
     fn through<L: Layer>(&self, cx: Cx, layer: L) -> Result<Tensor>;
 }
 
 impl TensorApply for Tensor {
-    fn apply<L: Layer>(&self, layer: &NamedLayer<L>) -> Result<Tensor> {
-        layer.apply(self)
+    fn apply<O: TensorOperation>(&self, operation: O) -> Result<Tensor> {
+        operation.apply_to(self)
     }
 
     fn through<L: Layer>(&self, cx: Cx, layer: L) -> Result<Tensor> {
         layer.apply_in(&cx, self)
+    }
+}
+
+#[cfg(test)]
+mod tensor_operation_tests {
+    use super::*;
+    use rxla_core::{Rearrange, Tracer};
+
+    #[test]
+    fn apply_accepts_parameter_free_rearrange() {
+        let graph = Tracer::default();
+        let input = graph.input([6, 4, 5, 1]).unwrap();
+        let output = input
+            .apply(Rearrange::new("(n c) h w 1 -> n h w c").axis("n", 2))
+            .unwrap();
+        assert_eq!(output.shape(), [2, 4, 5, 3]);
     }
 }
 

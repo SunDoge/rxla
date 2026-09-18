@@ -503,10 +503,11 @@ impl Tensor {
                         dy.sum_pool2d_gradient(value(node.operands[0]).shape(), *options)?,
                     );
                 }
-                Op::MaxPool2d(_) => {
-                    return Err(err(
-                        "max-pool gradients are not supported by the Pliron frontend",
-                    ));
+                Op::MaxPool2d(options) => {
+                    add(
+                        0,
+                        dy.max_pool2d_gradient(&value(node.operands[0]), *options)?,
+                    );
                 }
                 Op::Conv2dInputGradient(options) => {
                     let source = value(node.operands[0]);
@@ -587,37 +588,18 @@ impl Tensor {
                                 .broadcast_to(kernel.shape())?,
                         );
                     } else {
-                        if options.groups == 1 {
-                            add(
-                                0,
-                                conv2d_input_gradient(&dy, &kernel, input.shape(), *options)?,
-                            );
-                            add(
-                                1,
-                                self.graph().node(
-                                    Op::Conv2dKernelGradient(*options),
-                                    vec![input.node_id(), dy.node_id()],
-                                    kernel.shape(),
-                                )?,
-                            );
-                        } else {
-                            add(
-                                0,
-                                self.graph().node(
-                                    Op::Conv2dInputGradient(*options),
-                                    vec![dy.node_id(), kernel.node_id()],
-                                    input.shape(),
-                                )?,
-                            );
-                            add(
-                                1,
-                                self.graph().node(
-                                    Op::Conv2dKernelGradient(*options),
-                                    vec![input.node_id(), dy.node_id()],
-                                    kernel.shape(),
-                                )?,
-                            );
-                        }
+                        add(
+                            0,
+                            conv2d_input_gradient(&dy, &kernel, input.shape(), *options)?,
+                        );
+                        add(
+                            1,
+                            self.graph().node(
+                                Op::Conv2dKernelGradient(*options),
+                                vec![input.node_id(), dy.node_id()],
+                                kernel.shape(),
+                            )?,
+                        );
                     }
                 }
                 Op::Conv2dOihw(options) => {
@@ -644,29 +626,13 @@ impl Tensor {
                             kernel.shape()[1],
                             kernel.shape()[0],
                         ];
-                        let (input_gradient, gradient) = if options.groups == 1 {
-                            (
-                                conv2d_input_gradient(&dy, &hwio, input.shape(), *options)?,
-                                self.graph().node(
-                                    Op::Conv2dKernelGradient(*options),
-                                    vec![input.node_id(), dy.node_id()],
-                                    &hwio_shape,
-                                )?,
-                            )
-                        } else {
-                            (
-                                self.graph().node(
-                                    Op::Conv2dInputGradient(*options),
-                                    vec![dy.node_id(), hwio.node_id()],
-                                    input.shape(),
-                                )?,
-                                self.graph().node(
-                                    Op::Conv2dKernelGradient(*options),
-                                    vec![input.node_id(), dy.node_id()],
-                                    &hwio_shape,
-                                )?,
-                            )
-                        };
+                        let input_gradient =
+                            conv2d_input_gradient(&dy, &hwio, input.shape(), *options)?;
+                        let gradient = self.graph().node(
+                            Op::Conv2dKernelGradient(*options),
+                            vec![input.node_id(), dy.node_id()],
+                            &hwio_shape,
+                        )?;
                         add(0, input_gradient);
                         add(1, gradient.transpose([3, 2, 0, 1])?);
                     }
@@ -746,6 +712,31 @@ fn conv2d_input_gradient(
     input_shape: &[i64],
     options: Conv2dOptions,
 ) -> Result<Tensor> {
+    if options.groups > 1 {
+        let output_channels = output_gradient.shape()[3] / options.groups;
+        let input_channels = input_shape[3] / options.groups;
+        let mut gradients = Vec::with_capacity(options.groups as usize);
+        for group in 0..options.groups {
+            let group_output =
+                output_gradient.narrow(3, group * output_channels, output_channels)?;
+            let group_kernel = kernel.narrow(3, group * output_channels, output_channels)?;
+            let mut group_options = options;
+            group_options.groups = 1;
+            let group_shape = [
+                input_shape[0],
+                input_shape[1],
+                input_shape[2],
+                input_channels,
+            ];
+            gradients.push(conv2d_input_gradient(
+                &group_output,
+                &group_kernel,
+                &group_shape,
+                group_options,
+            )?);
+        }
+        return Tensor::concatenate(&gradients, 3);
+    }
     let mut output_padding = [0; 2];
     for axis in 0..2 {
         let effective = (kernel.shape()[axis] - 1) * options.dilation[axis] + 1;

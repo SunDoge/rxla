@@ -1,11 +1,12 @@
 //! Functional Adam for parameter-effect models.
 
+use derive_setters::Setters;
 use rxla_core::{Buffer, Compiler, DType, PreparedStateGraph, StateProgram, Tensor};
 use rxla_nn::{AppliedModel, ParameterId, ParameterSelection, TransformState};
 use snafu::{Snafu, ensure};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Setters)]
 pub struct AdamOptions {
     pub learning_rate: f32,
     pub beta1: f32,

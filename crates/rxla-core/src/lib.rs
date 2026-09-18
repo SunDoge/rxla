@@ -46,6 +46,7 @@ mod ops;
 mod planning;
 mod pooling;
 pub mod random;
+mod rearrange;
 mod resize;
 mod rotary;
 pub mod vision;
@@ -53,6 +54,7 @@ pub use planning::{
     AutoShardingOptions, ExecutionPlan, ExecutionStage, PlannedSharding, PlanningPolicy,
     ShardingConstraint, ShardingDecision,
 };
+pub use rearrange::Rearrange;
 pub use rotary::RotaryLayout;
 pub use rxla_ir::{Mesh, MeshAxis, PartitionSpec, Sharding, ShardingError};
 mod state;
