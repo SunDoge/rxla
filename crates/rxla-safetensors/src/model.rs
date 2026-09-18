@@ -10,6 +10,7 @@ use std::collections::HashMap;
 /// pairs to `AppliedModel::bind`, which owns the authoritative ABI ordering.
 pub struct SchemaBuffers {
     pub parameters: Vec<(String, Buffer)>,
+    pub states: Vec<(String, Buffer)>,
 }
 
 impl SchemaBuffers {
@@ -27,12 +28,20 @@ impl SchemaBuffers {
         self.parameters.into_iter()
     }
 
+    pub fn state_bindings(&self) -> Vec<(&str, &Buffer)> {
+        self.states
+            .iter()
+            .map(|(path, buffer)| (path.as_str(), buffer))
+            .collect()
+    }
+
     /// Initialize a resident model session directly from this checkpoint load.
     pub fn initialize<'model>(
         self,
         builder: CompiledModelSessionBuilder<'model>,
     ) -> rxla_nn::Result<CompiledModelSessionBuilder<'model>> {
-        builder.parameters(self.into_parameters())
+        let SchemaBuffers { parameters, states } = self;
+        builder.parameters(parameters)?.states(states)
     }
 }
 
@@ -89,7 +98,10 @@ impl<R: Read + Seek> SafeTensors<R> {
                 Ok((spec.path().to_owned(), buffer))
             })
             .collect::<Result<_>>()?;
-        Ok(SchemaBuffers { parameters })
+        Ok(SchemaBuffers {
+            parameters,
+            states: Vec::new(),
+        })
     }
 
     /// Validate an exact path/shape/dtype match without reading tensor payloads
@@ -152,7 +164,43 @@ impl<R: Read + Seek> SafeTensors<R> {
                 Ok((spec.path().to_owned(), buffer))
             })
             .collect::<Result<_>>()?;
-        Ok(SchemaBuffers { parameters })
+        Ok(SchemaBuffers {
+            parameters,
+            states: Vec::new(),
+        })
+    }
+
+    /// Upload every parameter and persistent state whose checkpoint key exactly
+    /// matches its model-schema path. This is the preferred inference loader for
+    /// stateful layers such as BatchNorm.
+    pub fn load_model_schema(
+        &mut self,
+        client: &Client,
+        schema: &ModelSchema,
+    ) -> Result<SchemaBuffers> {
+        self.validate_model_schema(schema)?;
+        let parameters = self.load_parameter_schema(client, schema)?.parameters;
+        let states = schema
+            .states()
+            .iter()
+            .map(|spec| {
+                Ok((
+                    spec.path().to_owned(),
+                    upload_typed(self, client, spec.path(), spec.dtype())?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(SchemaBuffers { parameters, states })
+    }
+
+    /// Validate all parameter and persistent-state headers without reading or
+    /// uploading payloads. Extra checkpoint tensors are permitted.
+    pub fn validate_model_schema(&self, schema: &ModelSchema) -> Result<()> {
+        self.validate_parameter_schema(schema)?;
+        for spec in schema.states() {
+            validate_tensor_info(self, spec.path(), spec.shape(), spec.dtype())?;
+        }
+        Ok(())
     }
 
     fn validate_parameter_schema_with_mapping(
@@ -199,6 +247,58 @@ impl<R: Read + Seek> SafeTensors<R> {
         }
 
         Ok(sources)
+    }
+}
+
+fn validate_tensor_info<R: Read + Seek>(
+    checkpoint: &SafeTensors<R>,
+    path: &str,
+    expected_shape: &[i64],
+    expected_dtype: DType,
+) -> Result<()> {
+    let info = checkpoint
+        .info(path)
+        .ok_or_else(|| invalid(format!("missing tensor {path:?}")))?;
+    let shape = info
+        .shape
+        .iter()
+        .map(|&dimension| i64::try_from(dimension).map_err(|_| invalid("dimension exceeds i64")))
+        .collect::<Result<Vec<_>>>()?;
+    if shape != expected_shape {
+        return Err(invalid(format!("tensor {path:?}: shape mismatch")));
+    }
+    let compatible = match expected_dtype {
+        DType::U8 => info.dtype == Dtype::U8,
+        DType::F32 | DType::F16 | DType::BF16 => {
+            matches!(info.dtype, Dtype::F32 | Dtype::F16 | Dtype::BF16)
+        }
+        _ => false,
+    };
+    if !compatible {
+        return Err(invalid(format!(
+            "tensor {path:?}: incompatible checkpoint dtype for {expected_dtype:?} storage"
+        )));
+    }
+    Ok(())
+}
+
+fn upload_typed<R: Read + Seek>(
+    checkpoint: &mut SafeTensors<R>,
+    client: &Client,
+    path: &str,
+    dtype: DType,
+) -> Result<Buffer> {
+    let source_dtype = checkpoint
+        .info(path)
+        .ok_or_else(|| invalid(format!("missing tensor {path:?}")))?
+        .dtype;
+    match dtype {
+        DType::U8 => checkpoint.upload_u8(client, path),
+        DType::F32 => checkpoint.upload_f32(client, path),
+        DType::F16 => checkpoint.upload_f16(client, path),
+        DType::BF16 if source_dtype == Dtype::BF16 => checkpoint.upload_bf16(client, path),
+        DType::BF16 => checkpoint.upload_bf16_converted(client, path),
+        dtype => Err(invalid(format!("unsupported schema dtype {dtype:?}"))),
     }
 }
 

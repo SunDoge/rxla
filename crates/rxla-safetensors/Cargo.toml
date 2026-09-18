@@ -33,6 +33,10 @@ name = "sam2_hiera_bench"
 required-features = ["model"]
 
 [[example]]
+name = "yolox_infer"
+required-features = ["model"]
+
+[[example]]
 name = "flux2_oracle"
 required-features = ["model"]
 
@@ -62,7 +66,7 @@ tempfile = { version = "3.27.0", optional = true }
 [dev-dependencies]
 blake3 = "1"
 clap = { workspace = true }
-image = { workspace = true, features = ["png"] }
+image = { workspace = true, features = ["jpeg", "png"] }
 rand = "0.9.2"
 rand_chacha = "0.9.0"
 rand_distr = "0.5.1"

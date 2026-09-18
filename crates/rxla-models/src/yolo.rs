@@ -20,6 +20,15 @@ impl YoloConfig {
             classes,
             depth: 0.33,
             width: 0.375,
+            depthwise: false,
+        }
+    }
+
+    pub fn yolox_nano(classes: i64) -> Self {
+        Self {
+            classes,
+            depth: 0.33,
+            width: 0.25,
             depthwise: true,
         }
     }
