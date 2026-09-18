@@ -71,7 +71,6 @@ fn lazy_session_for_graph(graph: &Graph) -> Option<Arc<LazySession>> {
 pub struct Storage(Arc<dyn Backing>);
 
 trait Backing: Send + Sync {
-    fn kind(&self) -> StorageKind;
     fn dtype(&self) -> StorageResult<DType>;
     fn host_bytes(&self) -> Option<&[u8]> {
         None
@@ -87,10 +86,6 @@ struct HostBacking<O> {
 }
 
 impl<O: AsRef<[u8]> + Send + Sync> Backing for HostBacking<O> {
-    fn kind(&self) -> StorageKind {
-        StorageKind::Host
-    }
-
     fn dtype(&self) -> StorageResult<DType> {
         Ok(self.dtype)
     }
@@ -103,10 +98,6 @@ impl<O: AsRef<[u8]> + Send + Sync> Backing for HostBacking<O> {
 struct PjrtBacking(Buffer);
 
 impl Backing for PjrtBacking {
-    fn kind(&self) -> StorageKind {
-        StorageKind::Pjrt
-    }
-
     fn dtype(&self) -> StorageResult<DType> {
         Ok(self.0.dtype()?)
     }
@@ -172,12 +163,6 @@ impl AsRef<[u8]> for BorrowedOwner {
         unsafe { std::slice::from_raw_parts(self.pointer.as_ptr(), self.len) }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StorageKind {
-    Host,
-    Pjrt,
-}
-
 /// Failures while inspecting or transferring managed tensor storage.
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
@@ -527,8 +512,13 @@ impl Storage {
     pub fn pjrt(buffer: Buffer) -> Self {
         Self(Arc::new(PjrtBacking(buffer)))
     }
-    pub fn kind(&self) -> StorageKind {
-        self.0.kind()
+    /// Whether this backing currently exposes immutable host bytes directly.
+    pub fn is_host_accessible(&self) -> bool {
+        self.0.host_bytes().is_some()
+    }
+    /// Whether this backing is already resident in a PJRT-managed buffer.
+    pub fn is_pjrt_resident(&self) -> bool {
+        self.0.pjrt_buffer().is_some()
     }
     /// Owner identity, not an overlap test for independently imported allocations.
     pub fn shares_owner_with(&self, other: &Self) -> bool {
@@ -638,15 +628,15 @@ fn pack_values<T>(view: &HostView<'_>, decode: fn(&[u8]) -> T) -> StorageResult<
 }
 
 #[derive(Clone)]
-enum Binding {
-    Host {
-        storage: Storage,
-        layout: StridedLayout,
-    },
-    Pjrt {
-        storage: Storage,
-        layout: BufferMemoryLayout,
-    },
+struct Binding {
+    storage: Storage,
+    layout: OwnedTensorLayout,
+}
+
+#[derive(Clone)]
+enum OwnedTensorLayout {
+    Host(StridedLayout),
+    Pjrt(BufferMemoryLayout),
 }
 
 /// Layout metadata owned by a Tensor. Symbolic tensors have no physical layout;
@@ -985,7 +975,10 @@ impl Tensor {
                 shape: SmallVec::from_slice_copy(layout.shape().as_slice()),
                 dynamic_bounds: SmallVec::new(),
                 dtype,
-                binding: OnceLock::from(Binding::Host { storage, layout }),
+                binding: OnceLock::from(Binding {
+                    storage,
+                    layout: OwnedTensorLayout::Host(layout),
+                }),
             }),
         };
         value.into_lazy()
@@ -1004,8 +997,14 @@ impl Tensor {
     pub fn layout(&self) -> TensorLayout<'_> {
         match self.binding.get() {
             None => TensorLayout::Symbolic,
-            Some(Binding::Host { layout, .. }) => TensorLayout::Host(layout),
-            Some(Binding::Pjrt { layout, .. }) => TensorLayout::Pjrt(layout),
+            Some(Binding {
+                layout: OwnedTensorLayout::Host(layout),
+                ..
+            }) => TensorLayout::Host(layout),
+            Some(Binding {
+                layout: OwnedTensorLayout::Pjrt(layout),
+                ..
+            }) => TensorLayout::Pjrt(layout),
         }
     }
     /// Wrap an executor result as a materialized leaf in the implicit lazy graph.
@@ -1029,9 +1028,9 @@ impl Tensor {
                 shape: SmallVec::from_slice_copy(&shape),
                 dynamic_bounds: SmallVec::new(),
                 dtype,
-                binding: OnceLock::from(Binding::Pjrt {
+                binding: OnceLock::from(Binding {
                     storage: Storage::pjrt(buffer),
-                    layout,
+                    layout: OwnedTensorLayout::Pjrt(layout),
                 }),
             }),
         })
@@ -1222,7 +1221,10 @@ impl Tensor {
             });
         }
         storage.view(layout.clone())?;
-        Ok(self.with_binding(Binding::Host { storage, layout }))
+        Ok(self.with_binding(Binding {
+            storage,
+            layout: OwnedTensorLayout::Host(layout),
+        }))
     }
     /// Attach a resident input without copying its data. Client identity is
     /// validated when used with an executor. This does not create a strided view.
@@ -1240,12 +1242,13 @@ impl Tensor {
             });
         }
         let layout = buffer.memory_layout()?;
-        Ok(self.with_binding(Binding::Pjrt { storage, layout }))
+        Ok(self.with_binding(Binding {
+            storage,
+            layout: OwnedTensorLayout::Pjrt(layout),
+        }))
     }
     pub fn storage(&self) -> Option<&Storage> {
-        self.binding.get().map(|b| match b {
-            Binding::Host { storage, .. } | Binding::Pjrt { storage, .. } => storage,
-        })
+        self.binding.get().map(|binding| &binding.storage)
     }
 
     /// Device metadata for a PJRT-materialized tensor. Host-backed and symbolic
@@ -1289,48 +1292,50 @@ impl Tensor {
     /// Known host-view layout only. None means symbolic or native storage, not
     /// a dense default. Native layout is available through Buffer::memory_layout.
     pub fn host_layout(&self) -> Option<&StridedLayout> {
-        match self.binding.get() {
-            Some(Binding::Host { layout, .. }) => Some(layout),
-            _ => None,
-        }
+        self.binding
+            .get()
+            .and_then(|binding| match &binding.layout {
+                OwnedTensorLayout::Host(layout) => Some(layout),
+                OwnedTensorLayout::Pjrt(_) => None,
+            })
     }
     pub fn host_view(&self) -> Result<HostView<'_>> {
-        match self.binding.get() {
-            Some(Binding::Host { storage, layout }) => Ok(storage.view(layout.clone())?),
-            _ => Err(Error::MissingHostStorage),
-        }
+        let binding = self.binding.get().ok_or(Error::MissingHostStorage)?;
+        let layout = match &binding.layout {
+            OwnedTensorLayout::Host(layout) => layout,
+            OwnedTensorLayout::Pjrt(_) => return Err(Error::MissingHostStorage),
+        };
+        Ok(binding.storage.view(layout.clone())?)
     }
     /// Explicitly upload/pack a managed host input, or retain its same-client
     /// device buffer. Native byte order is used; no implicit cross-client copy.
     /// Repeated host calls upload again: use to_device once for resident reuse.
     pub fn to_buffer(&self, client: &Client) -> Result<Buffer> {
-        match self.binding.get() {
-            Some(Binding::Pjrt { storage, .. }) => {
-                let buffer = storage.buffer().ok_or(Error::ExpectedDeviceStorage)?;
-                if !buffer.belongs_to(client) {
-                    return Err(Error::ForeignClientStorage);
-                }
-                Ok(buffer.clone())
+        let binding = self.binding.get().ok_or(Error::MissingManagedStorage)?;
+        if let Some(buffer) = binding.storage.buffer() {
+            if !buffer.belongs_to(client) {
+                return Err(Error::ForeignClientStorage);
             }
-            Some(Binding::Host { storage, layout }) => Ok(storage.upload(layout, client)?),
-            None => Err(Error::MissingManagedStorage),
+            return Ok(buffer.clone());
         }
+        let OwnedTensorLayout::Host(layout) = &binding.layout else {
+            return Err(Error::ExpectedDeviceStorage);
+        };
+        Ok(binding.storage.upload(layout, client)?)
     }
 
     pub(crate) fn to_buffer_on_device(&self, client: &Client, device: usize) -> Result<Buffer> {
-        match self.binding.get() {
-            Some(Binding::Pjrt { storage, .. }) => {
-                let buffer = storage.buffer().ok_or(Error::ExpectedDeviceStorage)?;
-                if !buffer.belongs_to(client) {
-                    return Err(Error::ForeignClientStorage);
-                }
-                Ok(buffer.copy_to_device(device)?)
+        let binding = self.binding.get().ok_or(Error::MissingManagedStorage)?;
+        if let Some(buffer) = binding.storage.buffer() {
+            if !buffer.belongs_to(client) {
+                return Err(Error::ForeignClientStorage);
             }
-            Some(Binding::Host { storage, layout }) => {
-                Ok(storage.upload_on_device(layout, client, device)?)
-            }
-            None => Err(Error::MissingManagedStorage),
+            return Ok(buffer.copy_to_device(device)?);
         }
+        let OwnedTensorLayout::Host(layout) = &binding.layout else {
+            return Err(Error::ExpectedDeviceStorage);
+        };
+        Ok(binding.storage.upload_on_device(layout, client, device)?)
     }
     /// Return a new input descriptor owning resident storage; original unchanged.
     pub fn to_device(&self, client: &Client) -> Result<Self> {
@@ -1338,7 +1343,7 @@ impl Tensor {
             return self.with_pjrt_storage(Storage::pjrt(self.to_buffer(client)?));
         }
         if self.is_materialized() {
-            if matches!(self.binding.get(), Some(Binding::Pjrt { .. })) {
+            if self.storage().and_then(Storage::buffer).is_some() {
                 self.to_buffer(client)?;
                 return Ok(self.clone());
             }
@@ -1550,7 +1555,8 @@ mod tests {
         assert_eq!(integer.dtype(), DType::I32);
         assert_eq!(integer.shape(), [2]);
         assert!(matches!(integer.layout(), TensorLayout::Host(_)));
-        assert_eq!(integer.storage().unwrap().kind(), StorageKind::Host);
+        assert!(integer.storage().unwrap().is_host_accessible());
+        assert!(!integer.storage().unwrap().is_pjrt_resident());
         assert_eq!(
             integer.host_view().unwrap().element(&[1]).unwrap(),
             i32::MAX.to_ne_bytes()

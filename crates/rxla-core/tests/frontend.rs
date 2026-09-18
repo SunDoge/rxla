@@ -71,10 +71,7 @@ fn runtime_results_are_materialized_lazy_tensor_leaves() {
         .remove(0);
     assert!(result.is_materialized());
     assert!(matches!(result.layout(), TensorLayout::Pjrt(_)));
-    assert_eq!(
-        result.storage().unwrap().kind(),
-        rxla_core::StorageKind::Pjrt
-    );
+    assert!(result.storage().unwrap().is_pjrt_resident());
     assert_eq!(
         result
             .to_buffer(executor.client())

@@ -268,7 +268,7 @@ pub use frontend::{
     RuntimeBuilder, TensorFunction, Tracer,
 };
 pub use tensor_handle::{
-    CustomCall, Storage, StorageError, StorageKind, StorageResult, TensorBuildError, TensorBuilder,
+    CustomCall, Storage, StorageError, StorageResult, TensorBuildError, TensorBuilder,
     TensorDescriptor, TensorDownloadError, TensorElement, TensorLayout,
 };
 fn err(message: impl Into<String>) -> Error {

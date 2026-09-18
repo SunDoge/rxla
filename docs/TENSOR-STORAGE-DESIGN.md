@@ -10,9 +10,9 @@ Tensor (one Arc pointer)
   -> immutable TensorDescriptor
        -> optional private tracing identity { session, node ID }
        -> SmallVec<i64, 5> logical shape + explicit dtype
-       -> optional input binding
-            host: Storage backing + checked StridedLayout
-            PJRT: Storage backing -> Buffer -> PJRT allocation + client
+       -> optional materialized binding { Storage backing + owned layout }
+            Storage capabilities: host bytes and/or PJRT buffer
+            layout representation: checked striding or PJRT physical metadata
 
 PendingExecution -> native input/output/executable owners until completion
 ```
@@ -69,7 +69,12 @@ in parameter order. The method rejects wrong graphs/order, missing storage and
 count mismatches. It accepts F32/I32/BF16 bound inputs. It returns ordinary native Buffers.
 
 Storage is an Arc-owned backing interface rather than a `Host | Device` enum.
-The current implementations are CPU-addressable host bytes and PJRT buffers;
+Tensor binding likewise no longer classifies storage as `Host | Pjrt`; it owns
+one Storage plus layout metadata and dispatches through backing capabilities.
+The public `StorageKind` classification was removed in favor of independent
+`is_host_accessible` and `is_pjrt_resident` queries, since CPU PJRT and unified
+allocations can eventually satisfy both. The current backing implementations
+are CPU-addressable host bytes and PJRT buffers;
 future CUDA, Metal, mmap, or imported allocations can supply their own mapping,
 placement, synchronization, and release rules without becoming new Tensor types.
 Placement and memory space are not inferred from pointer accessibility. A PJRT
