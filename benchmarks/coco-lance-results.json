@@ -1,0 +1,71 @@
+{
+  "environment": {
+    "python": "3.14.6",
+    "lance": "11.0.0",
+    "pyarrow": "25.0.1",
+    "platform": "Linux-6.12.107+deb13-amd64-x86_64-with-glibc2.41"
+  },
+  "dataset": "/data/datasets/coco2017.lance",
+  "rows": 123287,
+  "fragments": 8,
+  "dataset_bytes": 20336520696,
+  "boxes": 896782,
+  "empty_images": 1069,
+  "max_boxes_per_image": 93,
+  "read_window": 128,
+  "shuffle_buffer": 512,
+  "measurements": [
+    {
+      "name": "scattered_decode",
+      "samples": 4096,
+      "bytes": 668000211,
+      "seconds_median": 5.313865069998428,
+      "seconds_all": [
+        5.2906531899934635,
+        5.313865069998428,
+        5.8160253640962765
+      ],
+      "samples_per_second": 770.8137007703907,
+      "mib_per_second": 119.88536332648059
+    },
+    {
+      "name": "window_pool_decode",
+      "samples": 4096,
+      "bytes": 668000211,
+      "seconds_median": 5.771468264982104,
+      "seconds_all": [
+        5.693946887040511,
+        5.771468264982104,
+        5.812665395904332
+      ],
+      "samples_per_second": 709.6980892803541,
+      "mib_per_second": 110.37999610080696
+    },
+    {
+      "name": "metadata_query",
+      "samples": 22956,
+      "bytes": 22956,
+      "seconds_median": 0.011212015990167856,
+      "seconds_all": [
+        0.01745963701978326,
+        0.011212015990167856,
+        0.00991091807372868
+      ],
+      "samples_per_second": 2047446.2416153157,
+      "mib_per_second": 1.952596894851032
+    },
+    {
+      "name": "category_query",
+      "samples": 66808,
+      "bytes": 66808,
+      "seconds_median": 0.014718681923113763,
+      "seconds_all": [
+        0.014059932087548077,
+        0.01581013505347073,
+        0.014718681923113763
+      ],
+      "samples_per_second": 4538993.392817789,
+      "mib_per_second": 4.32872142106799
+    }
+  ]
+}

@@ -170,6 +170,8 @@ crates.io publishing.
 - [State design](docs/STATE-DESIGN.md)
 - [Tensor storage design](docs/TENSOR-STORAGE-DESIGN.md)
 - [Tensor image augmentation experiment](docs/IMAGE-AUGMENTATION-BENCHMARK.md)
+- [Imagenette Lance dataset benchmark](docs/LANCE-DATASET-BENCHMARK.md)
+- [COCO 2017 Lance dataset benchmark](docs/COCO-LANCE-BENCHMARK.md)
 - [Distributed PJRT and NCCL](docs/PJRT-DISTRIBUTED.md)
 - [MLX layout review](docs/MLX-LAYOUT-REVIEW.md)
 - [Deployment notes](docs/DEPLOYMENT.md)
