@@ -1324,7 +1324,7 @@ impl Tensor {
                 if !buffer.belongs_to(client) {
                     return Err(Error::ForeignClientStorage);
                 }
-                Ok(buffer.clone())
+                Ok(buffer.copy_to_device(device)?)
             }
             Some(Binding::Host { storage, layout }) => {
                 Ok(storage.upload_on_device(layout, client, device)?)

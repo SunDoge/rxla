@@ -132,6 +132,13 @@ fn check_device(
     let selected_input = client.buffer_on_device(index, &[2], &[1., 3.])?;
     let other_index = usize::from(index == 0);
     let other_input = client.buffer_on_device(other_index, &[2], &[5., 7.])?;
+    let copied_input = selected_input.copy_to_device(other_index)?;
+    assert_eq!(copied_input.device_index()?, other_index);
+    assert_eq!(
+        other_executable.execute(&[&copied_input])?[0].to_vec::<f32>()?,
+        [2., 4.]
+    );
+    assert!(selected_input.copy_to_device(usize::MAX).is_err());
     assert_eq!(
         other_executable.execute(&[&other_input])?[0].to_vec::<f32>()?,
         [6., 8.]

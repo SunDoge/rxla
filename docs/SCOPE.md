@@ -166,9 +166,10 @@ compilation targets the selected global device ID; disk namespaces must distingu
 placement (`DiskCache::new_for_client` derives a device-specific namespace from
 an explicit compatibility key), and foreign-device native artifacts are rejected.
 The shared-directory example validates fresh-client hits and device-scoped trimming.
-Same-client device
-views/copies and multi-device execution remain open work. Creating another client
-does not share an allocator or provide zero-copy transport.
+Same-client device copies use PJRT's native transfer path without host staging;
+the two-device CPU placement gate verifies placement and values. General device
+views and automatic multi-device execution remain open work. Creating another
+client does not share an allocator or provide zero-copy transport.
 
 ## Open work that affects the intended library
 

@@ -846,7 +846,7 @@ impl Runtime {
                 return Ok(tensor.clone());
             }
             return Tensor::materialized(
-                buffer.copy_to_device_via_host(&client, device.ordinal())?,
+                buffer.copy_to_device_or_via_host(&client, device.ordinal())?,
             );
         }
         Tensor::materialized(tensor.to_buffer_on_device(&client, device.ordinal())?)
@@ -1141,14 +1141,14 @@ impl DeviceRuntime<'_> {
             .expect("a backend view retains a registered device")
     }
 
-    /// Copy a resident buffer to this device through explicitly synchronized
-    /// host staging. This also works across distinct PJRT implementations.
+    /// Copy a resident buffer to this device. Same-client placement uses a
+    /// native device copy; distinct PJRT clients fall back to host staging.
     pub fn transfer(&self, buffer: &Buffer) -> Result<Buffer> {
-        Ok(buffer.copy_to_device_via_host(self.client(), self.device.ordinal())?)
+        Ok(buffer.copy_to_device_or_via_host(self.client(), self.device.ordinal())?)
     }
 
     pub fn transfer_with_limit(&self, buffer: &Buffer, max_bytes: usize) -> Result<Buffer> {
-        Ok(buffer.copy_to_device_via_host_with_limit(
+        Ok(buffer.copy_to_device_or_via_host_with_limit(
             self.client(),
             self.device.ordinal(),
             max_bytes,

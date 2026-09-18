@@ -1432,6 +1432,68 @@ impl Buffer {
     pub fn belongs_to(&self, client: &Client) -> bool {
         Arc::ptr_eq(&self.inner.client, &client.0)
     }
+
+    /// Copy this buffer to another addressable device owned by the same client.
+    ///
+    /// PJRT performs the transfer directly; no host allocation or download is
+    /// involved. Copying to the buffer's current device returns a shared handle
+    /// to the existing allocation.
+    pub fn copy_to_device(&self, device_index: usize) -> Result<Buffer> {
+        let device = *self
+            .inner
+            .client
+            .addressable_devices
+            .get(device_index)
+            .context(InvalidArgumentSnafu {
+                message: "addressable device index out of range",
+            })?;
+        if self.device_index()? == device_index {
+            return Ok(self.clone());
+        }
+        let plugin = &self.inner.client.plugin;
+        let mut args = args!(
+            PJRT_Buffer_CopyToDevice_Args,
+            PJRT_Buffer_CopyToDevice_Args_STRUCT_SIZE
+        );
+        args.buffer = self.inner.raw.as_ptr();
+        args.dst_device = device;
+        plugin.check(unsafe { function!(plugin.api(), PJRT_Buffer_CopyToDevice)(&mut args) })?;
+        Ok(Buffer {
+            inner: Arc::new(BufferInner::new(
+                self.inner.client.clone(),
+                args.dst_buffer,
+            )?),
+        })
+    }
+
+    /// Prefer a native same-client device copy and otherwise stage through host.
+    pub fn copy_to_device_or_via_host(
+        &self,
+        destination: &Client,
+        device_index: usize,
+    ) -> Result<Buffer> {
+        if self.belongs_to(destination) {
+            self.copy_to_device(device_index)
+        } else {
+            self.copy_to_device_via_host(destination, device_index)
+        }
+    }
+
+    /// Like [`Self::copy_to_device_or_via_host`], with a host-staging limit.
+    /// Native same-client copies do not consume host payload budget.
+    pub fn copy_to_device_or_via_host_with_limit(
+        &self,
+        destination: &Client,
+        device_index: usize,
+        max_host_bytes: usize,
+    ) -> Result<Buffer> {
+        if self.belongs_to(destination) {
+            self.copy_to_device(device_index)
+        } else {
+            self.copy_to_device_via_host_with_limit(destination, device_index, max_host_bytes)
+        }
+    }
+
     /// Copy into the destination client's selected device through host memory.
     /// Preserves shape and F32/I32/BF16 dtype (BF16 is copied as raw bits).
     /// Downloads synchronously and uploads a new buffer, even on the same client.

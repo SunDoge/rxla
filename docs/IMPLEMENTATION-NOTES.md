@@ -711,7 +711,11 @@ to another device within the same client and specifies an error for copying to
 the original device. `CopyToMemory` has the analogous same-client restriction.
 Our CPU and CUDA plugins create separate clients. Supporting a native same-client
 multi-device path requires coherent device selection for buffers and executable
-placement. `Client::load` / `load_with_options` select the first addressable
+placement. `Buffer::copy_to_device(index)` now uses this native path and returns
+a shared handle when the source is already on the target device. High-level
+placement prefers it whenever source and destination share a client, while
+cross-client transfers retain their explicit host-staging fallback.
+`Client::load` / `load_with_options` select the first addressable
 device for uploads. Native callers can use unsafe
 `Client::load_on_device(path, options, addressable_device_index)` to fix a
 different upload device at creation. The index refers to the plugin's device
@@ -766,8 +770,9 @@ It deliberately replaces `XLA_FLAGS` only inside its child processes with
 `--xla_force_host_platform_device_count=2`; the invoking shell remains unchanged.
 Relative plugin paths are resolved before entering the workspace. Missing plugin
 files and unsupported arguments fail before Cargo. The native example must also
-identify a CPU backend with at least two addressable devices. No plugin downloads,
-binding regeneration or same-client multi-device execution are added by the gate.
+identify a CPU backend with at least two addressable devices. It verifies native
+same-client copies, target placement and values; no plugin downloads or binding
+regeneration are performed by the gate.
 
 The opt-in [placement benchmark](HETEROGENEOUS-BENCHMARK.md) compares whole CPU,
 whole GPU and CPU→GPU→CPU execution with identical host input/output boundaries.

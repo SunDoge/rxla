@@ -1023,7 +1023,7 @@ impl Executable {
         for device_index in 0..device_count {
             let mut device_inputs = Vec::with_capacity(inputs.len());
             for input in inputs {
-                device_inputs.push(input.copy_to_device_via_host(&self.client, device_index)?);
+                device_inputs.push(input.copy_to_device(device_index)?);
             }
             per_device.push(device_inputs);
         }
