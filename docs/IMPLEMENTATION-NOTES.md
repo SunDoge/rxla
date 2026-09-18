@@ -75,8 +75,10 @@ deleter that runs exactly once after the final storage owner is released.
 compact CPU tensors without copying and retain the producer's DLPack deleter.
 This includes `image::ImageBuffer` values exported through dlpark; U8, F16,
 BF16, F32, and I32 host representations are preserved.
-`dlpack::import_on_device` additionally imports compact CUDA and CUDA-managed
-allocations into a matching CUDA client through PJRT's external-buffer view.
+`Tensor::try_from_dlpack(managed, dlpack::PjrtImport::new(&client))`
+additionally imports compact CUDA and CUDA-managed allocations into a matching
+CUDA client through PJRT's external-buffer view. `PjrtImport::with_stream`
+accepts a typed `PjrtProducerStream` adapter for asynchronous producers.
 The DLPack owner remains attached to the PJRT buffer deletion callback, and an
 optional native producer stream preserves cross-stream readiness without a
 host copy. Pinned CUDA/ROCm host allocations use the host-storage path.

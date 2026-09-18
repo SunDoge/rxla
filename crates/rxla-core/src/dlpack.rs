@@ -4,7 +4,7 @@
 //! deleter exactly once when the last rxla storage owner is dropped.
 
 use crate::{Client, DType, Storage, Tensor};
-use dlpark::{Managed, ManagedTensorBase, ffi, legacy, versioned};
+use dlpark::{Managed, ManagedTensorBase, TryFromDlpack, ffi, legacy, versioned};
 use snafu::{ResultExt, Snafu, ensure};
 use std::ptr::NonNull;
 
@@ -42,6 +42,67 @@ pub enum ImportError {
 }
 
 type Result<T> = std::result::Result<T, ImportError>;
+
+/// PJRT context required while consuming a DLPack tensor.
+///
+/// `S` is the producer-stream representation. Use [`PjrtImport::new`] when the
+/// producer has already synchronized its device allocation, or
+/// [`PjrtImport::with_stream`] with a backend stream adapter.
+#[derive(Clone, Copy)]
+pub struct PjrtImport<'a, S = ()> {
+    client: &'a Client,
+    stream: S,
+}
+
+impl<'a> PjrtImport<'a> {
+    /// Create an import context without producer-stream synchronization.
+    pub fn new(client: &'a Client) -> Self {
+        Self { client, stream: () }
+    }
+}
+
+impl<'a, S> PjrtImport<'a, S> {
+    /// Create an import context carrying the producer's stream.
+    pub fn with_stream(client: &'a Client, stream: S) -> Self {
+        Self { client, stream }
+    }
+}
+
+/// Converts a producer stream into the native handle expected by PJRT.
+///
+/// # Safety
+///
+/// Implementors must return either zero for already-ready data or a live
+/// producer stream belonging to the DLPack tensor's backend and device. A
+/// nonzero stream must remain valid through PJRT's external-buffer creation.
+pub unsafe trait PjrtProducerStream {
+    /// Return the backend-native producer stream handle.
+    fn native_handle(&self) -> isize;
+}
+
+/// Non-owning backend-native stream handle for low-level integrations.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeStream(isize);
+
+impl NativeStream {
+    /// Wrap a backend-native producer stream handle.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be zero for already-ready data or identify a live stream
+    /// compatible with the imported tensor's backend and device.
+    pub const unsafe fn from_raw(handle: isize) -> Self {
+        Self(handle)
+    }
+}
+
+// SAFETY: construction requires the caller to uphold the native stream
+// validity, device, and backend contract.
+unsafe impl PjrtProducerStream for NativeStream {
+    fn native_handle(&self) -> isize {
+        self.0
+    }
+}
 
 struct Owner<M: ManagedTensorBase> {
     _managed: Managed<M>,
@@ -135,7 +196,7 @@ where
 /// CUDA allocations become zero-copy PJRT buffer views on the matching local
 /// hardware id. `producer_stream` is the native CUDA stream containing work
 /// needed to materialize the buffer; pass `None` only when it is already ready.
-pub fn import_on_device<M>(
+fn import_on_device<M>(
     managed: Managed<M>,
     client: &Client,
     producer_stream: Option<isize>,
@@ -200,6 +261,29 @@ where
     }
     .context(DeviceImportSnafu)?;
     Tensor::from_pjrt_buffer(buffer).context(DeviceTensorSnafu)
+}
+
+impl<'a, M> TryFromDlpack<Managed<M>, PjrtImport<'a>> for Tensor
+where
+    M: ManagedTensorBase + 'static,
+{
+    type Error = ImportError;
+
+    unsafe fn try_from_dlpack(managed: Managed<M>, import: PjrtImport<'a>) -> Result<Self> {
+        import_on_device(managed, import.client, None)
+    }
+}
+
+impl<'a, M, S> TryFromDlpack<Managed<M>, PjrtImport<'a, S>> for Tensor
+where
+    M: ManagedTensorBase + 'static,
+    S: PjrtProducerStream,
+{
+    type Error = ImportError;
+
+    unsafe fn try_from_dlpack(managed: Managed<M>, import: PjrtImport<'a, S>) -> Result<Self> {
+        import_on_device(managed, import.client, Some(import.stream.native_handle()))
+    }
 }
 
 impl TryFrom<versioned::Dlpack> for Tensor {
@@ -275,7 +359,11 @@ mod tests {
         // buffer keeps the CUDA allocation alive until DLPack deletion.
         let managed: versioned::Dlpack = unsafe { initialized.finish() };
 
-        let tensor = import_on_device(managed, &client, None)?;
+        // SAFETY: zero is PJRT's no-producer-stream sentinel and the source
+        // upload completed before descriptor creation.
+        let stream = unsafe { NativeStream::from_raw(0) };
+        let tensor =
+            unsafe { Tensor::try_from_dlpack(managed, PjrtImport::with_stream(&client, stream))? };
         assert_eq!(tensor.shape(), [4]);
         assert_eq!(tensor.dtype(), DType::F32);
         let imported = tensor.to_buffer(&client)?;
