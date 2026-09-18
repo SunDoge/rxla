@@ -1,6 +1,9 @@
 //! Serialization of leaf, shape-only, and primitive nonlinear StableHLO ops.
 
-use super::emission_support::{OperationEmission, stablehlo_literal, stablehlo_type, value_type};
+use super::emission_support::{
+    OperationEmission, floating_initializer, stablehlo_element_type, stablehlo_literal,
+    stablehlo_type, value_type,
+};
 use super::{super::*, dialect::*};
 use std::fmt::Write;
 
@@ -48,14 +51,17 @@ pub(super) fn emit_primitive(emission: &mut OperationEmission<'_>) -> Result<boo
         let zero = emission.auxiliary();
         let zeros = emission.auxiliary();
         let ty = emission.ty;
+        let element = stablehlo_element_type(emission.result_type.dtype)?;
+        let scalar_type = format!("tensor<{element}>");
+        let initializer = floating_initializer(emission.result_type.dtype, false)?;
         writeln!(
             emission.body,
-            "    {zero} = stablehlo.constant dense<0x00000000> : tensor<f32>"
+            "    {zero} = stablehlo.constant dense<{initializer}> : {scalar_type}"
         )
         .unwrap();
         writeln!(
             emission.body,
-            "    {zeros} = stablehlo.broadcast_in_dim {zero}, dims = [] : (tensor<f32>) -> {ty}"
+            "    {zeros} = stablehlo.broadcast_in_dim {zero}, dims = [] : ({scalar_type}) -> {ty}"
         )
         .unwrap();
         writeln!(
@@ -73,14 +79,17 @@ pub(super) fn emit_primitive(emission: &mut OperationEmission<'_>) -> Result<boo
         let exponential = emission.auxiliary();
         let correction = emission.auxiliary();
         let ty = emission.ty;
+        let element = stablehlo_element_type(emission.result_type.dtype)?;
+        let scalar_type = format!("tensor<{element}>");
+        let initializer = floating_initializer(emission.result_type.dtype, false)?;
         writeln!(
             emission.body,
-            "    {zero} = stablehlo.constant dense<0x00000000> : tensor<f32>"
+            "    {zero} = stablehlo.constant dense<{initializer}> : {scalar_type}"
         )
         .unwrap();
         writeln!(
             emission.body,
-            "    {zeros} = stablehlo.broadcast_in_dim {zero}, dims = [] : (tensor<f32>) -> {ty}"
+            "    {zeros} = stablehlo.broadcast_in_dim {zero}, dims = [] : ({scalar_type}) -> {ty}"
         )
         .unwrap();
         writeln!(

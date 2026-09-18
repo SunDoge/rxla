@@ -1,6 +1,8 @@
 //! Serialization of slicing, padding, concatenation, and dynamic indexing.
 
-use super::emission_support::{OperationEmission, stablehlo_type, value_type};
+use super::emission_support::{
+    OperationEmission, floating_initializer, stablehlo_element_type, stablehlo_type, value_type,
+};
 use super::{super::*, dialect::*};
 use std::fmt::Write;
 
@@ -28,16 +30,19 @@ pub(super) fn emit_basic_indexing(emission: &mut OperationEmission<'_>) -> Resul
     } else if let Some(gradient) = op.as_ref().downcast_ref::<StableSliceGradientOp>() {
         let input = value_type(ctx, operation.get_operand(0));
         let input_type = stablehlo_type(&input)?;
+        let element = stablehlo_element_type(input.dtype)?;
+        let scalar_type = format!("tensor<{element}>");
+        let initializer = floating_initializer(input.dtype, false)?;
         let zero = emission.auxiliary();
         writeln!(
             emission.body,
-            "    {zero} = stablehlo.constant dense<0x00000000> : tensor<f32>"
+            "    {zero} = stablehlo.constant dense<{initializer}> : {scalar_type}"
         )
         .unwrap();
         if input.dims.contains(&0) {
             writeln!(
                 emission.body,
-                "    {} = stablehlo.broadcast_in_dim {zero}, dims = [] : (tensor<f32>) -> {}",
+                "    {} = stablehlo.broadcast_in_dim {zero}, dims = [] : ({scalar_type}) -> {}",
                 emission.name, emission.ty
             )
             .unwrap();
@@ -68,7 +73,7 @@ pub(super) fn emit_basic_indexing(emission: &mut OperationEmission<'_>) -> Resul
                 .map(|axis| (axis.stride - 1).to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            writeln!(emission.body, "    {} = stablehlo.pad {}, {zero}, low = [{low}], high = [{high}], interior = [{interior}] : ({input_type}, tensor<f32>) -> {}", emission.name, emission.operands[0], emission.ty).unwrap();
+            writeln!(emission.body, "    {} = stablehlo.pad {}, {zero}, low = [{low}], high = [{high}], interior = [{interior}] : ({input_type}, {scalar_type}) -> {}", emission.name, emission.operands[0], emission.ty).unwrap();
         }
     } else if let Some(pad) = op.as_ref().downcast_ref::<StablePadOp>() {
         let input_type = stablehlo_type(&value_type(ctx, operation.get_operand(0)))?;

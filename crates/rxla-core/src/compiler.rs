@@ -3,6 +3,35 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Backend effort spent reducing peak executable memory during compilation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MemoryFittingLevel {
+    /// Use the backend default.
+    #[default]
+    Default,
+    /// Minimize compile time and fail quickly when the program does not fit.
+    O0,
+    /// Spend modest effort reducing memory without the full O2 compile cost.
+    O1,
+    /// Spend substantial effort making the program fit.
+    O2,
+    /// Enable the most costly or experimental memory-reduction algorithms.
+    O3,
+}
+
+impl MemoryFittingLevel {
+    fn proto(self) -> i32 {
+        use rxla_xla_proto::xla::execution_options::EffortLevel;
+        (match self {
+            Self::Default => EffortLevel::EffortUnknown,
+            Self::O0 => EffortLevel::EffortO0,
+            Self::O1 => EffortLevel::EffortO1,
+            Self::O2 => EffortLevel::EffortO2,
+            Self::O3 => EffortLevel::EffortO3,
+        }) as i32
+    }
+}
+
 /// Immutable lowered program with its pre-encoded cache key. Lowering requires
 /// no plugin and retains no source Graph or native handles. Later graph
 /// mutations do not change this snapshot, including its declared input ABI.
@@ -232,6 +261,7 @@ pub struct Compiler {
     stats: CacheStats,
     cudnn_attention: bool,
     compute_dtype: Option<DType>,
+    memory_fitting_level: MemoryFittingLevel,
     xla_option_overrides: HashMap<String, OptionOverrideProto>,
     #[cfg(feature = "disk-cache")]
     disk: Option<DiskCache>,
@@ -268,6 +298,7 @@ impl Compiler {
             stats: CacheStats::default(),
             cudnn_attention: false,
             compute_dtype: None,
+            memory_fitting_level: MemoryFittingLevel::Default,
             xla_option_overrides: HashMap::new(),
             #[cfg(feature = "disk-cache")]
             disk: None,
@@ -286,6 +317,13 @@ impl Compiler {
     /// CUDA is required; other platforms retain portable F32.
     pub fn with_compute_dtype(mut self, dtype: DType) -> Self {
         self.compute_dtype = Some(dtype);
+        self
+    }
+
+    /// Ask XLA to trade compilation time for a lower peak-memory schedule.
+    /// This is encoded in PJRT compile options and participates in cache keys.
+    pub fn with_memory_fitting_level(mut self, level: MemoryFittingLevel) -> Self {
+        self.memory_fitting_level = level;
         self
     }
 
@@ -381,8 +419,14 @@ impl Compiler {
     /// Lookup still hashes/compares key bytes and updates the LRU; callers that
     /// already own the desired executable should execute that handle directly.
     pub fn compile_lowered(&mut self, program: &LoweredProgram) -> Result<Arc<Executable>> {
-        if !self.xla_option_overrides.is_empty() {
-            let options = encode_compile_options(&self.client, self.xla_option_overrides.clone())?;
+        if !self.xla_option_overrides.is_empty()
+            || self.memory_fitting_level != MemoryFittingLevel::Default
+        {
+            let options = encode_compile_options(
+                &self.client,
+                self.xla_option_overrides.clone(),
+                self.memory_fitting_level.proto(),
+            )?;
             return self.compile_lowered_with_options(program, &options);
         }
         let key = program.cache_key();
@@ -553,4 +597,17 @@ fn backend_key(format: &str, code: &[u8]) -> Vec<u8> {
     key.push(0);
     key.extend_from_slice(code);
     key
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rxla_xla_proto::xla::execution_options::EffortLevel;
+
+    #[test]
+    fn memory_fitting_levels_match_xla_compile_options() {
+        assert_eq!(MemoryFittingLevel::Default.proto(), 0);
+        assert_eq!(MemoryFittingLevel::O2.proto(), EffortLevel::EffortO2 as i32);
+        assert_eq!(MemoryFittingLevel::O3.proto(), EffortLevel::EffortO3 as i32);
+    }
 }

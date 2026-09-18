@@ -13,7 +13,7 @@ use self::blocks::{DoubleStreamModulation, Modulation, double_block, single_bloc
 use self::embedding::{multi_axis_rope, timestep_embedding};
 use super::{Error, ModelDefinitionError, Result};
 use rxla_core::{DType, Tensor};
-use rxla_nn::{Cx, Linear, TensorApply};
+use rxla_nn::{Cx, Layer, Linear, LoraLinear, TensorApply};
 
 /// Static topology of a FLUX.2 transformer.
 #[derive(Clone, Debug)]
@@ -30,6 +30,7 @@ pub struct Flux2Config {
     timestep_channels: i64,
     epsilon: f32,
     parameter_dtype: DType,
+    attention_lora: Option<(i64, f32)>,
 }
 
 impl Flux2Config {
@@ -48,6 +49,7 @@ impl Flux2Config {
             timestep_channels: 256,
             epsilon: 1e-6,
             parameter_dtype: DType::BF16,
+            attention_lora: None,
         }
     }
 
@@ -67,7 +69,15 @@ impl Flux2Config {
             timestep_channels: 256,
             epsilon: 1e-6,
             parameter_dtype: DType::F32,
+            attention_lora: None,
         }
+    }
+
+    /// Train low-rank adapters on the fused QKV/output projections in every
+    /// double- and single-stream transformer block.
+    pub fn attention_lora(mut self, rank: i64, alpha: f32) -> Self {
+        self.attention_lora = Some((rank, alpha));
+        self
     }
 
     fn head_dim(&self) -> i64 {
@@ -97,6 +107,10 @@ impl Flux2Config {
             && self.epsilon.is_finite()
             && self.epsilon > 0.0
             && matches!(self.parameter_dtype, DType::BF16 | DType::F32);
+        let valid = valid
+            && self
+                .attention_lora
+                .is_none_or(|(rank, alpha)| rank > 0 && alpha.is_finite());
         if !valid {
             return Err(Error::InvalidModel {
                 kind: ModelDefinitionError::InvalidFlux2Configuration,
@@ -108,6 +122,17 @@ impl Flux2Config {
 
 fn linear(cx: Cx, input: &Tensor, width: i64) -> Result<Tensor> {
     Ok(input.through(cx, Linear::new(width).bias(false))?)
+}
+
+fn attention_linear(cx: Cx, input: &Tensor, width: i64, config: &Flux2Config) -> Result<Tensor> {
+    match config.attention_lora {
+        Some((rank, alpha)) => Ok(LoraLinear::new(width, rank)
+            .alpha(alpha)
+            .bias(false)
+            .adapter_dtype(DType::F32)
+            .apply_in(&cx, input)?),
+        None => linear(cx, input, width),
+    }
 }
 
 /// Apply the FLUX.2 denoising transformer.
@@ -265,11 +290,10 @@ pub fn flux2_euler_step(
 mod tests {
     use super::*;
     use rxla_nn::Model;
+    use rxla_train::select_lora;
 
-    #[test]
-    fn tiny_flux2_traces_with_official_parameter_paths() {
-        let config = Flux2Config::tiny();
-        let model = Model::new(|cx: Cx| {
+    fn trace_tiny(config: &Flux2Config) -> rxla_nn::AppliedModel {
+        Model::new(|cx: Cx| {
             let image = cx.input([1, 3, 8])?;
             let image_ids = cx.input([1, 3, 4])?;
             let timestep = cx.input([1])?;
@@ -282,11 +306,17 @@ mod tests {
                 &timestep,
                 &context,
                 &context_ids,
-                &config,
+                config,
             )
         })
         .trace()
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn tiny_flux2_traces_with_official_parameter_paths() {
+        let config = Flux2Config::tiny();
+        let model = trace_tiny(&config);
         assert_eq!(model.outputs()[0].shape(), [1, 3, 8]);
         let schema = model.schema();
         for path in [
@@ -303,6 +333,54 @@ mod tests {
             assert!(schema.get(path).is_some(), "missing {path}");
         }
         model.prepare().unwrap();
+    }
+
+    #[test]
+    fn flux_lora_keeps_bf16_base_and_f32_adapters() {
+        let model = trace_tiny(&Flux2Config::tiny().attention_lora(2, 2.0));
+        let selection = select_lora(model.schema());
+        assert_eq!(selection.len(), 12);
+        for path in [
+            "double_blocks.0.img_attn.qkv",
+            "double_blocks.0.img_attn.proj",
+            "double_blocks.0.txt_attn.qkv",
+            "double_blocks.0.txt_attn.proj",
+            "single_blocks.0.linear1",
+            "single_blocks.0.linear2",
+        ] {
+            assert!(model.schema().get(&format!("{path}.weight")).is_some());
+            assert!(
+                model
+                    .schema()
+                    .get(&format!("{path}.lora_A.weight"))
+                    .is_some()
+            );
+        }
+        assert!(
+            selection
+                .parameters()
+                .all(|(_, parameter)| parameter.storage_dtype() == DType::F32)
+        );
+
+        let mut config = Flux2Config::tiny().attention_lora(1, 1.0);
+        config.parameter_dtype = DType::BF16;
+        let model = trace_tiny(&config);
+        assert_eq!(
+            model
+                .schema()
+                .get("double_blocks.0.img_attn.qkv.weight")
+                .unwrap()
+                .storage_dtype(),
+            DType::BF16
+        );
+        assert_eq!(
+            model
+                .schema()
+                .get("double_blocks.0.img_attn.qkv.lora_A.weight")
+                .unwrap()
+                .storage_dtype(),
+            DType::F32
+        );
     }
 
     #[test]

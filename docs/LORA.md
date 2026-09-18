@@ -129,3 +129,46 @@ claim about useful image adaptation from one sample. Dataset loading,
 multi-example batching, BF16 compute, rematerialization, gradient accumulation,
 validation image generation and PEFT/Diffusers key conversion are the next
 pieces needed for a production trainer.
+
+### Memory-fitting controls
+
+LoRA adapters may use F32 storage independently of a BF16 base checkpoint.
+This is important for FLUX: freezing BF16 base parameters avoids base gradients
+and optimizer slots, while the much smaller adapter and Adam state retain F32
+precision. CUDA compilation can additionally request XLA's native memory
+fitting schedule:
+
+```rust,ignore
+let compiler = Compiler::new(client, CacheLimits::default())
+    .with_memory_fitting_level(MemoryFittingLevel::O2);
+```
+
+On the same RTX 5080 SD 1.5 smoke test, the earlier default compile reported an
+estimated 13.41 GiB schedule against XLA's 11.67 GiB BFC pool. The explicit O2
+compile completed without that over-budget warning and preserved the two-step
+loss (`0.25562727` to `0.25503474`). The allocator's reserved pool is unchanged,
+so this is evidence of a fitting schedule rather than a claim that 11.67 GiB
+was physically consumed.
+
+Whole-program BF16 compute now lowers slice-gradient padding correctly and the
+same program compiles and executes. It is still experimental for a graph that
+also contains Adam: the smoke test produced a finite first loss and a NaN on
+the second update because the current lowering also demotes optimizer math.
+Production mixed-precision training therefore remains F32 by default until the
+IR can retain an explicit F32 optimizer island.
+
+## FLUX.2 LoRA
+
+`Flux2Config::attention_lora(rank, alpha)` adds F32 adapters to the fused
+projections in both transformer block families:
+
+- double-stream `img_attn` and `txt_attn` QKV/output projections;
+- single-stream fused `linear1` and `linear2` projections.
+
+The base paths and BF16 storage stay compatible with the official FLUX.2 Klein
+checkpoint. A topology test verifies all adapter paths, selection and storage
+dtypes. For Klein 4B at rank one this selects 120 adapter tensors containing
+about 1.1 million F32 values; base gradients and base Adam states are absent.
+The single-stream projections fuse attention and MLP, so adapting them is wider
+than an attention-only projection in SD. A real Klein checkpoint training run
+is still required before treating 16 GiB support as established.

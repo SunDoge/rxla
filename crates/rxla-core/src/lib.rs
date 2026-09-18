@@ -1,6 +1,8 @@
 //! Rust tensor programs represented in Pliron and compiled through PJRT.
 pub use batch_norm_state::{BatchNormState, BatchNormUpdate};
-pub use compiler::{CacheLimits, CacheStats, Compiler, LoweredProgram, XlaOptionValue};
+pub use compiler::{
+    CacheLimits, CacheStats, Compiler, LoweredProgram, MemoryFittingLevel, XlaOptionValue,
+};
 pub use dlpark;
 pub use half::{bf16, f16};
 pub use kv_cache::{KvCache, KvCacheUpdate};
@@ -704,7 +706,7 @@ fn compile_program_with_options(
     output_count: usize,
     compile_options: Option<&[u8]>,
 ) -> Result<Executable> {
-    let default_options = encode_compile_options(client, Default::default())?;
+    let default_options = encode_compile_options(client, Default::default(), 0)?;
     let raw = client.compile(
         rxla_pjrt::Program::new(format, code),
         compile_options.unwrap_or(&default_options),
@@ -720,6 +722,7 @@ fn compile_program_with_options(
 fn encode_compile_options(
     client: &Client,
     env_option_overrides: std::collections::HashMap<String, OptionOverrideProto>,
+    memory_fitting_level: i32,
 ) -> Result<Vec<u8>> {
     let selected_device = client
         .info()?
@@ -741,6 +744,7 @@ fn encode_compile_options(
                     },
                 ],
             }),
+            memory_fitting_level,
             ..Default::default()
         }),
         env_option_overrides,

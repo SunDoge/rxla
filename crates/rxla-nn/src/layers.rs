@@ -110,6 +110,8 @@ pub struct LoraLinear {
     alpha: f32,
     #[setters(generate)]
     bias: bool,
+    #[setters(generate)]
+    adapter_dtype: DType,
 }
 
 impl LoraLinear {
@@ -119,6 +121,7 @@ impl LoraLinear {
             rank,
             alpha: rank as f32,
             bias: true,
+            adapter_dtype: DType::F32,
         }
     }
 
@@ -160,8 +163,18 @@ impl Layer for LoraLinear {
                 )
             })
             .transpose()?;
+        ensure!(
+            matches!(self.adapter_dtype, DType::F16 | DType::BF16 | DType::F32),
+            InvalidLayerInputSnafu {
+                layer: "LoraLinear",
+                requirement: "a floating-point adapter storage dtype",
+            }
+        );
+        let adapter_cx = cx
+            .clone()
+            .with_parameter_storage_dtype(self.adapter_dtype)?;
         let down = input.linear(
-            &cx.scope("lora_A")?.param_initialized(
+            &adapter_cx.scope("lora_A")?.param_initialized(
                 "weight",
                 [self.rank, in_features],
                 Initializer::kaiming_uniform(),
@@ -169,7 +182,7 @@ impl Layer for LoraLinear {
             None,
         )?;
         let adapter = down.linear(
-            &cx.scope("lora_B")?.param_initialized(
+            &adapter_cx.scope("lora_B")?.param_initialized(
                 "weight",
                 [self.out_features, self.rank],
                 Initializer::zeros(),

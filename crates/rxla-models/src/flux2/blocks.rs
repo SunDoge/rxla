@@ -1,4 +1,4 @@
-use super::{Flux2Config, Result, linear};
+use super::{Flux2Config, Result, attention_linear, linear};
 use rxla_core::{RotaryLayout, Tensor};
 use rxla_nn::Cx;
 
@@ -59,13 +59,8 @@ fn qkv(cx: Cx, input: &Tensor, config: &Flux2Config) -> Result<(Tensor, Tensor, 
     let [batch, tokens, _] = input.shape() else {
         unreachable!("FLUX blocks use rank-three tensors")
     };
-    let mixed = linear(cx.scope("qkv")?, input, config.hidden_size * 3)?.reshape([
-        *batch,
-        *tokens,
-        3,
-        config.num_heads,
-        config.head_dim(),
-    ])?;
+    let mixed = attention_linear(cx.scope("qkv")?, input, config.hidden_size * 3, config)?
+        .reshape([*batch, *tokens, 3, config.num_heads, config.head_dim()])?;
     let query = mixed.narrow(2, 0, 1)?.squeeze(2)?.transpose([0, 2, 1, 3])?;
     let key = mixed.narrow(2, 1, 1)?.squeeze(2)?.transpose([0, 2, 1, 3])?;
     let value = mixed.narrow(2, 2, 1)?.squeeze(2)?.transpose([0, 2, 1, 3])?;
@@ -136,15 +131,17 @@ pub(super) fn double_block(
     let attended = attention_output(&query, &key, &value, &angles)?;
     let text_tokens = text.shape()[1];
     let image_tokens = image.shape()[1];
-    let text_delta = linear(
+    let text_delta = attention_linear(
         text_attn.scope("proj")?,
         &attended.narrow(1, 0, text_tokens)?,
         config.hidden_size,
+        config,
     )?;
-    let image_delta = linear(
+    let image_delta = attention_linear(
         image_attn.scope("proj")?,
         &attended.narrow(1, text_tokens, image_tokens)?,
         config.hidden_size,
+        config,
     )?;
     let image = image.add(&image_modulation.attention.gated(&image_delta)?)?;
     let text = text.add(&text_modulation.attention.gated(&text_delta)?)?;
@@ -178,10 +175,11 @@ pub(super) fn single_block(
     };
     let hidden = modulation.apply(input, config.epsilon)?;
     let mlp_width = config.hidden_size * config.mlp_ratio;
-    let projected = linear(
+    let projected = attention_linear(
         cx.scope("linear1")?,
         &hidden,
         config.hidden_size * 3 + mlp_width * 2,
+        config,
     )?
     .split(2, &[config.hidden_size * 3, mlp_width * 2])?;
     let qkv = projected[0].reshape([*batch, *tokens, 3, config.num_heads, config.head_dim()])?;
@@ -201,6 +199,6 @@ pub(super) fn single_block(
     let mlp = projected[1].split(2, &[mlp_width, mlp_width])?;
     let mlp = mlp[0].silu()?.mul(&mlp[1])?;
     let mixed = Tensor::concatenate(&[attended, mlp], 2)?;
-    let delta = linear(cx.scope("linear2")?, &mixed, config.hidden_size)?;
+    let delta = attention_linear(cx.scope("linear2")?, &mixed, config.hidden_size, config)?;
     Ok(input.add(&modulation.gated(&delta)?)?)
 }

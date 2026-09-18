@@ -1,7 +1,7 @@
 //! Train an attention LoRA against a prepared Stable Diffusion noise-prediction batch.
 
 use clap::{Parser, ValueEnum};
-use rxla_core::{Buffer, CacheLimits, Client, Compiler};
+use rxla_core::{Buffer, CacheLimits, Client, Compiler, DType, MemoryFittingLevel};
 use rxla_models::{UnetConfig, unet};
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::{SafeTensors, save_parameter_selection_new};
@@ -34,12 +34,22 @@ struct Args {
     /// UNet architecture matching the supplied checkpoint.
     #[arg(long, value_enum, default_value_t = ModelPreset::Tiny)]
     preset: ModelPreset,
+    /// Internal CUDA compute precision. BF16 is experimental for fused optimizer graphs;
+    /// the public input/output ABI remains F32.
+    #[arg(long, value_enum, default_value_t = ComputeDtype::F32)]
+    compute_dtype: ComputeDtype,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ModelPreset {
     Tiny,
     SdV1,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ComputeDtype {
+    F32,
+    Bf16,
 }
 
 impl ModelPreset {
@@ -132,7 +142,11 @@ fn run(args: Args) -> Result<()> {
             ..AdamOptions::default()
         },
     )?;
-    let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+    let mut compiler = Compiler::new(client.clone(), CacheLimits::default())
+        .with_memory_fitting_level(MemoryFittingLevel::O2);
+    if matches!(args.compute_dtype, ComputeDtype::Bf16) {
+        compiler = compiler.with_compute_dtype(DType::BF16);
+    }
     let compiled = training.compile_stateful(&mut compiler)?;
 
     let mut checkpoint = SafeTensors::open(
