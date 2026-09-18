@@ -74,6 +74,9 @@ pub struct ModelSessionBuilder<'a> {
 /// This is an in-process, same-client handoff rather than a serialized
 /// checkpoint. It can restore a compatible inference/training trace while
 /// leaving source-only transform state (for example optimizer moments) unused.
+/// Cloning a snapshot only clones shared [`Buffer`] handles; tensor payloads
+/// remain in their original PJRT allocations.
+#[derive(Clone)]
 pub struct ModelSessionBuffers {
     parameters: BTreeMap<String, Buffer>,
     states: BTreeMap<String, Buffer>,

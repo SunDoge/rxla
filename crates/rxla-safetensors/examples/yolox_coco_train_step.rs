@@ -1,4 +1,4 @@
-//! Execute one real COCO YOLOX SimOTA + Adam training step.
+//! Train YOLOX on real COCO samples with host SimOTA and a resident Adam session.
 
 use clap::Parser;
 use image::{RgbImage, imageops::FilterType};
@@ -15,7 +15,7 @@ use std::{collections::BTreeMap, path::PathBuf, time::Instant};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Parser)]
-#[command(about = "Run one real COCO YOLOX training step")]
+#[command(about = "Run consecutive real COCO YOLOX training steps")]
 struct Args {
     /// Trusted PJRT plugin shared library.
     plugin: PathBuf,
@@ -25,8 +25,11 @@ struct Args {
     annotations: PathBuf,
     /// Image directory referenced by the instances JSON.
     images: PathBuf,
-    /// COCO image ID to train on.
+    /// COCO image ID at which to start iterating.
     image_id: u64,
+    /// Number of consecutive annotated images to train on.
+    #[arg(long, default_value_t = 1)]
+    steps: usize,
     #[arg(long, default_value_t = 64)]
     size: i64,
     #[arg(long, default_value_t = 1e-5)]
@@ -62,16 +65,19 @@ struct CocoCategory {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    if args.size <= 0 || args.size % 32 != 0 || !args.learning_rate.is_finite() {
-        return Err("size must be a positive multiple of 32 and learning rate finite".into());
+    if args.size <= 0 || args.size % 32 != 0 || !args.learning_rate.is_finite() || args.steps == 0 {
+        return Err(
+            "size must be a positive multiple of 32, learning rate finite, and steps non-zero"
+                .into(),
+        );
     }
     let coco: Coco = serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(
         &args.annotations,
     )?))?;
-    let image = coco
+    let start = coco
         .images
         .iter()
-        .find(|image| image.id == args.image_id)
+        .position(|image| image.id == args.image_id)
         .ok_or("image ID is absent from annotations")?;
     let mut category_ids = coco
         .categories
@@ -84,61 +90,18 @@ fn main() -> Result<()> {
         .enumerate()
         .map(|(index, id)| (id, index))
         .collect::<BTreeMap<_, _>>();
-    let original = image::open(args.images.join(&image.file_name))?.into_rgb8();
-    let (pixels, ratio) = letterbox(&original, args.size as u32);
-    let targets = coco
-        .annotations
-        .iter()
-        .filter(|annotation| annotation.image_id == args.image_id && annotation.iscrowd == 0)
-        .map(|annotation| {
-            let [x, y, width, height] = annotation.bbox;
-            Ok(DetectionTarget {
-                batch: 0,
-                class: *categories
-                    .get(&annotation.category_id)
-                    .ok_or("annotation references an unknown category")?,
-                cxcywh: [
-                    (x + width * 0.5) * ratio,
-                    (y + height * 0.5) * ratio,
-                    width * ratio,
-                    height * ratio,
-                ],
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if targets.is_empty() {
-        return Err("selected image has no non-crowd annotations".into());
-    }
-
     let client = unsafe { Client::load(&args.plugin) }?;
-    let input = client.buffer(&[1, args.size, args.size, 3], &pixels)?;
     let config = YoloConfig::yolox_tiny(80);
     let inference = Model::new(move |cx: Cx, image| yolo(cx, &image, &config))
         .inputs(ModelInput::new([1, args.size, args.size, 3]))
         .inference();
     let (_, inference) = inference.trace_resident_all()?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let compiled = inference.compile_stateful(&mut compiler)?;
-    let mut checkpoint = SafeTensors::open(&args.weights)?;
-    let weights = checkpoint.load_model_schema(&client, inference.schema())?;
-    let mut session = weights.initialize(compiled.session())?.build()?;
-    let outputs: [Buffer; 3] = session.run(&input)?;
-    let heads = outputs
+    let inference_program = inference.compile_stateful_program(&mut compiler)?;
+    let anchors = head_shapes(args.size, 85)
         .iter()
-        .map(Buffer::to_vec::<f32>)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let shapes = head_shapes(args.size, 85);
-    let decoded = DecodedYoloBatch::from_heads([
-        YoloHead::new(&heads[0], shapes[0]).stride(8),
-        YoloHead::new(&heads[1], shapes[1]).stride(16),
-        YoloHead::new(&heads[2], shapes[2]).stride(32),
-    ])?;
-    let assignments = SimOtaConfig::default().assign(&decoded.input(), &targets)?;
-    if assignments.foreground == 0 {
-        return Err("SimOTA produced no foreground anchors".into());
-    }
-
-    let anchors = assignments.anchors as i64;
+        .map(|shape| shape[1] * shape[2])
+        .sum::<usize>() as i64;
     let training_config = YoloConfig::yolox_tiny(80);
     let training = Model::new(
         move |cx: Cx, image: Tensor, boxes: Tensor, objectness: Tensor, classes: Tensor| {
@@ -172,36 +135,124 @@ fn main() -> Result<()> {
         &loss,
         AdamOptions::default().learning_rate(args.learning_rate),
     )?;
-    let compile_started = Instant::now();
+    let train_compile_started = Instant::now();
     let program = training.compile_stateful_tensors(&mut compiler, &[metrics])?;
-    let compile_ms = compile_started.elapsed().as_secs_f64() * 1e3;
+    let train_compile_ms = train_compile_started.elapsed().as_secs_f64() * 1e3;
     let mut checkpoint = SafeTensors::open(&args.weights)?;
     let weights = checkpoint.load_model_schema(&client, &checkpoint_schema)?;
     let mut training_session = weights
         .initialize_raw(training.session(&program))?
         .initializer_seed(7)
         .build()?;
-    let boxes = client.buffer(&[1, anchors, 4], &assignments.boxes)?;
-    let objectness = client.buffer(&[1, anchors, 1], &assignments.objectness)?;
-    let classes = client.buffer(&[1, anchors, 80], &assignments.classes)?;
-    let execute_started = Instant::now();
-    let outputs = training_session.run(&[&input, &boxes, &objectness, &classes])?;
-    let execute_ms = execute_started.elapsed().as_secs_f64() * 1e3;
-    let losses = outputs[0].to_vec::<f32>()?;
-    if losses.len() != 4 || losses.iter().any(|value| !value.is_finite()) {
-        return Err("training produced invalid losses".into());
+    let mut completed = 0;
+    for image in &coco.images[start..] {
+        let original = image::open(args.images.join(&image.file_name))?.into_rgb8();
+        let (pixels, ratio) = letterbox(&original, args.size as u32);
+        let targets = targets_for_image(&coco, &categories, image.id, ratio)?;
+        if targets.is_empty() {
+            continue;
+        }
+        let input = client.buffer(&[1, args.size, args.size, 3], &pixels)?;
+
+        // Buffer clones share their PJRT allocation. The inference detour sees
+        // the current weights while the original snapshot retains Adam state.
+        let snapshot = training.take_session(training_session)?;
+        let mut inference_session = snapshot
+            .clone()
+            .restore_model(inference.session(&inference_program))?
+            .build()?;
+        let infer_started = Instant::now();
+        let outputs: [Buffer; 3] =
+            inference_session
+                .run(&[&input])?
+                .try_into()
+                .map_err(|outputs: Vec<Buffer>| {
+                    format!("inference returned {} outputs instead of 3", outputs.len())
+                })?;
+        let infer_ms = infer_started.elapsed().as_secs_f64() * 1e3;
+        training_session = snapshot
+            .restore_model(training.session(&program))?
+            .build()?;
+
+        let heads = outputs
+            .iter()
+            .map(Buffer::to_vec::<f32>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let shapes = head_shapes(args.size, 85);
+        let decoded = DecodedYoloBatch::from_heads([
+            YoloHead::new(&heads[0], shapes[0]).stride(8),
+            YoloHead::new(&heads[1], shapes[1]).stride(16),
+            YoloHead::new(&heads[2], shapes[2]).stride(32),
+        ])?;
+        let assignments = SimOtaConfig::default().assign(&decoded.input(), &targets)?;
+        if assignments.foreground == 0 {
+            return Err(format!(
+                "SimOTA produced no foreground anchors for image {}",
+                image.id
+            )
+            .into());
+        }
+        let boxes = client.buffer(&[1, anchors, 4], &assignments.boxes)?;
+        let objectness = client.buffer(&[1, anchors, 1], &assignments.objectness)?;
+        let classes = client.buffer(&[1, anchors, 80], &assignments.classes)?;
+        let train_started = Instant::now();
+        let outputs = training_session.run(&[&input, &boxes, &objectness, &classes])?;
+        let train_ms = train_started.elapsed().as_secs_f64() * 1e3;
+        let losses = outputs[0].to_vec::<f32>()?;
+        if losses.len() != 4 || losses.iter().any(|value| !value.is_finite()) {
+            return Err("training produced invalid losses".into());
+        }
+        completed += 1;
+        println!(
+            "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} infer_ms={infer_ms:.1} train_ms={train_ms:.1}",
+            image.id,
+            targets.len(),
+            assignments.foreground,
+            losses[0],
+            losses[1],
+            losses[2],
+            losses[3],
+        );
+        if completed == args.steps {
+            break;
+        }
     }
-    println!(
-        "image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} compile_ms={compile_ms:.1} execute_ms={execute_ms:.1}",
-        args.image_id,
-        targets.len(),
-        assignments.foreground,
-        losses[0],
-        losses[1],
-        losses[2],
-        losses[3],
-    );
+    if completed != args.steps {
+        return Err(format!(
+            "only found {completed} annotated images for {} steps",
+            args.steps
+        )
+        .into());
+    }
+    println!("completed={completed} train_compile_ms={train_compile_ms:.1}");
     Ok(())
+}
+
+fn targets_for_image(
+    coco: &Coco,
+    categories: &BTreeMap<u64, usize>,
+    image_id: u64,
+    ratio: f32,
+) -> Result<Vec<DetectionTarget>> {
+    coco.annotations
+        .iter()
+        .filter(|annotation| annotation.image_id == image_id && annotation.iscrowd == 0)
+        .map(|annotation| {
+            let [x, y, width, height] = annotation.bbox;
+            Ok(DetectionTarget {
+                batch: 0,
+                class: *categories
+                    .get(&annotation.category_id)
+                    .ok_or("annotation references an unknown category")?,
+                cxcywh: [
+                    (x + width * 0.5) * ratio,
+                    (y + height * 0.5) * ratio,
+                    width * ratio,
+                    height * ratio,
+                ],
+            })
+        })
+        .collect()
 }
 
 fn head_shapes(size: i64, channels: usize) -> [[usize; 4]; 3] {
