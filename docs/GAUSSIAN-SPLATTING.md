@@ -72,7 +72,8 @@ after the MIT-licensed [jax-gs](https://github.com/ghif/jax-gs) architecture:
 3. stably sort by depth and then by tile (equivalent to a lexicographic key);
 4. find tile boundaries with logarithmic static-shape `searchsorted_i32`;
 5. gather a fixed contributor budget per tile and alpha-composite all tile
-   pixels with an exclusive cumulative product.
+   pixels in fixed-size chunks with an exclusive cumulative product, carrying
+   accumulated color and transmittance between chunks.
 
 It has no custom call and continuous gradients remain in StableHLO. Its result
 also exposes `tile_counts`, `truncated_interactions`, and
@@ -100,14 +101,19 @@ tile span and 4,096 contributors per tile it compiled in about 1.51 s and ran
 in about 12.75 ms. Diagnostics reported a maximum of 35,396 contributors in one
 tile and 89,495 interactions beyond the configured per-tile budget, with no
 span overflow. The visible truncation is therefore explained and reproducible;
-the next requirement is chunked scan/early termination rather than a larger
-fully materialized tile tensor.
+the implementation now chunks the contributor dimension in blocks of 512 and
+masks later chunks after transmittance falls below `1e-4`, following `jax-gs`.
+At the same 4,096 budget it ran in about 13.03 ms, while compilation increased
+to about 6.62 s because RXLA currently expands the fixed chunk loop in Rust.
+A 32,768 budget also ran without exhausting the 5080, but compiled in about
+19.64 s. The remaining framework requirement is a region-based StableHLO
+`scan`/`while`, so one loop body is represented once instead of graph-unrolled.
 
 ```bash
 PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so \
 cargo run --release -p rxla-models --example gaussian_splatting_real -- \
   --splat /path/to/scene.splat --cameras /path/to/cameras.json \
   --camera 0 --width 160 --gaussians 0 --tiled \
-  --max-tile-span 8 --max-per-tile 4096 \
+  --max-tile-span 8 --max-per-tile 4096 --chunk-size 512 \
   --output gaussian-splatting-real.png
 ```

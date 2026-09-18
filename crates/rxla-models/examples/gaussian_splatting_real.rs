@@ -23,8 +23,10 @@ struct Args {
     tiled: bool,
     #[arg(long, default_value_t = 8)]
     max_tile_span: i64,
-    #[arg(long, default_value_t = 2048)]
+    #[arg(long, default_value_t = 4096)]
     max_per_tile: i64,
+    #[arg(long, default_value_t = 512)]
+    chunk_size: i64,
     #[arg(long, default_value_t = 20)]
     iterations: usize,
     #[arg(long, default_value = "gaussian-splatting-real.png")]
@@ -245,6 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tile_size: 16,
                 max_tile_span: args.max_tile_span,
                 max_per_tile: args.max_per_tile,
+                chunk_size: args.chunk_size,
             },
         )?;
         (

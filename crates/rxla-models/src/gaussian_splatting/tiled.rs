@@ -1,3 +1,6 @@
+//! Portable tiled rasterization following the algorithmic structure of the
+//! MIT-licensed JAX-GS renderer: https://github.com/ghif/jax-gs.
+
 use super::*;
 use rxla_core::DType;
 
@@ -7,6 +10,7 @@ pub struct TiledGaussianConfig {
     pub tile_size: i64,
     pub max_tile_span: i64,
     pub max_per_tile: i64,
+    pub chunk_size: i64,
 }
 
 impl Default for TiledGaussianConfig {
@@ -14,7 +18,8 @@ impl Default for TiledGaussianConfig {
         Self {
             tile_size: 16,
             max_tile_span: 8,
-            max_per_tile: 1024,
+            max_per_tile: 4096,
+            chunk_size: 512,
         }
     }
 }
@@ -76,7 +81,9 @@ pub fn render_gaussians_tiled(
         && camera.alpha_threshold < 0.99
         && config.tile_size > 0
         && config.max_tile_span > 0
-        && config.max_per_tile > 0;
+        && config.max_per_tile > 0
+        && config.chunk_size > 0
+        && config.max_per_tile % config.chunk_size == 0;
     if !valid {
         return Err(Error::InvalidModel {
             kind: ModelDefinitionError::InvalidGaussianSplattingInput,
@@ -311,22 +318,6 @@ pub fn render_gaussians_tiled(
         .add_scalar(-(config.max_per_tile as f32))?
         .maximum(&tile_counts.scalar(0.0)?.broadcast_to(&[tile_count])?)?
         .sum(&[0], false)?;
-    let contributor_offsets = means
-        .iota_i32(&[1, config.max_per_tile], 1)?
-        .broadcast_to(&[tile_count, config.max_per_tile])?;
-    let contributor_indices = starts
-        .reshape(&[tile_count, 1])?
-        .broadcast_to(&[tile_count, config.max_per_tile])?
-        .wrapping_add(&contributor_offsets)?;
-    let contributor_valid = contributor_offsets
-        .lt_mask(
-            &counts
-                .reshape(&[tile_count, 1])?
-                .broadcast_to(&[tile_count, config.max_per_tile])?,
-        )?
-        .detach()?;
-    let ids = sorted_gaussians.take(&contributor_indices, 0)?;
-
     let pixels = config.tile_size * config.tile_size;
     let tile_index = means.iota_i32(&[tile_count, 1], 0)?.to_f32()?;
     let tile_y = tile_index.mul_scalar(1.0 / tiles_x as f32)?.floor()?;
@@ -346,79 +337,118 @@ pub fn render_gaussians_tiled(
         .broadcast_to(&[tile_count, pixels])?
         .add(&local_y.broadcast_to(&[tile_count, pixels])?)?
         .add_scalar(0.5)?;
-    let gathered_x = projected_x.take(&ids, 0)?;
-    let gathered_y = projected_y.take(&ids, 0)?;
-    let dx = pixel_x
-        .reshape(&[tile_count, pixels, 1])?
-        .broadcast_to(&[tile_count, pixels, config.max_per_tile])?
-        .sub(
-            &gathered_x
-                .reshape(&[tile_count, 1, config.max_per_tile])?
-                .broadcast_to(&[tile_count, pixels, config.max_per_tile])?,
-        )?;
-    let dy = pixel_y
-        .reshape(&[tile_count, pixels, 1])?
-        .broadcast_to(&[tile_count, pixels, config.max_per_tile])?
-        .sub(
-            &gathered_y
-                .reshape(&[tile_count, 1, config.max_per_tile])?
-                .broadcast_to(&[tile_count, pixels, config.max_per_tile])?,
-        )?;
-    let expand = |value: &Tensor| {
-        value
-            .take(&ids, 0)?
-            .reshape(&[tile_count, 1, config.max_per_tile])?
-            .broadcast_to(&[tile_count, pixels, config.max_per_tile])
-    };
-    let exponent = dx
-        .square()?
-        .mul(&expand(&inverse_xx)?)?
-        .add(&dx.mul(&dy)?.mul(&expand(&inverse_xy)?)?.mul_scalar(2.0)?)?
-        .add(&dy.square()?.mul(&expand(&inverse_yy)?)?)?
-        .mul_scalar(-0.5)?;
     let opacity = opacities.clamp(0.0, 0.99)?;
-    let alpha = exponent.exp()?.mul(&expand(&opacity)?)?;
-    let valid = contributor_valid
-        .reshape(&[tile_count, 1, config.max_per_tile])?
-        .broadcast_to(&[tile_count, pixels, config.max_per_tile])?;
-    let support = alpha
-        .gt_mask(
-            &alpha
-                .scalar(camera.alpha_threshold)?
-                .broadcast_to(alpha.shape())?,
-        )?
-        .mul(&valid)?
-        .detach()?;
-    let alpha = alpha.mul(&support)?.clamp(0.0, 0.99)?;
-    let exclusive = alpha
-        .mul_scalar(-1.0)?
-        .add_scalar(1.0)?
-        .narrow(2, 0, config.max_per_tile - 1)?
-        .pad(&[[0, 0], [0, 0], [1, 0]], 1.0)?;
-    let transmittance = exclusive.cumprod(2)?;
-    let weights = alpha.mul(&transmittance)?;
-    let accumulated = weights.sum(&[2], false)?;
-    let gathered_colors = colors.take(&ids, 0)?;
-    let color = weights
-        .unsqueeze(3)?
-        .broadcast_to(&[tile_count, pixels, config.max_per_tile, 3])?
-        .mul(
-            &gathered_colors
-                .reshape(&[tile_count, 1, config.max_per_tile, 3])?
-                .broadcast_to(&[tile_count, pixels, config.max_per_tile, 3])?,
-        )?
-        .sum(&[2], false)?;
-    let remaining = accumulated
-        .mul_scalar(-1.0)?
-        .add_scalar(1.0)?
+    let mut color = pixel_x
+        .mul_scalar(0.0)?
         .unsqueeze(2)?
         .broadcast_to(&[tile_count, pixels, 3])?;
-    let color = color.add(
-        &remaining.mul(
-            &background
-                .reshape(&[1, 1, 3])?
-                .broadcast_to(&[tile_count, pixels, 3])?,
-        )?,
+    let mut remaining = pixel_x.mul_scalar(0.0)?.add_scalar(1.0)?;
+    let base_offsets = means.iota_i32(&[1, config.chunk_size], 1)?;
+    let starts = starts.reshape(&[tile_count, 1])?;
+    let counts = counts.reshape(&[tile_count, 1])?;
+    for chunk in 0..(config.max_per_tile / config.chunk_size) {
+        let offsets = base_offsets.wrapping_add(
+            &means
+                .scalar((chunk * config.chunk_size) as f32)?
+                .cast(DType::I32)?
+                .broadcast_to(&[1, config.chunk_size])?,
+        )?;
+        let offsets = offsets.broadcast_to(&[tile_count, config.chunk_size])?;
+        let contributor_indices = starts
+            .broadcast_to(&[tile_count, config.chunk_size])?
+            .wrapping_add(&offsets)?;
+        let contributor_valid = offsets
+            .lt_mask(&counts.broadcast_to(&[tile_count, config.chunk_size])?)?
+            .detach()?;
+        let ids = sorted_gaussians.take(&contributor_indices, 0)?;
+        let gathered_x = projected_x.take(&ids, 0)?;
+        let gathered_y = projected_y.take(&ids, 0)?;
+        let dx = pixel_x
+            .reshape(&[tile_count, pixels, 1])?
+            .broadcast_to(&[tile_count, pixels, config.chunk_size])?
+            .sub(
+                &gathered_x
+                    .reshape(&[tile_count, 1, config.chunk_size])?
+                    .broadcast_to(&[tile_count, pixels, config.chunk_size])?,
+            )?;
+        let dy = pixel_y
+            .reshape(&[tile_count, pixels, 1])?
+            .broadcast_to(&[tile_count, pixels, config.chunk_size])?
+            .sub(
+                &gathered_y
+                    .reshape(&[tile_count, 1, config.chunk_size])?
+                    .broadcast_to(&[tile_count, pixels, config.chunk_size])?,
+            )?;
+        let expand = |value: &Tensor| {
+            value
+                .take(&ids, 0)?
+                .reshape(&[tile_count, 1, config.chunk_size])?
+                .broadcast_to(&[tile_count, pixels, config.chunk_size])
+        };
+        let exponent = dx
+            .square()?
+            .mul(&expand(&inverse_xx)?)?
+            .add(&dx.mul(&dy)?.mul(&expand(&inverse_xy)?)?.mul_scalar(2.0)?)?
+            .add(&dy.square()?.mul(&expand(&inverse_yy)?)?)?
+            .mul_scalar(-0.5)?;
+        let alpha = exponent.exp()?.mul(&expand(&opacity)?)?;
+        let valid = contributor_valid
+            .reshape(&[tile_count, 1, config.chunk_size])?
+            .broadcast_to(&[tile_count, pixels, config.chunk_size])?;
+        let active = remaining
+            .gt_mask(&remaining.scalar(1e-4)?.broadcast_to(remaining.shape())?)?
+            .unsqueeze(2)?
+            .broadcast_to(&[tile_count, pixels, config.chunk_size])?;
+        let support = alpha
+            .gt_mask(
+                &alpha
+                    .scalar(camera.alpha_threshold)?
+                    .broadcast_to(alpha.shape())?,
+            )?
+            .mul(&valid)?
+            .mul(&active)?
+            .detach()?;
+        let alpha = alpha.mul(&support)?.clamp(0.0, 0.99)?;
+        let one_minus_alpha = alpha.mul_scalar(-1.0)?.add_scalar(1.0)?;
+        let local_transmittance = one_minus_alpha
+            .narrow(2, 0, config.chunk_size - 1)?
+            .pad(&[[0, 0], [0, 0], [1, 0]], 1.0)?
+            .cumprod(2)?;
+        let weights =
+            alpha
+                .mul(&local_transmittance)?
+                .mul(&remaining.unsqueeze(2)?.broadcast_to(&[
+                    tile_count,
+                    pixels,
+                    config.chunk_size,
+                ])?)?;
+        let gathered_colors = colors.take(&ids, 0)?;
+        let contribution = weights
+            .unsqueeze(3)?
+            .broadcast_to(&[tile_count, pixels, config.chunk_size, 3])?
+            .mul(
+                &gathered_colors
+                    .reshape(&[tile_count, 1, config.chunk_size, 3])?
+                    .broadcast_to(&[tile_count, pixels, config.chunk_size, 3])?,
+            )?
+            .sum(&[2], false)?;
+        color = color.add(&contribution)?;
+        let chunk_remaining = one_minus_alpha
+            .cumprod(2)?
+            .narrow(2, config.chunk_size - 1, 1)?
+            .reshape(&[tile_count, pixels])?;
+        remaining = remaining.mul(&chunk_remaining)?;
+    }
+    let accumulated = remaining.mul_scalar(-1.0)?.add_scalar(1.0)?;
+    color = color.add(
+        &remaining
+            .unsqueeze(2)?
+            .broadcast_to(&[tile_count, pixels, 3])?
+            .mul(
+                &background
+                    .reshape(&[1, 1, 3])?
+                    .broadcast_to(&[tile_count, pixels, 3])?,
+            )?,
     )?;
     let padded_height = tiles_y * config.tile_size;
     let padded_width = tiles_x * config.tile_size;
@@ -468,6 +498,7 @@ mod tests {
                 tile_size: 1,
                 max_tile_span: 1,
                 max_per_tile: 2,
+                chunk_size: 1,
             },
         )
     }
@@ -506,6 +537,7 @@ mod tests {
                 tile_size: 1,
                 max_tile_span: 1,
                 max_per_tile: 1,
+                chunk_size: 1,
             },
         )
         .unwrap();
