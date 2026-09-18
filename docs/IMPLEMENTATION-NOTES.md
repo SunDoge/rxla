@@ -790,6 +790,16 @@ memory quota. Native single-client tests cover scalar negative zero, empty
 shapes, integer extremes and BF16 bit patterns. The heterogeneous example checks
 I32 and BF16 CPU-to-CUDA-to-CPU round trips as well as the F32 compute pipeline.
 
+PJRT CPU allocations are not inferred from the client's platform name.
+`Buffer::is_on_cpu()` queries the native allocation, and
+`Buffer::external_reference()` increments PJRT's external-reference count before
+returning an opaque pointer guard. Keeping only a cloned `Buffer` is insufficient:
+the C API permits moving its allocation while that count is zero. This matches
+JAX's CPU zero-copy path, which additionally waits for readiness and requires a
+default, non-sub-byte layout before exposing a host array. RXLA does not yet
+provide a safe typed CPU slice because those remaining checks must be part of
+the view contract.
+
 Use `copy_to_client_via_host_with_limit(&destination, max_host_bytes)` when a
 transfer must fit a host payload budget. It queries the native download size and
 rejects over-budget copies before allocating/downloading the payload or uploading

@@ -130,6 +130,10 @@ fn check_device(
     )?;
     assert_eq!(replicated.device_count(), 2);
     let selected_input = client.buffer_on_device(index, &[2], &[1., 3.])?;
+    assert!(selected_input.is_on_cpu()?);
+    let external = selected_input.external_reference()?;
+    let _pointer = external.as_ptr();
+    drop(external);
     let other_index = usize::from(index == 0);
     let other_input = client.buffer_on_device(other_index, &[2], &[5., 7.])?;
     let copied_input = selected_input.copy_to_device(other_index)?;

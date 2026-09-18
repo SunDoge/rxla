@@ -344,12 +344,14 @@ mod tests {
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let client = unsafe { Client::load(std::env::var("PJRT_CUDA_PLUGIN_PATH")?) }?;
         let source = client.buffer(&[4], &[1.0_f32, 2.0, 3.0, 4.0])?;
+        assert!(!source.is_on_cpu()?);
         // SAFETY: `source` is retained as the DLPack manager context and the
         // descriptor is consumed by `import_on_device` before that owner moves.
-        let pointer = unsafe { source.opaque_device_pointer()? };
+        let external = source.external_reference()?;
+        let pointer = external.as_ptr();
         let prepared =
             Fixed::new(Copied([4_i64]), Copied([1_i64])).prepare::<DLManagedTensorVersioned>()?;
-        let mut initialized = prepared.initialize(Box::new(source));
+        let mut initialized = prepared.initialize(Box::new(external));
         initialized
             .set_data(pointer.as_ptr())
             .set_dtype(DLDataType::F32)
@@ -367,9 +369,8 @@ mod tests {
         assert_eq!(tensor.shape(), [4]);
         assert_eq!(tensor.dtype(), DType::F32);
         let imported = tensor.to_buffer(&client)?;
-        // SAFETY: both pointers are compared only while `imported` retains the
-        // external allocation; neither pointer is dereferenced here.
-        assert_eq!(unsafe { imported.opaque_device_pointer()? }, pointer);
+        let imported_external = imported.external_reference()?;
+        assert_eq!(imported_external.as_ptr(), pointer);
         assert_eq!(imported.to_vec::<f32>()?, [1., 2., 3., 4.]);
         Ok(())
     }

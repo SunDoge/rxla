@@ -1390,6 +1390,44 @@ impl Element for half::bf16 {
 pub struct Buffer {
     inner: Arc<BufferInner>,
 }
+
+/// Pins a PJRT buffer allocation for external pointer access.
+///
+/// The native external-reference count prevents the backend from deleting or
+/// moving the allocation until this guard is dropped.
+pub struct BufferExternalReference {
+    buffer: Buffer,
+    pointer: NonNull<std::ffi::c_void>,
+    decrease: unsafe extern "C" fn(
+        *mut PJRT_Buffer_DecreaseExternalReferenceCount_Args,
+    ) -> *mut PJRT_Error,
+}
+
+// PJRT buffers and their external-reference accounting are thread-safe. The
+// pointer is opaque and this type exposes no safe dereference operation.
+unsafe impl Send for BufferExternalReference {}
+unsafe impl Sync for BufferExternalReference {}
+
+impl BufferExternalReference {
+    /// Return the pinned backend pointer. Dereferencing it remains
+    /// backend-specific and unsafe.
+    pub fn as_ptr(&self) -> NonNull<std::ffi::c_void> {
+        self.pointer
+    }
+}
+
+impl Drop for BufferExternalReference {
+    fn drop(&mut self) {
+        let plugin = &self.buffer.inner.client.plugin;
+        let mut args = args!(
+            PJRT_Buffer_DecreaseExternalReferenceCount_Args,
+            PJRT_Buffer_DecreaseExternalReferenceCount_Args_STRUCT_SIZE
+        );
+        args.buffer = self.buffer.inner.raw.as_ptr();
+        let _ = plugin.check(unsafe { (self.decrease)(&mut args) });
+    }
+}
+
 struct BufferInner {
     client: Arc<ClientInner>,
     raw: NonNull<PJRT_Buffer>,
@@ -1400,27 +1438,72 @@ struct BufferInner {
 unsafe impl Send for BufferInner {}
 unsafe impl Sync for BufferInner {}
 impl Buffer {
-    /// Return the backend's opaque device-memory pointer for interoperability.
+    /// Whether PJRT reports that this allocation is host-accessible CPU memory.
+    pub fn is_on_cpu(&self) -> Result<bool> {
+        let plugin = &self.inner.client.plugin;
+        let mut args = args!(
+            PJRT_Buffer_IsOnCpu_Args,
+            PJRT_Buffer_IsOnCpu_Args_STRUCT_SIZE
+        );
+        args.buffer = self.inner.raw.as_ptr();
+        plugin.check(unsafe { function!(plugin.api(), PJRT_Buffer_IsOnCpu)(&mut args) })?;
+        Ok(args.is_on_cpu)
+    }
+
+    /// Pin the allocation and obtain its backend-specific opaque pointer.
     ///
-    /// # Safety
-    ///
-    /// The pointer is valid only while this buffer and backend allocation
-    /// remain alive. Callers must obey backend stream synchronization, must not
-    /// free the allocation, and must not assume host accessibility.
-    pub unsafe fn opaque_device_pointer(&self) -> Result<NonNull<std::ffi::c_void>> {
+    /// This may block in the backend. The returned guard must remain alive
+    /// while the pointer is shared externally. It does not imply readiness,
+    /// host accessibility, alignment, or any particular physical layout.
+    pub fn external_reference(&self) -> Result<BufferExternalReference> {
+        let plugin = &self.inner.client.plugin;
+        let decrease_fn = function!(plugin.api(), PJRT_Buffer_DecreaseExternalReferenceCount);
+        let mut increase = args!(
+            PJRT_Buffer_IncreaseExternalReferenceCount_Args,
+            PJRT_Buffer_IncreaseExternalReferenceCount_Args_STRUCT_SIZE
+        );
+        increase.buffer = self.inner.raw.as_ptr();
+        plugin.check(unsafe {
+            function!(plugin.api(), PJRT_Buffer_IncreaseExternalReferenceCount)(&mut increase)
+        })?;
         let mut args = args!(
             PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args,
             PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args_STRUCT_SIZE
         );
         args.buffer = self.inner.raw.as_ptr();
-        self.inner.client.plugin.check(unsafe {
+        if let Err(error) = self.inner.client.plugin.check(unsafe {
             function!(
                 self.inner.client.plugin.api(),
                 PJRT_Buffer_OpaqueDeviceMemoryDataPointer
             )(&mut args)
-        })?;
-        NonNull::new(args.device_memory_ptr).context(InvalidPluginDataSnafu {
-            message: "PJRT returned a null opaque device pointer",
+        }) {
+            let mut decrease_args = args!(
+                PJRT_Buffer_DecreaseExternalReferenceCount_Args,
+                PJRT_Buffer_DecreaseExternalReferenceCount_Args_STRUCT_SIZE
+            );
+            decrease_args.buffer = self.inner.raw.as_ptr();
+            let _ = plugin.check(unsafe { decrease_fn(&mut decrease_args) });
+            return Err(error);
+        }
+        let pointer = match NonNull::new(args.device_memory_ptr) {
+            Some(pointer) => pointer,
+            None => {
+                let mut decrease_args = args!(
+                    PJRT_Buffer_DecreaseExternalReferenceCount_Args,
+                    PJRT_Buffer_DecreaseExternalReferenceCount_Args_STRUCT_SIZE
+                );
+                decrease_args.buffer = self.inner.raw.as_ptr();
+                let _ = plugin.check(unsafe { decrease_fn(&mut decrease_args) });
+                return InvalidPluginDataSnafu {
+                    message: "PJRT returned a null opaque device pointer",
+                }
+                .fail();
+            }
+        };
+        Ok(BufferExternalReference {
+            buffer: self.clone(),
+            pointer,
+            decrease: decrease_fn,
         })
     }
 
