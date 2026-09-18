@@ -43,6 +43,9 @@ class BenchmarkArgs(TypedArgs):
     random_samples: Annotated[int, Arg("--random-samples", metavar="COUNT")] = 2_048
     repeats: Annotated[int, Arg("--repeats", metavar="COUNT")] = 3
     seed: Annotated[int, Arg("--seed", metavar="INTEGER")] = 42
+    window_sizes: Annotated[
+        list[int], Arg("--window-sizes", nargs="+", metavar="ROWS")
+    ] = [32, 128, 512]
     json_output: Annotated[
         Path | None, Arg("--json-output", metavar="PATH")
     ] = None
@@ -187,7 +190,12 @@ def measure(
 
 
 def benchmark(
-    samples: list[Sample], output: Path, random_samples: int, repeats: int, seed: int
+    samples: list[Sample],
+    output: Path,
+    random_samples: int,
+    repeats: int,
+    seed: int,
+    window_sizes: list[int],
 ) -> list[Measurement]:
     dataset = lance.dataset(output)
     if dataset.count_rows() != len(samples):
@@ -195,6 +203,23 @@ def benchmark(
     selected = random.Random(seed).sample(
         range(len(samples)), min(random_samples, len(samples))
     )
+
+    def window_plan(window_size: int) -> list[list[int]]:
+        windows = [
+            list(range(start, min(start + window_size, len(samples))))
+            for start in range(0, len(samples), window_size)
+        ]
+        random.Random(seed).shuffle(windows)
+        remaining = len(selected)
+        plan = []
+        for window in windows:
+            if remaining == 0:
+                break
+            plan.append(window[:remaining])
+            remaining -= len(plan[-1])
+        return plan
+
+    window_plans = {size: window_plan(size) for size in window_sizes}
 
     def directory_sequential() -> int:
         return sum(len(sample.path.read_bytes()) for sample in samples)
@@ -245,6 +270,64 @@ def benchmark(
                 total += len(payload)
         return total
 
+    def lance_window_shuffle(window_size: int, decode_images: bool) -> int:
+        total = 0
+        shuffle_buffer: list[bytes] = []
+        rng = random.Random(seed)
+        buffer_limit = window_size * 4
+
+        def consume_one() -> None:
+            nonlocal total
+            index = rng.randrange(len(shuffle_buffer))
+            payload = shuffle_buffer[index]
+            shuffle_buffer[index] = shuffle_buffer[-1]
+            shuffle_buffer.pop()
+            if decode_images:
+                decode(payload)
+            total += len(payload)
+
+        for indices in window_plans[window_size]:
+            for _, payload in dataset.read_blobs(
+                "image", indices=indices, preserve_order=True
+            ):
+                if payload is not None:
+                    shuffle_buffer.append(payload)
+            while len(shuffle_buffer) >= buffer_limit:
+                consume_one()
+        while shuffle_buffer:
+            consume_one()
+        return total
+
+    def lance_window_local_shuffle(window_size: int) -> int:
+        total = 0
+        rng = random.Random(seed)
+        for indices in window_plans[window_size]:
+            payloads = [
+                payload
+                for _, payload in dataset.read_blobs(
+                    "image", indices=indices, preserve_order=True
+                )
+                if payload is not None
+            ]
+            rng.shuffle(payloads)
+            for payload in payloads:
+                decode(payload)
+                total += len(payload)
+        return total
+
+    def lance_scattered_same_samples(window_size: int, decode_images: bool) -> int:
+        indices = [index for window in window_plans[window_size] for index in window]
+        random.Random(seed).shuffle(indices)
+        total = 0
+        for _, payload in dataset.read_blobs(
+            "image", indices=indices, preserve_order=True
+        ):
+            if payload is not None:
+                if decode_images:
+                    decode(payload)
+                total += len(payload)
+        return total
+
     def lance_metadata_filter() -> int:
         rows = 0
         for batch in dataset.scanner(
@@ -256,7 +339,7 @@ def benchmark(
         return rows
 
     # One untimed pass makes these explicitly warm-cache, steady-state measurements.
-    for operation in (
+    warmups: list[Callable[[], int]] = [
         directory_sequential,
         lance_sequential,
         directory_random,
@@ -264,11 +347,22 @@ def benchmark(
         directory_random_decode,
         lance_random_decode,
         lance_metadata_filter,
-    ):
+    ]
+    for window_size in window_sizes:
+        warmups.extend(
+            [
+                lambda size=window_size: lance_window_shuffle(size, False),
+                lambda size=window_size: lance_scattered_same_samples(size, False),
+                lambda size=window_size: lance_scattered_same_samples(size, True),
+                lambda size=window_size: lance_window_local_shuffle(size),
+                lambda size=window_size: lance_window_shuffle(size, True),
+            ]
+        )
+    for operation in warmups:
         operation()
 
     metadata_rows = lance_metadata_filter()
-    return [
+    measurements = [
         measure("directory_sequential", len(samples), directory_sequential, repeats),
         measure("lance_sequential", len(samples), lance_sequential, repeats),
         measure("directory_random", len(selected), directory_random, repeats),
@@ -279,6 +373,42 @@ def benchmark(
         measure("lance_random_decode", len(selected), lance_random_decode, repeats),
         measure("lance_metadata_filter", metadata_rows, lance_metadata_filter, repeats),
     ]
+    for window_size in window_sizes:
+        measurements.extend(
+            [
+                measure(
+                    f"lance_window_{window_size}",
+                    len(selected),
+                    lambda size=window_size: lance_window_shuffle(size, False),
+                    repeats,
+                ),
+                measure(
+                    f"lance_scattered_{window_size}",
+                    len(selected),
+                    lambda size=window_size: lance_scattered_same_samples(size, False),
+                    repeats,
+                ),
+                measure(
+                    f"lance_scattered_{window_size}_decode",
+                    len(selected),
+                    lambda size=window_size: lance_scattered_same_samples(size, True),
+                    repeats,
+                ),
+                measure(
+                    f"lance_window_{window_size}_local_decode",
+                    len(selected),
+                    lambda size=window_size: lance_window_local_shuffle(size),
+                    repeats,
+                ),
+                measure(
+                    f"lance_window_{window_size}_pool_decode",
+                    len(selected),
+                    lambda size=window_size: lance_window_shuffle(size, True),
+                    repeats,
+                ),
+            ]
+        )
+    return measurements
 
 
 def main() -> None:
@@ -310,6 +440,8 @@ def main() -> None:
 
     if command.random_samples <= 0 or command.repeats <= 0:
         raise ValueError("random-samples and repeats must be positive")
+    if not command.window_sizes or any(size <= 0 for size in command.window_sizes):
+        raise ValueError("window-sizes must contain positive integers")
     if not command.dataset.exists():
         raise FileNotFoundError(
             f"{command.dataset} does not exist; run the build subcommand first"
@@ -321,6 +453,7 @@ def main() -> None:
         command.random_samples,
         command.repeats,
         command.seed,
+        command.window_sizes,
     )
     report = {
         "environment": {
