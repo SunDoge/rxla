@@ -338,107 +338,123 @@ pub fn render_gaussians_tiled(
         .add(&local_y.broadcast_to(&[tile_count, pixels])?)?
         .add_scalar(0.5)?;
     let opacity = opacities.clamp(0.0, 0.99)?;
-    let mut color = pixel_x
+    let color = pixel_x
         .mul_scalar(0.0)?
         .unsqueeze(2)?
         .broadcast_to(&[tile_count, pixels, 3])?;
-    let mut remaining = pixel_x.mul_scalar(0.0)?.add_scalar(1.0)?;
+    let remaining = pixel_x.mul_scalar(0.0)?.add_scalar(1.0)?;
     let base_offsets = means.iota_i32(&[1, config.chunk_size], 1)?;
     let starts = starts.reshape(&[tile_count, 1])?;
     let counts = counts.reshape(&[tile_count, 1])?;
-    for chunk in 0..(config.max_per_tile / config.chunk_size) {
-        let offsets = base_offsets.wrapping_add(
-            &means
-                .scalar((chunk * config.chunk_size) as f32)?
-                .cast(DType::I32)?
-                .broadcast_to(&[1, config.chunk_size])?,
-        )?;
-        let offsets = offsets.broadcast_to(&[tile_count, config.chunk_size])?;
-        let contributor_indices = starts
-            .broadcast_to(&[tile_count, config.chunk_size])?
-            .wrapping_add(&offsets)?;
-        let contributor_valid = offsets
-            .lt_mask(&counts.broadcast_to(&[tile_count, config.chunk_size])?)?
-            .detach()?;
-        let ids = sorted_gaussians.take(&contributor_indices, 0)?;
-        let gathered_x = projected_x.take(&ids, 0)?;
-        let gathered_y = projected_y.take(&ids, 0)?;
-        let dx = pixel_x
-            .reshape(&[tile_count, pixels, 1])?
-            .broadcast_to(&[tile_count, pixels, config.chunk_size])?
-            .sub(
-                &gathered_x
+    let chunk_count = config.max_per_tile / config.chunk_size;
+    let counter = means.scalar(0.0)?.cast(DType::I32)?;
+    let composite_chunk =
+        |carry: &[Tensor]| -> rxla_core::Result<Vec<Tensor>> {
+            let color = &carry[1];
+            let remaining = &carry[2];
+            let chunk_base = carry[0]
+                .wrapping_mul(&carry[0].scalar_i32(config.chunk_size as i32)?)?
+                .broadcast_to(&[1, config.chunk_size])?;
+            let offsets = base_offsets.wrapping_add(&chunk_base)?;
+            let offsets = offsets.broadcast_to(&[tile_count, config.chunk_size])?;
+            let contributor_indices = starts
+                .broadcast_to(&[tile_count, config.chunk_size])?
+                .wrapping_add(&offsets)?;
+            let contributor_valid = offsets
+                .lt_mask(&counts.broadcast_to(&[tile_count, config.chunk_size])?)?
+                .detach()?;
+            let ids = sorted_gaussians.take(&contributor_indices, 0)?;
+            let gathered_x = projected_x.take(&ids, 0)?;
+            let gathered_y = projected_y.take(&ids, 0)?;
+            let dx = pixel_x
+                .reshape(&[tile_count, pixels, 1])?
+                .broadcast_to(&[tile_count, pixels, config.chunk_size])?
+                .sub(
+                    &gathered_x
+                        .reshape(&[tile_count, 1, config.chunk_size])?
+                        .broadcast_to(&[tile_count, pixels, config.chunk_size])?,
+                )?;
+            let dy = pixel_y
+                .reshape(&[tile_count, pixels, 1])?
+                .broadcast_to(&[tile_count, pixels, config.chunk_size])?
+                .sub(
+                    &gathered_y
+                        .reshape(&[tile_count, 1, config.chunk_size])?
+                        .broadcast_to(&[tile_count, pixels, config.chunk_size])?,
+                )?;
+            let expand = |value: &Tensor| {
+                value
+                    .take(&ids, 0)?
                     .reshape(&[tile_count, 1, config.chunk_size])?
-                    .broadcast_to(&[tile_count, pixels, config.chunk_size])?,
-            )?;
-        let dy = pixel_y
-            .reshape(&[tile_count, pixels, 1])?
-            .broadcast_to(&[tile_count, pixels, config.chunk_size])?
-            .sub(
-                &gathered_y
-                    .reshape(&[tile_count, 1, config.chunk_size])?
-                    .broadcast_to(&[tile_count, pixels, config.chunk_size])?,
-            )?;
-        let expand = |value: &Tensor| {
-            value
-                .take(&ids, 0)?
+                    .broadcast_to(&[tile_count, pixels, config.chunk_size])
+            };
+            let exponent = dx
+                .square()?
+                .mul(&expand(&inverse_xx)?)?
+                .add(&dx.mul(&dy)?.mul(&expand(&inverse_xy)?)?.mul_scalar(2.0)?)?
+                .add(&dy.square()?.mul(&expand(&inverse_yy)?)?)?
+                .mul_scalar(-0.5)?;
+            let alpha = exponent.exp()?.mul(&expand(&opacity)?)?;
+            let valid = contributor_valid
                 .reshape(&[tile_count, 1, config.chunk_size])?
-                .broadcast_to(&[tile_count, pixels, config.chunk_size])
+                .broadcast_to(&[tile_count, pixels, config.chunk_size])?;
+            let active = remaining
+                .gt_mask(&remaining.scalar(1e-4)?.broadcast_to(remaining.shape())?)?
+                .unsqueeze(2)?
+                .broadcast_to(&[tile_count, pixels, config.chunk_size])?;
+            let support = alpha
+                .gt_mask(
+                    &alpha
+                        .scalar(camera.alpha_threshold)?
+                        .broadcast_to(alpha.shape())?,
+                )?
+                .mul(&valid)?
+                .mul(&active)?
+                .detach()?;
+            let alpha = alpha.mul(&support)?.clamp(0.0, 0.99)?;
+            let one_minus_alpha = alpha.mul_scalar(-1.0)?.add_scalar(1.0)?;
+            let local_transmittance = one_minus_alpha
+                .narrow(2, 0, config.chunk_size - 1)?
+                .pad(&[[0, 0], [0, 0], [1, 0]], 1.0)?
+                .cumprod(2)?;
+            let weights = alpha.mul(&local_transmittance)?.mul(
+                &remaining
+                    .unsqueeze(2)?
+                    .broadcast_to(&[tile_count, pixels, config.chunk_size])?,
+            )?;
+            let gathered_colors = colors.take(&ids, 0)?;
+            let contribution = weights
+                .unsqueeze(3)?
+                .broadcast_to(&[tile_count, pixels, config.chunk_size, 3])?
+                .mul(
+                    &gathered_colors
+                        .reshape(&[tile_count, 1, config.chunk_size, 3])?
+                        .broadcast_to(&[tile_count, pixels, config.chunk_size, 3])?,
+                )?
+                .sum(&[2], false)?;
+            let color = color.add(&contribution)?;
+            let chunk_remaining = one_minus_alpha
+                .cumprod(2)?
+                .narrow(2, config.chunk_size - 1, 1)?
+                .reshape(&[tile_count, pixels])?;
+            let remaining = remaining.mul(&chunk_remaining)?;
+            Ok(vec![carry[0].wrapping_add_scalar(1)?, color, remaining])
         };
-        let exponent = dx
-            .square()?
-            .mul(&expand(&inverse_xx)?)?
-            .add(&dx.mul(&dy)?.mul(&expand(&inverse_xy)?)?.mul_scalar(2.0)?)?
-            .add(&dy.square()?.mul(&expand(&inverse_yy)?)?)?
-            .mul_scalar(-0.5)?;
-        let alpha = exponent.exp()?.mul(&expand(&opacity)?)?;
-        let valid = contributor_valid
-            .reshape(&[tile_count, 1, config.chunk_size])?
-            .broadcast_to(&[tile_count, pixels, config.chunk_size])?;
-        let active = remaining
-            .gt_mask(&remaining.scalar(1e-4)?.broadcast_to(remaining.shape())?)?
-            .unsqueeze(2)?
-            .broadcast_to(&[tile_count, pixels, config.chunk_size])?;
-        let support = alpha
-            .gt_mask(
-                &alpha
-                    .scalar(camera.alpha_threshold)?
-                    .broadcast_to(alpha.shape())?,
-            )?
-            .mul(&valid)?
-            .mul(&active)?
-            .detach()?;
-        let alpha = alpha.mul(&support)?.clamp(0.0, 0.99)?;
-        let one_minus_alpha = alpha.mul_scalar(-1.0)?.add_scalar(1.0)?;
-        let local_transmittance = one_minus_alpha
-            .narrow(2, 0, config.chunk_size - 1)?
-            .pad(&[[0, 0], [0, 0], [1, 0]], 1.0)?
-            .cumprod(2)?;
-        let weights =
-            alpha
-                .mul(&local_transmittance)?
-                .mul(&remaining.unsqueeze(2)?.broadcast_to(&[
-                    tile_count,
-                    pixels,
-                    config.chunk_size,
-                ])?)?;
-        let gathered_colors = colors.take(&ids, 0)?;
-        let contribution = weights
-            .unsqueeze(3)?
-            .broadcast_to(&[tile_count, pixels, config.chunk_size, 3])?
-            .mul(
-                &gathered_colors
-                    .reshape(&[tile_count, 1, config.chunk_size, 3])?
-                    .broadcast_to(&[tile_count, pixels, config.chunk_size, 3])?,
-            )?
-            .sum(&[2], false)?;
-        color = color.add(&contribution)?;
-        let chunk_remaining = one_minus_alpha
-            .cumprod(2)?
-            .narrow(2, config.chunk_size - 1, 1)?
-            .reshape(&[tile_count, pixels])?;
-        remaining = remaining.mul(&chunk_remaining)?;
-    }
+    let carry = if chunk_count == 1 {
+        composite_chunk(&[counter, color, remaining])?
+    } else {
+        Tensor::while_loop(
+            &[counter, color, remaining],
+            |carry| {
+                carry[0]
+                    .lt_mask(&carry[0].scalar_i32(chunk_count as i32)?)?
+                    .cast(DType::I32)
+            },
+            composite_chunk,
+        )?
+    };
+    let mut color = carry[1].clone();
+    let remaining = &carry[2];
     let accumulated = remaining.mul_scalar(-1.0)?.add_scalar(1.0)?;
     color = color.add(
         &remaining
@@ -515,6 +531,7 @@ mod tests {
         assert!(stablehlo.contains("stablehlo.sort"));
         assert!(stablehlo.contains("stablehlo.gather"));
         assert!(stablehlo.contains("stablehlo.select"));
+        assert_eq!(stablehlo.matches("stablehlo.while").count(), 1);
         assert!(!stablehlo.contains("custom_call"));
     }
 

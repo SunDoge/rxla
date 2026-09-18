@@ -439,7 +439,10 @@ pub(super) fn emit_module(
         }
         let operation = operation_ptr.deref(ctx);
         let result = operation.get_result(0);
-        if !reachable.contains(&result) {
+        if !operation
+            .results()
+            .any(|result| reachable.contains(&result))
+        {
             continue;
         }
         let op = Operation::get_op_dyn(operation_ptr, ctx);

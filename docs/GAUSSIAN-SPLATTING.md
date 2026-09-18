@@ -6,10 +6,10 @@ matrices through a pinhole camera, performs stable front-to-back depth sorting,
 and alpha-composites RGB plus a background. It does not use a custom call or a
 CUDA-specific kernel.
 
-This is deliberately a dense implementation. Its major intermediates have
+The reference path is deliberately dense. Its major intermediates have
 shape `[height, width, gaussians]`, so time and memory are `O(HWG)`. It is useful
-for validating the Tensor API, StableHLO lowering, autodiff, and small scenes;
-it is not yet the tiled/sorted rasterizer required for production 3DGS.
+for validating the Tensor API, StableHLO lowering, autodiff, and small scenes.
+A bounded tiled implementation for larger experiments is described below.
 
 ## Run
 
@@ -97,17 +97,20 @@ centers inside camera 0. CUDA successfully rendered subsets from 256 through
 The dense full-scene image is not a quality result: `[H,W,G]` compositing cannot
 retain the scene at useful resolution. The tiled path subsequently rendered
 131,417 selected real Gaussians at 96x64 on the RTX 5080. With an 8x8 maximum
-tile span and 4,096 contributors per tile it compiled in about 1.51 s and ran
-in about 12.75 ms. Diagnostics reported a maximum of 35,396 contributors in one
+tile span and 4,096 contributors per tile, diagnostics reported a maximum of
+35,396 contributors in one
 tile and 89,495 interactions beyond the configured per-tile budget, with no
 span overflow. The visible truncation is therefore explained and reproducible;
 the implementation now chunks the contributor dimension in blocks of 512 and
 masks later chunks after transmittance falls below `1e-4`, following `jax-gs`.
-At the same 4,096 budget it ran in about 13.03 ms, while compilation increased
-to about 6.62 s because RXLA currently expands the fixed chunk loop in Rust.
-A 32,768 budget also ran without exhausting the 5080, but compiled in about
-19.64 s. The remaining framework requirement is a region-based StableHLO
-`scan`/`while`, so one loop body is represented once instead of graph-unrolled.
+The original Rust-unrolled eight-chunk graph compiled in about 6.62 s and ran
+in about 13.03 ms. RXLA's region-based multi-carry `stablehlo.while` now stores
+the chunk body once: the same scene and budget compile in about 2.03 s and run
+in about 11.46 ms through the CUDA PJRT plugin shipped with the local JAX
+environment. That is a 3.3x compile-time reduction and a roughly 12% execution
+improvement. A single-chunk path remains statically expanded so the existing
+continuous autodiff reference stays available while loop differentiation is
+implemented.
 
 ```bash
 PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so \

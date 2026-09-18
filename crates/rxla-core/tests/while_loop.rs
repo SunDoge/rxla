@@ -3,10 +3,11 @@ use rxla_core::{Client, Tensor, Tracer};
 fn loop_program(graph: &Tracer) -> Vec<Tensor> {
     let counter = graph.input_i32_scalar().unwrap();
     let values = graph.input(&[2]).unwrap();
+    let increment = graph.constant(&[2], &[2., 2.]).unwrap();
     Tensor::while_loop(
         &[counter, values],
         |carry| Ok(carry[0].clone()),
-        |carry| Ok(vec![carry[0].scalar_i32(0)?, carry[1].add(&carry[1])?]),
+        |carry| Ok(vec![carry[0].scalar_i32(0)?, carry[1].add(&increment)?]),
     )
     .unwrap()
 }
@@ -33,5 +34,5 @@ fn while_loop_executes_with_multiple_loop_carries() {
     let values = client.buffer(&[2], &[3_f32, 5.]).unwrap();
     let actual = executable.execute(&[&counter, &values]).unwrap();
     assert_eq!(actual[0].to_vec::<i32>().unwrap(), [0]);
-    assert_eq!(actual[1].to_vec::<f32>().unwrap(), [6., 10.]);
+    assert_eq!(actual[1].to_vec::<f32>().unwrap(), [5., 7.]);
 }
