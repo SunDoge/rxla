@@ -3,17 +3,17 @@ use rxla_core::{CacheLimits, Client, Compiler, Tracer};
 #[test]
 fn explicit_positions_validate_rank_and_graph() {
     let g = Tracer::default();
-    let q = g.input_i32(&[2]).unwrap();
+    let q = g.input_i32([2]).unwrap();
     assert!(
         q.causal_attention_mask(&g.input_i32_scalar().unwrap())
             .is_err()
     );
     assert!(
-        q.causal_attention_mask(&Tracer::default().input_i32(&[3]).unwrap())
+        q.causal_attention_mask(&Tracer::default().input_i32([3]).unwrap())
             .is_err()
     );
     assert_eq!(
-        q.causal_attention_mask(&g.input_i32(&[0]).unwrap())
+        q.causal_attention_mask(&g.input_i32([0]).unwrap())
             .unwrap()
             .shape(),
         [2, 0]
@@ -26,17 +26,17 @@ fn real_runtime_positions_reuse_executable_and_preserve_gradients() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let g = Tracer::default();
-    let positions = g.input_i32(&[2]).unwrap();
-    let keys = g.input_i32(&[4]).unwrap();
-    let value = g.input(&[4, 1]).unwrap();
+    let positions = g.input_i32([2]).unwrap();
+    let keys = g.input_i32([4]).unwrap();
+    let value = g.input([4, 1]).unwrap();
     let mask = positions.causal_attention_mask(&keys).unwrap();
-    let query = g.constant(&[2, 1], &[0., 0.]).unwrap();
-    let key = g.constant(&[4, 1], &[0.; 4]).unwrap();
+    let query = g.constant([2, 1], [0., 0.]).unwrap();
+    let key = g.constant([4, 1], [0.; 4]).unwrap();
     let y = query
         .scaled_dot_product_attention(&key, &value, Some(&mask), Some(1.))
         .unwrap();
     let grad = y
-        .sum(&[0, 1], false)
+        .sum([0, 1], false)
         .unwrap()
         .grad(&[value])
         .unwrap()
@@ -95,9 +95,9 @@ fn mask_positions_are_checked() {
 fn real_full_and_chunked_causal_attention() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let q = g.input(&[5, 2]).unwrap();
-    let k = g.input(&[7, 2]).unwrap();
-    let v = g.input(&[7, 2]).unwrap();
+    let q = g.input([5, 2]).unwrap();
+    let k = g.input([7, 2]).unwrap();
+    let v = g.input([7, 2]).unwrap();
     let mask = g.causal_attention_mask(5, 7, 0).unwrap();
     let full = q
         .scaled_dot_product_attention(&k, &v, Some(&mask), Some(1.))
@@ -113,7 +113,7 @@ fn real_full_and_chunked_causal_attention() {
         );
     }
     outputs.push(
-        full.sum(&[0, 1], false)
+        full.sum([0, 1], false)
             .unwrap()
             .grad(&[v])
             .unwrap()

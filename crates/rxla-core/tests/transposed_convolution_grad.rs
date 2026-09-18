@@ -36,8 +36,8 @@ fn real_transposed_convolution_gradients_match_scalar_scatter() {
         ),
     ] {
         let g = Tracer::default();
-        let x = g.input(&shape).unwrap();
-        let w = g.input(&kernel_shape).unwrap();
+        let x = g.input(shape).unwrap();
+        let w = g.input(kernel_shape).unwrap();
         let y = x.conv_transpose2d(&w, options).unwrap();
         let output_shape = y.shape().to_vec();
         let seed = g.input(y.shape()).unwrap();
@@ -111,12 +111,12 @@ fn real_transposed_convolution_gradients_match_scalar_scatter() {
 #[test]
 fn transposed_kernel_gradient_lowers_to_supported_ir() {
     let g = Tracer::default();
-    let x = g.input(&[1, 2, 2, 1]).unwrap();
-    let w = g.input(&[2, 2, 1, 1]).unwrap();
+    let x = g.input([1, 2, 2, 1]).unwrap();
+    let w = g.input([2, 2, 1, 1]).unwrap();
     let loss = x
         .conv_transpose2d(&w, Default::default())
         .unwrap()
-        .sum(&[0, 1, 2, 3], false)
+        .sum([0, 1, 2, 3], false)
         .unwrap();
     let gradient = loss.grad(std::slice::from_ref(&w)).unwrap();
     let lowered = g.prepare_many(&gradient).unwrap();

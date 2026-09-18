@@ -3,14 +3,14 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn cumsum_validates_axis_extent_and_compact_graph() {
     let g = Tracer::default();
-    assert!(g.input(&[]).unwrap().cumsum(0).is_err());
-    assert!(g.input(&[2]).unwrap().cumsum(1).is_err());
-    assert!(g.input(&[i64::MAX]).unwrap().cumsum(0).is_err());
+    assert!(g.input([]).unwrap().cumsum(0).is_err());
+    assert!(g.input([2]).unwrap().cumsum(1).is_err());
+    assert!(g.input([i64::MAX]).unwrap().cumsum(0).is_err());
     let counts: Vec<_> = [8, 4096]
         .into_iter()
         .map(|length| {
             let g = Tracer::default();
-            let y = g.input(&[length]).unwrap().cumsum(0).unwrap();
+            let y = g.input([length]).unwrap().cumsum(0).unwrap();
             let stablehlo = g.stablehlo(&y).unwrap();
             assert_eq!(stablehlo.matches("stablehlo.reduce_window").count(), 1);
             stablehlo.lines().count()
@@ -26,12 +26,12 @@ fn real_cumsum_all_axes_and_higher_gradients_match_scalar_reference() {
     for shape in [[2_i64, 3, 4], [2, 0, 4], [2, 1, 4], [1, 1, 1024]] {
         for axis in 0..3 {
             let g = Tracer::default();
-            let x = g.input(&shape).unwrap();
+            let x = g.input(shape).unwrap();
             let y = x.cumsum(axis).unwrap();
-            let loss = y.mul(&y).unwrap().sum(&[0, 1, 2], false).unwrap();
+            let loss = y.mul(&y).unwrap().sum([0, 1, 2], false).unwrap();
             let dx = loss.grad(std::slice::from_ref(&x)).unwrap().remove(0);
             let ddx = dx
-                .sum(&[0, 1, 2], false)
+                .sum([0, 1, 2], false)
                 .unwrap()
                 .grad(std::slice::from_ref(&x))
                 .unwrap()
@@ -82,7 +82,7 @@ fn real_cumsum_all_axes_and_higher_gradients_match_scalar_reference() {
 fn real_cumsum_nonfinite_values_only_affect_their_prefix_successors() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[5]).unwrap();
+    let x = g.input([5]).unwrap();
     let exe = g.compile(&client, &x.cumsum(0).unwrap()).unwrap();
     let input = client
         .buffer(&[5], &[1., f32::INFINITY, 2., f32::NEG_INFINITY, f32::NAN])

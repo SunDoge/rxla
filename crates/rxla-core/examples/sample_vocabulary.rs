@@ -86,9 +86,9 @@ fn main() -> Result<()> {
     let mut plans = Vec::new();
     for nucleus in [false, true] {
         let g = Tracer::default();
-        let x = g.input(&[VOCAB as i64])?;
+        let x = g.input([VOCAB as i64])?;
         let count = if nucleus { VOCAB } else { TOP_K };
-        let bits = g.input_i32(&[count as i64])?;
+        let bits = g.input_i32([count as i64])?;
         let sample = if nucleus {
             top_p_categorical_from_bits(&x, &bits, TOP_P, 0)?
         } else {

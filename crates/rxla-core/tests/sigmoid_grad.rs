@@ -5,7 +5,7 @@ use rxla_core::{Client, Tracer};
 fn real_sigmoid_scalar_empty_and_nonfinite() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[]).unwrap();
+    let x = g.input([]).unwrap();
     let y = x.sigmoid().unwrap();
     let dx = y.grad(&[x]).unwrap().remove(0);
     let exe = g.compile_many(&client, &[y, dx]).unwrap();
@@ -24,9 +24,9 @@ fn real_sigmoid_scalar_empty_and_nonfinite() {
             .all(|v| v[0].is_nan())
     );
     let g = Tracer::default();
-    let x = g.input(&[0, 2]).unwrap();
+    let x = g.input([0, 2]).unwrap();
     let y = x.sigmoid().unwrap();
-    let dx = y.sum(&[0, 1], false).unwrap().grad(&[x]).unwrap().remove(0);
+    let dx = y.sum([0, 1], false).unwrap().grad(&[x]).unwrap().remove(0);
     let exe = g.compile_many(&client, &[y, dx]).unwrap();
     assert_eq!(exe.run_many(&[&[]]).unwrap(), [Vec::<f32>::new(), vec![]]);
 }
@@ -39,7 +39,7 @@ fn real_sigmoid_silu_softplus_finite_extremes_and_higher_derivatives() {
     let values = [
         -1000., -100., -80., -20., -3., -0., 0., 3., 20., 80., 100., 1000.,
     ];
-    let x = g.input(&[values.len() as i64]).unwrap();
+    let x = g.input([values.len() as i64]).unwrap();
     let mut roots = Vec::new();
     for y in [
         x.sigmoid().unwrap(),
@@ -47,13 +47,13 @@ fn real_sigmoid_silu_softplus_finite_extremes_and_higher_derivatives() {
         x.softplus().unwrap(),
     ] {
         let first = y
-            .sum(&[0], false)
+            .sum([0], false)
             .unwrap()
             .grad(std::slice::from_ref(&x))
             .unwrap()
             .remove(0);
         let second = first
-            .sum(&[0], false)
+            .sum([0], false)
             .unwrap()
             .grad(std::slice::from_ref(&x))
             .unwrap()

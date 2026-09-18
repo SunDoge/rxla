@@ -6,12 +6,12 @@ fn real_sine_cosine_values_and_four_derivatives() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for cosine in [false, true] {
         let graph = Tracer::default();
-        let x = graph.input(&[9]).unwrap();
+        let x = graph.input([9]).unwrap();
         let mut y = if cosine { x.cos() } else { x.sin() }.unwrap();
         let mut roots = vec![y.clone()];
         for _ in 0..4 {
             y = y
-                .sum(&[0], false)
+                .sum([0], false)
                 .unwrap()
                 .grad(std::slice::from_ref(&x))
                 .unwrap()
@@ -72,12 +72,12 @@ fn real_sine_cosine_values_and_four_derivatives() {
 fn real_runtime_positions_and_learnable_frequencies() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let graph = Tracer::default();
-    let positions = graph.input(&[3, 1]).unwrap();
-    let frequencies = graph.input(&[1, 2]).unwrap();
+    let positions = graph.input([3, 1]).unwrap();
+    let frequencies = graph.input([1, 2]).unwrap();
     let angles = positions
-        .broadcast_to(&[3, 2])
+        .broadcast_to([3, 2])
         .unwrap()
-        .mul(&frequencies.broadcast_to(&[3, 2]).unwrap())
+        .mul(&frequencies.broadcast_to([3, 2]).unwrap())
         .unwrap();
     let features = angles
         .sin()
@@ -85,7 +85,7 @@ fn real_runtime_positions_and_learnable_frequencies() {
         .add(&angles.cos().unwrap().mul_scalar(0.5).unwrap())
         .unwrap();
     let gradients = features
-        .sum(&[0, 1], false)
+        .sum([0, 1], false)
         .unwrap()
         .grad(&[positions, frequencies])
         .unwrap();

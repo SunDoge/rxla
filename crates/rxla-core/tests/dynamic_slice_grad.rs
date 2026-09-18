@@ -5,13 +5,13 @@ use rxla_core::{Client, Tracer};
 fn real_dynamic_index_dependencies_are_not_differentiated_and_scalars_work() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let graph = Tracer::default();
-    let x = graph.input(&[2]).unwrap();
+    let x = graph.input([2]).unwrap();
     let index = x.argmax(0, false).unwrap();
     let y = x.dynamic_slice(&[index], &[1]).unwrap();
-    let loss = y.square().unwrap().sum(&[0], false).unwrap();
+    let loss = y.square().unwrap().sum([0], false).unwrap();
     let grad = loss.grad(std::slice::from_ref(&x)).unwrap().remove(0);
     let second = grad
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()
@@ -26,8 +26,8 @@ fn real_dynamic_index_dependencies_are_not_differentiated_and_scalars_work() {
         [vec![0., 8.], vec![0., 2.]]
     );
     let graph = Tracer::default();
-    let x = graph.input(&[]).unwrap();
-    let u = graph.input(&[]).unwrap();
+    let x = graph.input([]).unwrap();
+    let u = graph.input([]).unwrap();
     let y = x
         .dynamic_update_slice(&u, &[])
         .unwrap()
@@ -45,9 +45,9 @@ fn real_dynamic_slice_and_update_derivatives_follow_clamped_runtime_positions() 
     for updating in [false, true] {
         for empty in [false, true] {
             let graph = Tracer::default();
-            let x = graph.input(&[3, 4]).unwrap();
+            let x = graph.input([3, 4]).unwrap();
             let shape = [if empty { 0 } else { 2 }, 2];
-            let u = graph.input(&shape).unwrap();
+            let u = graph.input(shape).unwrap();
             let starts = [
                 graph.input_i32_scalar().unwrap(),
                 graph.input_i32_scalar().unwrap(),
@@ -63,15 +63,15 @@ fn real_dynamic_slice_and_update_derivatives_follow_clamped_runtime_positions() 
                 .unwrap()
                 .mul(&y)
                 .unwrap()
-                .sum(&[0, 1], false)
+                .sum([0, 1], false)
                 .unwrap();
             let mut roots = Vec::new();
             for _ in 0..4 {
                 let gradients = loss.grad(&[x.clone(), u.clone()]).unwrap();
                 loss = gradients[0]
-                    .sum(&[0, 1], false)
+                    .sum([0, 1], false)
                     .unwrap()
-                    .add(&gradients[1].sum(&[0, 1], false).unwrap())
+                    .add(&gradients[1].sum([0, 1], false).unwrap())
                     .unwrap();
                 roots.extend(gradients);
             }

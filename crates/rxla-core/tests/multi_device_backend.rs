@@ -12,7 +12,7 @@ fn one_cpu_client_places_arrays_and_executables_on_each_device() {
     assert_ne!(first.id(), second.id());
 
     let program = Tracer::trace(|trace| {
-        let input = trace.input(&[2])?;
+        let input = trace.input([2])?;
         Ok(vec![input.add_scalar(1.0)?])
     })
     .unwrap();

@@ -5,14 +5,14 @@ use rxla_core::{Client, Conv2dOptions, Tracer};
 fn real_ocr_stem_layout_matches_f64_with_scale_aware_roundoff_budget() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let graph = Tracer::default();
-    let x = graph.input(&[1, 3, 9, 11]).unwrap();
-    let w = graph.input(&[16, 3, 3, 3]).unwrap();
-    let b = graph.input(&[16]).unwrap();
+    let x = graph.input([1, 3, 9, 11]).unwrap();
+    let w = graph.input([16, 3, 3, 3]).unwrap();
+    let b = graph.input([16]).unwrap();
     let y = x
-        .transpose(&[0, 2, 3, 1])
+        .transpose([0, 2, 3, 1])
         .unwrap()
         .conv2d(
-            &w.transpose(&[2, 3, 1, 0]).unwrap(),
+            &w.transpose([2, 3, 1, 0]).unwrap(),
             Conv2dOptions {
                 strides: [2, 2],
                 padding: [[1, 1], [1, 1]],
@@ -20,9 +20,9 @@ fn real_ocr_stem_layout_matches_f64_with_scale_aware_roundoff_budget() {
             },
         )
         .unwrap()
-        .add(&b.broadcast_to(&[1, 5, 6, 16]).unwrap())
+        .add(&b.broadcast_to([1, 5, 6, 16]).unwrap())
         .unwrap()
-        .transpose(&[0, 3, 1, 2])
+        .transpose([0, 3, 1, 2])
         .unwrap();
     assert_eq!(y.shape(), [1, 16, 5, 6]);
     let executable = graph.compile(&client, &y).unwrap();

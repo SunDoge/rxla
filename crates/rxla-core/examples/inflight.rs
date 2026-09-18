@@ -23,8 +23,8 @@ fn run(plugin: &str, requests: usize, capacity: usize) -> Result<Report> {
     let client = unsafe { Client::load(plugin) }?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let g = Tracer::default();
-    let x = g.input(&[1, 2])?;
-    let w = g.input(&[2, 2])?;
+    let x = g.input([1, 2])?;
+    let w = g.input([2, 2])?;
     let exe = compiler.compile(&g, &x.matmul(&w)?)?;
     let weights = client.buffer(&[2, 2], &[2., 3., 4., 5.])?;
     let mut pending: VecDeque<(usize, PendingExecution)> = VecDeque::new();

@@ -227,12 +227,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = unsafe { Client::load(plugin) }?;
     let tracer = Tracer::default();
     let count = i64::try_from(visible.len())?;
-    let means = tracer.constant(&[count, 3], &means)?;
-    let covariances = tracer.constant(&[count, 3, 3], &covariances)?;
-    let colors = tracer.constant(&[count, 3], &colors)?;
-    let opacities = tracer.constant(&[count], &opacities)?;
-    let pixels = tracer.constant(&[i64::from(height), i64::from(args.width), 2], &pixels)?;
-    let background = tracer.constant(&[3], &[0., 0., 0.])?;
+    let means = tracer.constant([count, 3], &means)?;
+    let covariances = tracer.constant([count, 3, 3], &covariances)?;
+    let colors = tracer.constant([count, 3], &colors)?;
+    let opacities = tracer.constant([count], &opacities)?;
+    let pixels = tracer.constant([i64::from(height), i64::from(args.width), 2], &pixels)?;
+    let background = tracer.constant([3], [0., 0., 0.])?;
     let camera_config =
         GaussianCamera::new(i64::from(args.width), i64::from(height), focal_x, focal_y);
     let (color, alpha, diagnostics) = if args.tiled {

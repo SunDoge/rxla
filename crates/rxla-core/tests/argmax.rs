@@ -3,20 +3,20 @@ use rxla_core::{Client, Tensor, Tracer};
 #[test]
 fn argmax_shapes_and_axis_validation() {
     let g = Tracer::default();
-    let x = g.input(&[2, 3, 4]).unwrap();
+    let x = g.input([2, 3, 4]).unwrap();
     assert_eq!(x.argmax(1, false).unwrap().shape(), [2, 4]);
     assert_eq!(x.argmax(1, true).unwrap().shape(), [2, 1, 4]);
     assert!(x.argmax(3, false).is_err());
-    assert!(g.input(&[]).unwrap().argmax(0, false).is_err());
-    assert!(g.input(&[2, 0]).unwrap().argmax(1, false).is_err());
+    assert!(g.input([]).unwrap().argmax(0, false).is_err());
+    assert!(g.input([2, 0]).unwrap().argmax(1, false).is_err());
     assert!(
-        g.input(&[0, i32::MAX as i64 + 1])
+        g.input([0, i32::MAX as i64 + 1])
             .unwrap()
             .argmax(1, false)
             .is_err()
     );
     assert_eq!(
-        g.input(&[0, 3]).unwrap().argmax(1, false).unwrap().shape(),
+        g.input([0, 3]).unwrap().argmax(1, false).unwrap().shape(),
         [0]
     );
 }
@@ -44,7 +44,7 @@ fn reference(values: &[f32], outer: usize, length: usize, inner: usize) -> Vec<i
 fn real_argmax_axes_ties_nan_and_infinity() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2, 3, 4]).unwrap();
+    let x = g.input([2, 3, 4]).unwrap();
     let outputs: Vec<Tensor> = (0..3)
         .flat_map(|a| [x.argmax(a, false).unwrap(), x.argmax(a, true).unwrap()])
         .collect();
@@ -65,7 +65,7 @@ fn real_argmax_axes_ties_nan_and_infinity() {
         }
     }
     let g = Tracer::default();
-    let x = g.input(&[6]).unwrap();
+    let x = g.input([6]).unwrap();
     let exe = g
         .compile_many(&client, &[x.argmax(0, false).unwrap()])
         .unwrap();
@@ -84,7 +84,7 @@ fn real_argmax_axes_ties_nan_and_infinity() {
         );
     }
     let g = Tracer::default();
-    let x = g.input(&[0, 3]).unwrap();
+    let x = g.input([0, 3]).unwrap();
     let exe = g
         .compile_many(&client, &[x.argmax(1, false).unwrap()])
         .unwrap();

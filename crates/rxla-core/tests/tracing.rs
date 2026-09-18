@@ -22,7 +22,7 @@ fn real_trace_distinguishes_cache_lookup_backend_and_transfers() {
         let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
         let mut compiler = Compiler::new(client, CacheLimits::default());
         let graph = Tracer::default();
-        let input = graph.input(&[2]).unwrap();
+        let input = graph.input([2]).unwrap();
         let output = input.add_scalar(1.).unwrap();
         let executable = compiler.compile(&graph, &output).unwrap();
         compiler.compile(&graph, &output).unwrap();

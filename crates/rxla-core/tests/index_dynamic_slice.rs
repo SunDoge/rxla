@@ -3,23 +3,23 @@ use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 #[test]
 fn rejects_invalid_integer_dynamic_regions() {
     let g = Tracer::default();
-    let x = g.input_i32(&[3, 4]).unwrap();
+    let x = g.input_i32([3, 4]).unwrap();
     let s = g.input_i32_scalar().unwrap();
     for sizes in [vec![1], vec![-1, 2], vec![4, 1], vec![1, 5]] {
         assert!(x.dynamic_slice(&[s.clone(), s.clone()], &sizes).is_err());
     }
     assert!(x.dynamic_slice(&[], &[1, 1]).is_err());
     for bad in [
-        g.input_i32(&[1]).unwrap(),
+        g.input_i32([1]).unwrap(),
         Tracer::default().input_i32_scalar().unwrap(),
     ] {
         assert!(x.dynamic_slice(&[bad.clone(), s.clone()], &[1, 1]).is_err());
         assert!(x.dynamic_update_slice(&x, &[s.clone(), bad]).is_err());
     }
     for update in [
-        g.input_i32(&[1]).unwrap(),
-        g.input_i32(&[4, 1]).unwrap(),
-        Tracer::default().input_i32(&[1, 1]).unwrap(),
+        g.input_i32([1]).unwrap(),
+        g.input_i32([4, 1]).unwrap(),
+        Tracer::default().input_i32([1, 1]).unwrap(),
     ] {
         assert!(
             x.dynamic_update_slice(&update, &[s.clone(), s.clone()])
@@ -33,8 +33,8 @@ fn rejects_invalid_integer_dynamic_regions() {
 fn real_integer_runtime_regions_clamp_and_preserve_source() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input_i32(&[3, 4]).unwrap();
-    let patch = g.input_i32(&[2, 2]).unwrap();
+    let x = g.input_i32([3, 4]).unwrap();
+    let patch = g.input_i32([2, 2]).unwrap();
     let starts = [g.input_i32_scalar().unwrap(), g.input_i32_scalar().unwrap()];
     let read = x.dynamic_slice(&starts, &[2, 2]).unwrap();
     let updated = x.dynamic_update_slice(&patch, &starts).unwrap();
@@ -127,7 +127,7 @@ fn real_resident_token_history_rejects_full_capacity_without_overwriting() {
     let next = g
         .read(&history)
         .unwrap()
-        .dynamic_update_slice(&token.reshape(&[1]).unwrap(), std::slice::from_ref(&pos))
+        .dynamic_update_slice(&token.reshape([1]).unwrap(), std::slice::from_ref(&pos))
         .unwrap();
     g.write_many_if(
         &accepted,

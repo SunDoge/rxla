@@ -55,36 +55,36 @@ fn real_graph_uniform_drives_dropout_without_host_masks() {
     let key0 = graph
         .input_i32_scalar()
         .unwrap()
-        .broadcast_to(&[N as i64])
+        .broadcast_to([N as i64])
         .unwrap();
     let key1 = graph
         .input_i32_scalar()
         .unwrap()
-        .broadcast_to(&[N as i64])
+        .broadcast_to([N as i64])
         .unwrap();
     let base = graph
         .input_i32_scalar()
         .unwrap()
-        .broadcast_to(&[N as i64])
+        .broadcast_to([N as i64])
         .unwrap();
-    let x = graph.input(&[N as i64]).unwrap();
+    let x = graph.input([N as i64]).unwrap();
     let low = graph
-        .iota_i32(&[N as i64], 0)
+        .iota_i32([N as i64], 0)
         .unwrap()
         .wrapping_add(&base)
         .unwrap();
-    let high = graph.constant_i32(&[N as i64], &vec![0; N]).unwrap();
+    let high = graph.constant_i32([N as i64], vec![0; N]).unwrap();
     let bits = threefry2x32([&key0, &key1], [&low, &high]).unwrap();
     let uniform = uniform_f32_from_bits(&bits[0]).unwrap();
     let half = graph
-        .constant(&[], &[0.5])
+        .constant([], [0.5])
         .unwrap()
-        .broadcast_to(&[N as i64])
+        .broadcast_to([N as i64])
         .unwrap();
     let mask = uniform.lt_mask(&half).unwrap();
     let dropped = x.dropout_with_mask(&mask, 0.5).unwrap();
     let gradient = dropped
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()

@@ -193,7 +193,7 @@ impl Tensor {
         }
         self.log_softmax(axis)?
             .mul(targets)?
-            .sum(&[axis], false)?
+            .sum([axis], false)?
             .neg()
     }
 
@@ -275,9 +275,9 @@ impl Tensor {
             }
         }
         let scale = variance.add_scalar(epsilon)?.rsqrt()?.mul(weight)?;
-        self.sub(&mean.broadcast_in_dim(self.shape(), &[axis])?)?
-            .mul(&scale.broadcast_in_dim(self.shape(), &[axis])?)?
-            .add(&bias.broadcast_in_dim(self.shape(), &[axis])?)
+        self.sub(&mean.broadcast_in_dim(self.shape(), [axis])?)?
+            .mul(&scale.broadcast_in_dim(self.shape(), [axis])?)?
+            .add(&bias.broadcast_in_dim(self.shape(), [axis])?)
     }
 
     /// Apply `x @ weight.T + bias` to the last input axis. Weight layout is
@@ -301,7 +301,7 @@ impl Tensor {
                 return Err(err("cross-graph Linear bias"));
             }
         }
-        let output = self.matmul(&weight.transpose(&[1, 0])?)?;
+        let output = self.matmul(&weight.transpose([1, 0])?)?;
         match bias {
             Some(bias) => output.add(&bias.broadcast_to(output.shape())?),
             None => Ok(output),
@@ -350,10 +350,10 @@ impl Tensor {
             .layer_norm(&grouped[2..], None, None, epsilon)?
             .reshape(self.shape())?;
         if let Some(weight) = weight {
-            output = output.mul(&weight.broadcast_in_dim(self.shape(), &[1])?)?;
+            output = output.mul(&weight.broadcast_in_dim(self.shape(), [1])?)?;
         }
         if let Some(bias) = bias {
-            output = output.add(&bias.broadcast_in_dim(self.shape(), &[1])?)?;
+            output = output.add(&bias.broadcast_in_dim(self.shape(), [1])?)?;
         }
         Ok(output)
     }

@@ -6,10 +6,10 @@ use rxla_core::{
 #[test]
 fn validates_normal_word_shapes_and_graphs() {
     let g = Tracer::default();
-    let a = g.input_i32(&[2]).unwrap();
+    let a = g.input_i32([2]).unwrap();
     for b in [
         g.input_i32_scalar().unwrap(),
-        Tracer::default().input_i32(&[2]).unwrap(),
+        Tracer::default().input_i32([2]).unwrap(),
     ] {
         assert!(normal_f32_from_bits([&a, &b]).is_err());
     }
@@ -28,13 +28,13 @@ fn real_normal_reparameterization_gradients_reuse_the_resident_draw() {
     let mut sequence = rng.begin(&g).unwrap();
     let noise = sequence.normal_f32(&[2, 3]).unwrap();
     let sample = mean
-        .broadcast_to(&[2, 3])
+        .broadcast_to([2, 3])
         .unwrap()
         .add(
             &log_std
                 .exp()
                 .unwrap()
-                .broadcast_to(&[2, 3])
+                .broadcast_to([2, 3])
                 .unwrap()
                 .mul(&noise)
                 .unwrap(),
@@ -43,18 +43,18 @@ fn real_normal_reparameterization_gradients_reuse_the_resident_draw() {
     let loss = sample
         .mul(&sample)
         .unwrap()
-        .sum(&[0, 1], false)
+        .sum([0, 1], false)
         .unwrap()
         .mul_scalar(0.5)
         .unwrap();
     let gradients = loss.grad(&[mean.clone(), log_std.clone()]).unwrap();
     let mean_hessian = gradients[0]
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[mean.clone(), log_std.clone()])
         .unwrap();
     let scale_hessian = gradients[1]
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[mean, log_std])
         .unwrap();
@@ -164,8 +164,8 @@ fn real_normal_matches_f64_formula_at_grid_boundaries() {
         }
     }
     let g = Tracer::default();
-    let x = g.input_i32(&[8, 8]).unwrap();
-    let y = g.input_i32(&[8, 8]).unwrap();
+    let x = g.input_i32([8, 8]).unwrap();
+    let y = g.input_i32([8, 8]).unwrap();
     let z = normal_f32_from_bits([&x, &y]).unwrap();
     let executable = g.compile(&client, &z).unwrap();
     let inputs = [

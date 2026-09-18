@@ -3,8 +3,8 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn unflatten_validates_selected_axis_even_when_total_size_is_zero() {
     let g = Tracer::default();
-    let x = g.input(&[0, 6]).unwrap();
-    let ids = g.input_i32(&[0, 6]).unwrap();
+    let x = g.input([0, 6]).unwrap();
+    let ids = g.input_i32([0, 6]).unwrap();
     assert_eq!(x.unflatten(1, &[2, 3]).unwrap().shape(), [0, 2, 3]);
     assert_eq!(ids.unflatten(0, &[2, 0]).unwrap().shape(), [2, 0, 6]);
     for sizes in [
@@ -21,7 +21,7 @@ fn unflatten_validates_selected_axis_even_when_total_size_is_zero() {
         assert!(x.unflatten(axis, &[6]).is_err());
         assert!(ids.unflatten(axis, &[6]).is_err());
     }
-    assert!(g.input(&[]).unwrap().unflatten(0, &[1]).is_err());
+    assert!(g.input([]).unwrap().unflatten(0, &[1]).is_err());
     assert!(g.input_i32_scalar().unwrap().unflatten(0, &[1]).is_err());
 }
 
@@ -44,7 +44,7 @@ fn real_unflatten_preserves_typed_values_and_gradient() {
         let grad = y
             .mul(&y)
             .unwrap()
-            .sum(&(0..y.ndim()).collect::<Vec<_>>(), false)
+            .sum((0..y.ndim()).collect::<Vec<_>>(), false)
             .unwrap()
             .grad(&[x])
             .unwrap()

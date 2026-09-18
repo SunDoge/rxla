@@ -30,7 +30,7 @@ fn real_erf_matches_integral_and_special_values() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let values: Vec<f32> = (-120..=120).map(|i| i as f32 / 20.).collect();
     let g = Tracer::default();
-    let x = g.input(&[values.len() as i64]).unwrap();
+    let x = g.input([values.len() as i64]).unwrap();
     let y = x.erf().unwrap();
     let actual = g.compile(&client, &y).unwrap().run(&[&values]).unwrap();
     let mut maximum_error = 0f64;
@@ -44,7 +44,7 @@ fn real_erf_matches_integral_and_special_values() {
     }
     eprintln!("Erf maximum absolute error vs f64 quadrature: {maximum_error}");
     let g = Tracer::default();
-    let x = g.input(&[5]).unwrap();
+    let x = g.input([5]).unwrap();
     let values = [f32::NEG_INFINITY, f32::INFINITY, f32::NAN, 0., -0.];
     let result = g
         .compile(&client, &x.erf().unwrap())

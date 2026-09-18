@@ -16,8 +16,8 @@ fn explicit_program_compiles_on_first_execution_and_reuses_cache() {
     let mut executor = Runtime::new(client()).unwrap();
     let program = executor
         .trace(|trace| {
-            let x = trace.input(&[2])?;
-            let one = trace.constant(&[2], &[1.0, 1.0])?;
+            let x = trace.input([2])?;
+            let one = trace.constant([2], [1.0, 1.0])?;
             Ok(vec![x.add(&one)?])
         })
         .unwrap();
@@ -38,7 +38,7 @@ fn explicit_program_compiles_on_first_execution_and_reuses_cache() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn runtime_dispatches_typed_buffers() {
     let program = Tracer::trace(|trace| {
-        let x = trace.input_dtype(&[3], rxla_core::DType::I32)?;
+        let x = trace.input_dtype([3], rxla_core::DType::I32)?;
         Ok(vec![x.wrapping_add_scalar(7)?])
     })
     .unwrap();
@@ -52,7 +52,7 @@ fn runtime_dispatches_typed_buffers() {
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn runtime_results_are_materialized_lazy_tensor_leaves() {
     let tracer = Tracer::new();
-    let input = tracer.input(&[2]).unwrap();
+    let input = tracer.input([2]).unwrap();
     let output = input.exp().unwrap();
     let program = tracer.program(vec![output]).unwrap();
     let bytes = [0.0f32, 1.0]
@@ -84,8 +84,8 @@ fn runtime_results_are_materialized_lazy_tensor_leaves() {
 
     // A materialized result can feed another independently traced program.
     let twice = Tracer::trace(|trace| {
-        let x = trace.input(&[2])?;
-        let two = trace.constant(&[2], &[2.0, 2.0])?;
+        let x = trace.input([2])?;
+        let two = trace.constant([2], [2.0, 2.0])?;
         Ok(vec![x.mul(&two)?])
     })
     .unwrap();
@@ -252,7 +252,7 @@ fn explicit_partition_constraint_executes_with_replicated_boundaries() {
     let tracer = Tracer::new();
     let mesh = Mesh::new([("data", 2)]).unwrap();
     let x = tracer
-        .input(&[4])
+        .input([4])
         .unwrap()
         .with_sharding(Sharding::partitioned(
             mesh.clone(),
@@ -291,7 +291,7 @@ fn auto_spmd_executes_programs_and_lazy_partition_constraints() {
         .build()
         .unwrap();
     let program = Tracer::trace(|tracer| {
-        let x = tracer.input(&[8])?;
+        let x = tracer.input([8])?;
         Ok(vec![x.exp()?])
     })
     .unwrap();
@@ -352,7 +352,7 @@ fn multi_axis_partition_constraint_executes_on_a_device_mesh() {
         .build()
         .unwrap();
     let tracer = Tracer::new();
-    let x = tracer.input(&[4, 4]).unwrap();
+    let x = tracer.input([4, 4]).unwrap();
     let y = x
         .exp()
         .unwrap()

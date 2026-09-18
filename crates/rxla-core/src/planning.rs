@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn single_device_is_a_validated_one_stage_plan() {
         let program = Tracer::trace(|tracer| {
-            let x = tracer.input(&[4])?;
+            let x = tracer.input([4])?;
             Ok(vec![x.exp()?])
         })
         .unwrap();
@@ -273,7 +273,7 @@ mod tests {
         let tracer = Tracer::new();
         let mesh = Mesh::new([("data", 2)]).unwrap();
         let x = tracer
-            .input(&[4])
+            .input([4])
             .unwrap()
             .with_sharding(Sharding::partitioned(
                 mesh.clone(),

@@ -24,7 +24,7 @@ fn one_runtime_routes_independent_cpu_and_cuda_clients() {
     let cuda_device = runtime.devices("cuda").unwrap()[0].clone();
     assert_eq!(runtime.default_device(), &cuda_device);
     let program = Tracer::trace(|trace| {
-        let input = trace.input(&[2])?;
+        let input = trace.input([2])?;
         Ok(vec![input.mul_scalar(2.0)?])
     })
     .unwrap();

@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     println!("length,mode,compile_ms,median_ms,p90_ms,max_abs_error");
     for length in [64, 256, 1024, 4096] {
         let graph = Tracer::default();
-        let x = graph.input(&[4, length as i64])?;
+        let x = graph.input([4, length as i64])?;
         let scan = x.logcumsumexp_tree(1)?;
         let doubling = x.logcumsumexp(1)?;
         // This comparator is deliberately only used on bounded inputs: it is

@@ -179,7 +179,7 @@ fn tensor_pipeline(batch: usize) -> Result<TensorFunction> {
                 .adjust_contrast(1.1)?
                 .normalize_nhwc(&MEAN, &STDDEV)?
                 .square()?
-                .mean(&[0, 1, 2, 3], false)
+                .mean([0, 1, 2, 3], false)
         },
     )?)
 }

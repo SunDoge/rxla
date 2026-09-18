@@ -3,8 +3,8 @@ use rxla_core::{Client, ConvTranspose2dOptions as Options, Tracer};
 #[test]
 fn transposed_convolution_validation() {
     let g = Tracer::default();
-    let x = g.input(&[1, 3, 4, 2]).unwrap();
-    let k = g.input(&[2, 2, 5, 2]).unwrap();
+    let x = g.input([1, 3, 4, 2]).unwrap();
+    let k = g.input([2, 2, 5, 2]).unwrap();
     assert_eq!(
         x.conv_transpose2d(
             &k,
@@ -50,18 +50,18 @@ fn transposed_convolution_validation() {
         assert!(x.conv_transpose2d(&k, options).is_err());
     }
     assert!(
-        x.conv_transpose2d(&g.input(&[2, 2, 2, 5]).unwrap(), Options::default())
+        x.conv_transpose2d(&g.input([2, 2, 2, 5]).unwrap(), Options::default())
             .is_err()
     );
     assert!(
         x.conv_transpose2d(
-            &Tracer::default().input(&[2, 2, 5, 2]).unwrap(),
+            &Tracer::default().input([2, 2, 5, 2]).unwrap(),
             Options::default()
         )
         .is_err()
     );
     assert!(
-        g.input(&[1, 0, 4, 2])
+        g.input([1, 0, 4, 2])
             .unwrap()
             .conv_transpose2d(&k, Options::default())
             .is_err()
@@ -101,8 +101,8 @@ fn real_transposed_convolution_matches_scatter_reference() {
         },
     ] {
         let g = Tracer::default();
-        let x = g.input(&xs).unwrap();
-        let k = g.input(&ks).unwrap();
+        let x = g.input(xs).unwrap();
+        let k = g.input(ks).unwrap();
         let y = x.conv_transpose2d(&k, options).unwrap();
         let ys = y.shape();
         let mut expected = vec![0f64; ys.iter().product::<i64>() as usize];

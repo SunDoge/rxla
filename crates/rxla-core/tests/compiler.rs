@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 fn graph(value: f32) -> (Tracer, Tensor) {
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
+    let x = g.input([2]).unwrap();
     let y = x.add_scalar(value).unwrap();
     (g, y)
 }
@@ -28,9 +28,9 @@ fn lowered_program_needs_no_plugin_and_rejects_invalid_outputs() {
 fn prepared_signature_reports_storage_types_and_compact_parameter_order() {
     use rxla_core::{DType, InputSpec};
     let g = Tracer::default();
-    let empty = g.input(&[2, 0]).unwrap();
+    let empty = g.input([2, 0]).unwrap();
     let index = g.input_i32_scalar().unwrap();
-    let bf16 = g.input_bf16_as_f32(&[3]).unwrap();
+    let bf16 = g.input_bf16_as_f32([3]).unwrap();
     let full = g.prepare_many(&[empty, index, bf16.clone()]).unwrap();
     assert_eq!(full.input_count(), 3);
     assert_eq!(full.output_count(), 3);
@@ -80,11 +80,11 @@ fn prepared_signature_reports_storage_types_and_compact_parameter_order() {
     assert_eq!(pruned.input_count(), 1);
     assert_eq!(pruned.output_count(), 2);
     assert_eq!(pruned.input_spec(0), full.input_spec(2));
-    let constant = g.constant(&[], &[1.]).unwrap();
+    let constant = g.constant([], [1.]).unwrap();
     let (constant, _) = g.prepare_pruned(&[constant]).unwrap();
     assert_eq!(constant.input_count(), 0);
     assert!(constant.input_spec(0).is_none());
-    g.input(&[10]).unwrap();
+    g.input([10]).unwrap();
     drop(g);
     assert_eq!(full.input_count(), 3);
     assert_eq!(pruned.input_spec(0).unwrap().dtype, DType::BF16);
@@ -96,11 +96,11 @@ fn real_prepared_pruned_inputs_preserve_output_order_and_source_graph() {
     let client = client();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let g = Tracer::default();
-    g.input(&[100]).unwrap(); // unused prefix
-    let x = g.input(&[2]).unwrap();
-    g.input_i32(&[]).unwrap(); // unused middle
-    let ids = g.input_i32(&[2]).unwrap();
-    let surrogate = g.input(&[2]).unwrap(); // backward-only input
+    g.input([100]).unwrap(); // unused prefix
+    let x = g.input([2]).unwrap();
+    g.input_i32([]).unwrap(); // unused middle
+    let ids = g.input_i32([2]).unwrap();
+    let surrogate = g.input([2]).unwrap(); // backward-only input
     let y = x.with_gradient_of(&surrogate).unwrap();
     let outputs = [ids, y.clone(), y.clone()];
     let before = g.stablehlo_many(&outputs).unwrap();
@@ -116,7 +116,7 @@ fn real_prepared_pruned_inputs_preserve_output_order_and_source_graph() {
     assert_eq!(actual[1].to_vec::<f32>().unwrap(), [3., -2.]);
     assert_eq!(actual[2].to_vec::<f32>().unwrap(), [3., -2.]);
     // Preparing a forward-only snapshot must not destroy the surrogate AD path.
-    let loss = y.mul(&y).unwrap().sum(&[0], false).unwrap();
+    let loss = y.mul(&y).unwrap().sum([0], false).unwrap();
     let grad = loss.grad(&[surrogate]).unwrap().remove(0);
     let (backward, mapping) = g.prepare_pruned(&[grad]).unwrap();
     assert_eq!(mapping, [1]);
@@ -128,7 +128,7 @@ fn real_prepared_pruned_inputs_preserve_output_order_and_source_graph() {
             .unwrap(),
         [6., -4.]
     );
-    let constant = g.constant(&[], &[7.]).unwrap();
+    let constant = g.constant([], [7.]).unwrap();
     let (constant, mapping) = g.prepare_pruned(&[constant]).unwrap();
     assert!(mapping.is_empty());
     assert_eq!(
@@ -148,7 +148,7 @@ fn real_prepared_snapshot_shares_keys_and_freezes_typed_input_abi() {
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let prepared = {
         let (g, y) = graph(1.);
-        let ids = g.input_i32(&[2]).unwrap();
+        let ids = g.input_i32([2]).unwrap();
         let outputs = [ids, y];
         let prepared = g.prepare_many(&outputs).unwrap();
         let ordinary = compiler.compile_many(&g, &outputs).unwrap();
@@ -158,7 +158,7 @@ fn real_prepared_snapshot_shares_keys_and_freezes_typed_input_abi() {
         assert_eq!(compiler.stats().compile_time, before);
         assert_eq!(cached.input_count(), 2);
         // Snapshot must not acquire parameters added to the source graph later.
-        g.input(&[]).unwrap();
+        g.input([]).unwrap();
         assert_eq!(
             compiler.compile_many(&g, &outputs).unwrap().input_count(),
             3
@@ -286,7 +286,7 @@ fn real_cache_output_order_shape_and_client_isolation() {
     let client = client();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
+    let x = g.input([2]).unwrap();
     let y = x.add_scalar(1.).unwrap();
     let xy = compiler.compile_many(&g, &[x.clone(), y.clone()]).unwrap();
     let yx = compiler.compile_many(&g, &[y.clone(), x.clone()]).unwrap();
@@ -305,7 +305,7 @@ fn real_cache_output_order_shape_and_client_isolation() {
     assert!(!Arc::ptr_eq(&original, &other.compile(&a, &ya).unwrap()));
     let differently_shaped = Tracer::default();
     let z = differently_shaped
-        .input(&[1, 2])
+        .input([1, 2])
         .unwrap()
         .add_scalar(1.)
         .unwrap();
@@ -358,7 +358,7 @@ fn real_selective_invalidation_preserves_executables_and_lru() {
         },
     );
     let graph = Tracer::default();
-    let x = graph.input(&[1]).unwrap();
+    let x = graph.input([1]).unwrap();
     let a = x.add_scalar(1.).unwrap();
     let b = x.add_scalar(2.).unwrap();
     let c = x.add_scalar(3.).unwrap();

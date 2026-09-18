@@ -122,49 +122,41 @@ impl Qwen3_5Config {
 fn quantized_embedding(cx: Cx, ids: &Tensor, config: &Qwen3_5Config) -> Result<Tensor> {
     let groups = config.hidden_size / config.quant_group_size;
     let weight = cx
-        .param_dtype(
-            "weight",
-            &[config.vocabulary, config.hidden_size],
-            DType::U8,
-        )?
+        .param_dtype("weight", [config.vocabulary, config.hidden_size], DType::U8)?
         .take(ids, 0)?
         .cast(DType::F32)?
         .add_scalar(-128.0)?
-        .reshape(&[
+        .reshape([
             ids.shape()[0],
             ids.shape()[1],
             groups,
             config.quant_group_size,
         ])?;
     let scale = cx
-        .param("scale", &[config.vocabulary, groups])?
+        .param("scale", [config.vocabulary, groups])?
         .take(ids, 0)?
         .unsqueeze(3)?
         .broadcast_to(weight.shape())?;
     Ok(weight
         .mul(&scale)?
-        .reshape(&[ids.shape()[0], ids.shape()[1], config.hidden_size])?)
+        .reshape([ids.shape()[0], ids.shape()[1], config.hidden_size])?)
 }
 
 fn tied_lm_head(cx: Cx, hidden: &Tensor, config: &Qwen3_5Config) -> Result<Tensor> {
     let groups = config.hidden_size / config.quant_group_size;
     let weight = cx
-        .param_dtype(
-            "weight",
-            &[config.vocabulary, config.hidden_size],
-            DType::U8,
-        )?
+        .param_dtype("weight", [config.vocabulary, config.hidden_size], DType::U8)?
         .cast(DType::F32)?
         .add_scalar(-128.0)?
-        .reshape(&[config.vocabulary, groups, config.quant_group_size])?;
+        .reshape([config.vocabulary, groups, config.quant_group_size])?;
     let scale = cx
-        .param("scale", &[config.vocabulary, groups])?
+        .param("scale", [config.vocabulary, groups])?
         .unsqueeze(2)?
         .broadcast_to(weight.shape())?;
     Ok(hidden.linear(
         &weight
             .mul(&scale)?
-            .reshape(&[config.vocabulary, config.hidden_size])?,
+            .reshape([config.vocabulary, config.hidden_size])?,
         None,
     )?)
 }
@@ -183,7 +175,7 @@ pub fn qwen3_5(cx: Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Result<Ten
             kind: ModelDefinitionError::InvalidQwenTokens,
         });
     }
-    let positions = cx.iota_i32(&[*sequence], 0)?;
+    let positions = cx.iota_i32([*sequence], 0)?;
     let half_rotary = config.rotary_dim / 2;
     let frequencies = (0..half_rotary)
         .map(|index| {
@@ -195,11 +187,11 @@ pub fn qwen3_5(cx: Cx, token_ids: &Tensor, config: &Qwen3_5Config) -> Result<Ten
     let angle_shape = [1, 1, *sequence, half_rotary];
     let angles = positions
         .to_f32()?
-        .reshape(&[1, 1, *sequence, 1])?
-        .broadcast_to(&angle_shape)?
+        .reshape([1, 1, *sequence, 1])?
+        .broadcast_to(angle_shape)?
         .mul(
-            &cx.constant(&[1, 1, 1, half_rotary], &frequencies)?
-                .broadcast_to(&angle_shape)?,
+            &cx.constant([1, 1, 1, half_rotary], &frequencies)?
+                .broadcast_to(angle_shape)?,
         )?;
     let causal_mask = positions.causal_attention_mask(&positions)?;
 
@@ -257,7 +249,7 @@ mod tests {
     fn tiny_quantized_qwen_builds_both_mixer_types_and_lowers() {
         let config = Qwen3_5Config::tiny();
         let model = Model::new(|cx: Cx| {
-            let ids = cx.input_dtype(&[1, 3], DType::I32)?;
+            let ids = cx.input_dtype([1, 3], DType::I32)?;
             qwen3_5(cx, &ids, &config)
         });
         let applied = model.trace().unwrap();
@@ -290,7 +282,7 @@ mod tests {
         let client = unsafe { Client::load(plugin) }.unwrap();
         let config = Qwen3_5Config::tiny();
         let model = Model::new(|cx: Cx| {
-            let ids = cx.input_dtype(&[1, 3], DType::I32)?;
+            let ids = cx.input_dtype([1, 3], DType::I32)?;
             qwen3_5(cx, &ids, &config)
         });
         let applied = model.trace().unwrap();

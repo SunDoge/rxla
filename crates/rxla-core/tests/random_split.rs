@@ -36,7 +36,7 @@ fn reset_validation_preserves_versions_and_success_invalidates_sequences() {
     }
     for bad in [
         g.constant(&[1], &[1.]).unwrap(),
-        Tracer::default().constant(&[], &[1.]).unwrap(),
+        Tracer::default().constant([], [1.]).unwrap(),
     ] {
         assert!(rng.reset_key_if(&mut g, [&key; 2], &bad).is_err());
     }
@@ -63,8 +63,8 @@ fn real_split_and_child_reset_share_parent_acceptance() {
     seq.blocks(&[]).unwrap(); // block 3 remains reserved even if its output is unused
     let accepted = seq.commit_if(&mut g, &requested).unwrap();
     let selected = [
-        keys[0].narrow(0, 1, 1).unwrap().reshape(&[]).unwrap(),
-        keys[1].narrow(0, 1, 1).unwrap().reshape(&[]).unwrap(),
+        keys[0].narrow(0, 1, 1).unwrap().reshape([]).unwrap(),
+        keys[1].narrow(0, 1, 1).unwrap().reshape([]).unwrap(),
     ];
     child
         .reset_key_if(&mut g, [&selected[0], &selected[1]], &accepted)

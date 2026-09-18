@@ -3,17 +3,17 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn attention_validation_and_broadcast_shapes() {
     let g = Tracer::default();
-    let q = g.input(&[2, 1, 2]).unwrap();
-    let k = g.input(&[1, 3, 2]).unwrap();
-    let v = g.input(&[2, 3, 4]).unwrap();
-    let mask = g.input(&[3]).unwrap();
+    let q = g.input([2, 1, 2]).unwrap();
+    let k = g.input([1, 3, 2]).unwrap();
+    let v = g.input([2, 3, 4]).unwrap();
+    let mask = g.input([3]).unwrap();
     assert_eq!(
         q.scaled_dot_product_attention(&k, &v, Some(&mask), None)
             .unwrap()
             .shape(),
         [2, 1, 4]
     );
-    let empty_query = g.input(&[2, 0, 2]).unwrap();
+    let empty_query = g.input([2, 0, 2]).unwrap();
     assert_eq!(
         empty_query
             .scaled_dot_product_attention(&k, &v, None, None)
@@ -28,35 +28,35 @@ fn attention_validation_and_broadcast_shapes() {
         );
     }
     for bad_key in [
-        g.input(&[3, 1]).unwrap(),
-        g.input(&[0, 2]).unwrap(),
-        g.input(&[2]).unwrap(),
-        g.input(&[3, 3, 2]).unwrap(),
+        g.input([3, 1]).unwrap(),
+        g.input([0, 2]).unwrap(),
+        g.input([2]).unwrap(),
+        g.input([3, 3, 2]).unwrap(),
     ] {
         assert!(
             q.scaled_dot_product_attention(&bad_key, &v, None, None)
                 .is_err()
         );
     }
-    let bad_value = g.input(&[2, 4, 4]).unwrap();
+    let bad_value = g.input([2, 4, 4]).unwrap();
     assert!(
         q.scaled_dot_product_attention(&k, &bad_value, None, None)
             .is_err()
     );
-    let bad_mask = g.input(&[4]).unwrap();
+    let bad_mask = g.input([4]).unwrap();
     assert!(
         q.scaled_dot_product_attention(&k, &v, Some(&bad_mask), None)
             .is_err()
     );
-    let foreign = Tracer::default().input(&[3]).unwrap();
+    let foreign = Tracer::default().input([3]).unwrap();
     assert!(
         q.scaled_dot_product_attention(&k, &v, Some(&foreign), None)
             .is_err()
     );
-    let zero_depth = g.input(&[1, 0]).unwrap();
+    let zero_depth = g.input([1, 0]).unwrap();
     assert!(
         zero_depth
-            .scaled_dot_product_attention(&zero_depth, &g.input(&[1, 2]).unwrap(), None, None)
+            .scaled_dot_product_attention(&zero_depth, &g.input([1, 2]).unwrap(), None, None)
             .is_err()
     );
 }
@@ -66,10 +66,10 @@ fn attention_validation_and_broadcast_shapes() {
 fn real_attention_broadcast_mask_and_explicit_scales() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let q = g.input(&[2, 1, 2]).unwrap();
-    let k = g.input(&[1, 3, 2]).unwrap();
-    let v = g.input(&[2, 3, 1]).unwrap();
-    let mask = g.input(&[3]).unwrap();
+    let q = g.input([2, 1, 2]).unwrap();
+    let k = g.input([1, 3, 2]).unwrap();
+    let v = g.input([2, 3, 1]).unwrap();
+    let mask = g.input([3]).unwrap();
     let uniform = q
         .scaled_dot_product_attention(&k, &v, Some(&mask), Some(0.))
         .unwrap();
@@ -102,11 +102,11 @@ fn real_multihead_attention() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
     // Two batches, three heads, four queries, five keys, head dimension two.
-    let q = g.input(&[2, 3, 4, 2]).unwrap();
-    let k = g.input(&[2, 3, 5, 2]).unwrap();
-    let v = g.input(&[2, 3, 5, 2]).unwrap();
+    let q = g.input([2, 3, 4, 2]).unwrap();
+    let k = g.input([2, 3, 5, 2]).unwrap();
+    let v = g.input([2, 3, 5, 2]).unwrap();
     let probabilities = q
-        .matmul(&k.transpose(&[0, 1, 3, 2]).unwrap())
+        .matmul(&k.transpose([0, 1, 3, 2]).unwrap())
         .unwrap()
         .mul_scalar(1. / 2f32.sqrt())
         .unwrap()
@@ -159,10 +159,10 @@ fn real_multihead_attention() {
 fn real_attention_gradients_match_portable_decomposition() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let q = g.input(&[1, 2, 2]).unwrap();
-    let k = g.input(&[1, 3, 2]).unwrap();
-    let v = g.input(&[1, 3, 2]).unwrap();
-    let weights = g.input(&[1, 2, 2]).unwrap();
+    let q = g.input([1, 2, 2]).unwrap();
+    let k = g.input([1, 3, 2]).unwrap();
+    let v = g.input([1, 3, 2]).unwrap();
+    let weights = g.input([1, 2, 2]).unwrap();
     let scale = 0.7;
     let semantic = q
         .scaled_dot_product_attention(&k, &v, None, Some(scale))
@@ -178,11 +178,7 @@ fn real_attention_gradients_match_portable_decomposition() {
         .unwrap();
     let mut roots = Vec::new();
     for output in [semantic, portable] {
-        let loss = output
-            .mul(&weights)
-            .unwrap()
-            .sum(&[0, 1, 2], false)
-            .unwrap();
+        let loss = output.mul(&weights).unwrap().sum([0, 1, 2], false).unwrap();
         roots.extend(loss.grad(&[q.clone(), k.clone(), v.clone()]).unwrap());
     }
     let executable = g.compile_many(&client, &roots).unwrap();

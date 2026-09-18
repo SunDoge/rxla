@@ -3,14 +3,14 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn clamp_validation() {
     let g = Tracer::default();
-    let x = g.input(&[4]).unwrap();
+    let x = g.input([4]).unwrap();
     assert!(x.clamp(2., 1.).is_err());
     assert!(x.clamp(f32::NAN, 1.).is_err());
     assert!(x.clamp(0., f32::NAN).is_err());
     assert!(x.hard_sigmoid(f32::INFINITY, 0.5).is_err());
     assert!(x.hard_sigmoid(0.2, f32::NAN).is_err());
-    assert!(x.minimum(&g.input(&[1]).unwrap()).is_err());
-    assert!(x.minimum(&Tracer::default().input(&[4]).unwrap()).is_err());
+    assert!(x.minimum(&g.input([1]).unwrap()).is_err());
+    assert!(x.minimum(&Tracer::default().input([4]).unwrap()).is_err());
 }
 
 #[test]
@@ -18,7 +18,7 @@ fn clamp_validation() {
 fn real_clamp_and_exported_hard_sigmoid_variants() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[9]).unwrap();
+    let x = g.input([9]).unwrap();
     let values = [-10., -3., -2.5, -1., 0., 1., 2.5, 3., 10.];
     // The local OCR graph contains both slopes; they are not interchangeable.
     let outputs = [

@@ -3,9 +3,9 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn gqa_layout_validation() {
     let g = Tracer::default();
-    let q = g.input(&[2, 4, 3, 2]).unwrap();
-    let k = g.input(&[2, 2, 5, 2]).unwrap();
-    let v = g.input(&[2, 2, 5, 7]).unwrap();
+    let q = g.input([2, 4, 3, 2]).unwrap();
+    let k = g.input([2, 2, 5, 2]).unwrap();
+    let v = g.input([2, 2, 5, 7]).unwrap();
     assert_eq!(
         q.grouped_query_attention(&k, &v, None, None)
             .unwrap()
@@ -18,14 +18,14 @@ fn gqa_layout_validation() {
                 .is_err()
         );
     }
-    let mask = g.input(&[3, 5]).unwrap();
+    let mask = g.input([3, 5]).unwrap();
     assert!(q.grouped_query_attention(&k, &v, Some(&mask), None).is_ok());
-    let bad_mask = g.input(&[4, 5]).unwrap();
+    let bad_mask = g.input([4, 5]).unwrap();
     assert!(
         q.grouped_query_attention(&k, &v, Some(&bad_mask), None)
             .is_err()
     );
-    let foreign = Tracer::default().input(&[2, 2, 5, 2]).unwrap();
+    let foreign = Tracer::default().input([2, 2, 5, 2]).unwrap();
     assert!(q.grouped_query_attention(&foreign, &v, None, None).is_err());
 }
 
@@ -46,10 +46,10 @@ fn real_gqa_multiquery_head_masks_match_f64() {
         .collect();
     for kv_heads in [1usize, 2, 4] {
         let g = Tracer::default();
-        let q = g.input(&[2, 4, 3, 2]).unwrap();
-        let k = g.input(&[2, kv_heads as i64, 4, 2]).unwrap();
-        let v = g.input(&[2, kv_heads as i64, 4, 3]).unwrap();
-        let m = g.input(&[1, 4, 3, 4]).unwrap();
+        let q = g.input([2, 4, 3, 2]).unwrap();
+        let k = g.input([2, kv_heads as i64, 4, 2]).unwrap();
+        let v = g.input([2, kv_heads as i64, 4, 3]).unwrap();
+        let m = g.input([1, 4, 3, 4]).unwrap();
         let output = q.grouped_query_attention(&k, &v, Some(&m), None).unwrap();
         let exe = g.compile(&client, &output).unwrap();
         let keys: Vec<f32> = (0..2 * kv_heads * 4 * 2)

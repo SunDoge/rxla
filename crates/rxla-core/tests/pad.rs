@@ -3,7 +3,7 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn padding_shape_validation_and_noop() {
     let g = Tracer::default();
-    let x = g.input(&[2, 3]).unwrap();
+    let x = g.input([2, 3]).unwrap();
     assert_eq!(x.pad(&[[1, 2], [3, 4]], 0.).unwrap().shape(), [5, 10]);
     assert!(x.pad(&[[1, 2]], 0.).is_err());
     assert!(x.pad(&[[-1, 0], [0, 0]], 0.).is_err());
@@ -11,7 +11,7 @@ fn padding_shape_validation_and_noop() {
     assert!(x.pad(&[[i64::MAX / 2, 0], [i64::MAX / 2, 0]], 0.).is_err());
     let noop = x.pad(&[[0, 0]; 2], f32::NAN).unwrap();
     assert_eq!(g.stablehlo(&x).unwrap(), g.stablehlo(&noop).unwrap());
-    assert_eq!(g.input(&[]).unwrap().pad(&[], 0.).unwrap().shape(), []);
+    assert_eq!(g.input([]).unwrap().pad(&[], 0.).unwrap().shape(), []);
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn real_padding_matches_row_major_reference() {
         }
     }
     let g = Tracer::default();
-    let x = g.input(&[1]).unwrap();
+    let x = g.input([1]).unwrap();
     let nan_pad = x.pad(&[[1, 1]], f32::NAN).unwrap();
     let inf_pad = x.pad(&[[1, 1]], f32::NEG_INFINITY).unwrap();
     let outputs = g

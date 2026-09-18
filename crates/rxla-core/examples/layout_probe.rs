@@ -5,9 +5,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?) }?;
     let mut runtime = Runtime::new(client.clone())?;
     let program = Tracer::trace(|trace| {
-        let x = trace.input(&[2, 3])?;
-        let transposed = x.transpose(&[1, 0])?;
-        let flattened = transposed.reshape(&[6])?;
+        let x = trace.input([2, 3])?;
+        let transposed = x.transpose([1, 0])?;
+        let flattened = transposed.reshape([6])?;
         Ok(vec![transposed, flattened])
     })?;
     let input = client.buffer(&[2, 3], &[0., 1., 2., 3., 4., 5.])?;

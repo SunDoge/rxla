@@ -59,32 +59,23 @@ fn qkv(cx: Cx, input: &Tensor, config: &Flux2Config) -> Result<(Tensor, Tensor, 
     let [batch, tokens, _] = input.shape() else {
         unreachable!("FLUX blocks use rank-three tensors")
     };
-    let mixed = linear(cx.scope("qkv")?, input, config.hidden_size * 3)?.reshape(&[
+    let mixed = linear(cx.scope("qkv")?, input, config.hidden_size * 3)?.reshape([
         *batch,
         *tokens,
         3,
         config.num_heads,
         config.head_dim(),
     ])?;
-    let query = mixed
-        .narrow(2, 0, 1)?
-        .squeeze(2)?
-        .transpose(&[0, 2, 1, 3])?;
-    let key = mixed
-        .narrow(2, 1, 1)?
-        .squeeze(2)?
-        .transpose(&[0, 2, 1, 3])?;
-    let value = mixed
-        .narrow(2, 2, 1)?
-        .squeeze(2)?
-        .transpose(&[0, 2, 1, 3])?;
+    let query = mixed.narrow(2, 0, 1)?.squeeze(2)?.transpose([0, 2, 1, 3])?;
+    let key = mixed.narrow(2, 1, 1)?.squeeze(2)?.transpose([0, 2, 1, 3])?;
+    let value = mixed.narrow(2, 2, 1)?.squeeze(2)?.transpose([0, 2, 1, 3])?;
     let norm = cx.scope("norm")?;
     let query_scale = norm
         .scope("query_norm")?
-        .param("scale", &[config.head_dim()])?;
+        .param("scale", [config.head_dim()])?;
     let key_scale = norm
         .scope("key_norm")?
-        .param("scale", &[config.head_dim()])?;
+        .param("scale", [config.head_dim()])?;
     Ok((
         query.rms_norm(&query_scale, config.epsilon)?,
         key.rms_norm(&key_scale, config.epsilon)?,
@@ -101,7 +92,7 @@ fn attention_output(
     let query = query.rotary_embedding_angles(angles, RotaryLayout::Interleaved)?;
     let key = key.rotary_embedding_angles(angles, RotaryLayout::Interleaved)?;
     let attended = query.scaled_dot_product_attention(&key, value, None, None)?;
-    Ok(attended.transpose(&[0, 2, 1, 3])?.reshape(&[
+    Ok(attended.transpose([0, 2, 1, 3])?.reshape([
         attended.shape()[0],
         attended.shape()[2],
         attended.shape()[1] * attended.shape()[3],
@@ -193,17 +184,17 @@ pub(super) fn single_block(
         config.hidden_size * 3 + mlp_width * 2,
     )?
     .split(2, &[config.hidden_size * 3, mlp_width * 2])?;
-    let qkv = projected[0].reshape(&[*batch, *tokens, 3, config.num_heads, config.head_dim()])?;
-    let query = qkv.narrow(2, 0, 1)?.squeeze(2)?.transpose(&[0, 2, 1, 3])?;
-    let key = qkv.narrow(2, 1, 1)?.squeeze(2)?.transpose(&[0, 2, 1, 3])?;
-    let value = qkv.narrow(2, 2, 1)?.squeeze(2)?.transpose(&[0, 2, 1, 3])?;
+    let qkv = projected[0].reshape([*batch, *tokens, 3, config.num_heads, config.head_dim()])?;
+    let query = qkv.narrow(2, 0, 1)?.squeeze(2)?.transpose([0, 2, 1, 3])?;
+    let key = qkv.narrow(2, 1, 1)?.squeeze(2)?.transpose([0, 2, 1, 3])?;
+    let value = qkv.narrow(2, 2, 1)?.squeeze(2)?.transpose([0, 2, 1, 3])?;
     let norm = cx.scope("norm")?;
     let query_scale = norm
         .scope("query_norm")?
-        .param("scale", &[config.head_dim()])?;
+        .param("scale", [config.head_dim()])?;
     let key_scale = norm
         .scope("key_norm")?
-        .param("scale", &[config.head_dim()])?;
+        .param("scale", [config.head_dim()])?;
     let query = query.rms_norm(&query_scale, config.epsilon)?;
     let key = key.rms_norm(&key_scale, config.epsilon)?;
     let attended = attention_output(&query, &key, &value, angles)?;

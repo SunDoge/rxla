@@ -3,15 +3,15 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn binary_cross_entropy_requires_exact_shape_and_graph() {
     let g = Tracer::default();
-    let logits = g.input(&[2, 3]).unwrap();
+    let logits = g.input([2, 3]).unwrap();
     assert!(
         logits
-            .binary_cross_entropy_with_logits(&g.input(&[3]).unwrap())
+            .binary_cross_entropy_with_logits(&g.input([3]).unwrap())
             .is_err()
     );
     assert!(
         logits
-            .binary_cross_entropy_with_logits(&Tracer::default().input(&[2, 3]).unwrap())
+            .binary_cross_entropy_with_logits(&Tracer::default().input([2, 3]).unwrap())
             .is_err()
     );
 }
@@ -21,13 +21,13 @@ fn binary_cross_entropy_requires_exact_shape_and_graph() {
 fn real_binary_cross_entropy_loss_both_gradients_and_curvature() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2, 6]).unwrap();
-    let y = g.input(&[2, 6]).unwrap();
-    let seed = g.input(&[2, 6]).unwrap();
+    let x = g.input([2, 6]).unwrap();
+    let y = g.input([2, 6]).unwrap();
+    let seed = g.input([2, 6]).unwrap();
     let loss = x.binary_cross_entropy_with_logits(&y).unwrap();
     let gradients = loss.vjp(&[x.clone(), y.clone()], &seed).unwrap();
     let second = gradients[0]
-        .sum(&[0, 1], false)
+        .sum([0, 1], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()

@@ -98,7 +98,7 @@ mod tests {
     use rxla_nn::Model;
 
     fn tiny(cx: Cx) -> Result<Tensor> {
-        let latent = cx.input(&[1, 8, 12, 4])?;
+        let latent = cx.input([1, 8, 12, 4])?;
         taesd_decoder(cx, &latent)
     }
 
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn rejects_non_latent_channels() {
         let error = Model::new(|cx: Cx| {
-            let image = cx.input(&[1, 8, 8, 3])?;
+            let image = cx.input([1, 8, 8, 3])?;
             taesd_decoder(cx, &image)
         })
         .trace();

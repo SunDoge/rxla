@@ -3,15 +3,10 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn roll_validates_axis_even_for_zero_shift() {
     let graph = Tracer::default();
-    assert!(graph.input(&[]).unwrap().roll(0, 0).is_err());
-    assert!(graph.input(&[0]).unwrap().roll(0, 1).is_err());
+    assert!(graph.input([]).unwrap().roll(0, 0).is_err());
+    assert!(graph.input([0]).unwrap().roll(0, 1).is_err());
     assert_eq!(
-        graph
-            .input(&[0])
-            .unwrap()
-            .roll(i64::MIN, 0)
-            .unwrap()
-            .shape(),
+        graph.input([0]).unwrap().roll(i64::MIN, 0).unwrap().shape(),
         [0]
     );
 }

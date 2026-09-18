@@ -17,7 +17,7 @@ fn real_owned_client_metadata() {
     );
     assert_eq!(info, client.info().unwrap());
     let graph = Tracer::default();
-    let x = graph.input(&[1]).unwrap();
+    let x = graph.input([1]).unwrap();
     assert_eq!(
         graph.compile(&client, &x).unwrap().run(&[&[42.]]).unwrap(),
         [42.]

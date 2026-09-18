@@ -5,10 +5,10 @@ use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 fn real_rectangular_surrogate_routes_dense_vjp_and_cross_derivatives() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let forward = g.input(&[2, 2]).unwrap();
-    let x = g.input(&[2, 3]).unwrap();
-    let w = g.input(&[3, 2]).unwrap();
-    let seed = g.input(&[2, 2]).unwrap();
+    let forward = g.input([2, 2]).unwrap();
+    let x = g.input([2, 3]).unwrap();
+    let w = g.input([3, 2]).unwrap();
+    let seed = g.input([2, 2]).unwrap();
     let y = forward.with_gradient_of(&x.matmul(&w).unwrap()).unwrap();
     assert_eq!(g.prepare_pruned(std::slice::from_ref(&y)).unwrap().1, [0]);
     let gradients = y.vjp(&[forward.clone(), x, w.clone()], &seed).unwrap();
@@ -16,7 +16,7 @@ fn real_rectangular_surrogate_routes_dense_vjp_and_cross_derivatives() {
     assert_eq!(gradients[2].shape(), [3, 2]);
     // d/dW sum(dL/dX) = sum_batch(seed), broadcast to each input feature.
     let cross = gradients[1]
-        .sum(&[0, 1], false)
+        .sum([0, 1], false)
         .unwrap()
         .grad(&[w])
         .unwrap()
@@ -56,10 +56,10 @@ fn real_partial_rules_share_forward_cache_but_separate_backward_cache() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let graph = Tracer::default();
-    let x = graph.input(&[4]).unwrap();
-    let one = graph.constant(&[4], &[1.; 4]).unwrap();
-    let two = graph.constant(&[4], &[2.; 4]).unwrap();
-    let nonfinite = graph.constant(&[4], &[-1.; 4]).unwrap().log().unwrap();
+    let x = graph.input([4]).unwrap();
+    let one = graph.constant([4], [1.; 4]).unwrap();
+    let two = graph.constant([4], [2.; 4]).unwrap();
+    let nonfinite = graph.constant([4], [-1.; 4]).unwrap().log().unwrap();
     let first = x.with_elementwise_derivative(&x, &one).unwrap();
     let second = x.with_elementwise_derivative(&x, &two).unwrap();
     let poisoned = x
@@ -87,7 +87,7 @@ fn real_partial_rules_share_forward_cache_but_separate_backward_cache() {
         values.map(f32::to_bits)
     );
     let gradients = [first, second].map(|y| {
-        y.sum(&[0], false)
+        y.sum([0], false)
             .unwrap()
             .grad(std::slice::from_ref(&x))
             .unwrap()
@@ -115,13 +115,13 @@ fn real_partial_rules_share_forward_cache_but_separate_backward_cache() {
 #[test]
 fn multi_input_partials_validate_all_pairs_and_prune_forward_edges() {
     let graph = Tracer::default();
-    let f = graph.input(&[3]).unwrap();
-    let x = graph.input(&[3]).unwrap();
-    let z = graph.input(&[3]).unwrap();
+    let f = graph.input([3]).unwrap();
+    let x = graph.input([3]).unwrap();
+    let z = graph.input([3]).unwrap();
     assert!(f.with_elementwise_derivatives(&[]).is_err());
     for bad in [
-        graph.input(&[]).unwrap(),
-        Tracer::default().input(&[3]).unwrap(),
+        graph.input([]).unwrap(),
+        Tracer::default().input([3]).unwrap(),
     ] {
         assert!(
             f.with_elementwise_derivatives(&[(&x, &z), (&bad, &x)])
@@ -143,9 +143,9 @@ fn multi_input_partials_validate_all_pairs_and_prune_forward_edges() {
 fn real_multi_input_partials_cross_derivatives_and_alias_accumulation() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let graph = Tracer::default();
-    let f = graph.input(&[3]).unwrap();
-    let x = graph.input(&[3]).unwrap();
-    let z = graph.input(&[3]).unwrap();
+    let f = graph.input([3]).unwrap();
+    let x = graph.input([3]).unwrap();
+    let z = graph.input([3]).unwrap();
     let y = f
         .with_elementwise_derivatives(&[(&x, &z), (&z, &x)])
         .unwrap();
@@ -154,19 +154,19 @@ fn real_multi_input_partials_cross_derivatives_and_alias_accumulation() {
         .unwrap()
         .mul_scalar(0.5)
         .unwrap()
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[f.clone(), x.clone(), z.clone()])
         .unwrap();
     let hessian = gradients[1]
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[x.clone(), z.clone()])
         .unwrap();
     let alias = f
         .with_elementwise_derivatives(&[(&x, &z), (&x, &z)])
         .unwrap()
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()
@@ -176,7 +176,7 @@ fn real_multi_input_partials_cross_derivatives_and_alias_accumulation() {
     let shared = f
         .with_elementwise_derivatives(&[(&x, &z), (&doubled, &z)])
         .unwrap()
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[x])
         .unwrap()
@@ -221,12 +221,12 @@ fn real_multi_input_partials_cross_derivatives_and_alias_accumulation() {
 #[test]
 fn explicit_elementwise_derivative_validates_and_prunes_forward_only_edges() {
     let graph = Tracer::default();
-    let forward = graph.input(&[3]).unwrap();
-    let x = graph.input(&[3]).unwrap();
+    let forward = graph.input([3]).unwrap();
+    let x = graph.input([3]).unwrap();
     let derivative = x.mul(&x).unwrap().mul_scalar(3.).unwrap();
     for bad in [
-        graph.input(&[]).unwrap(),
-        Tracer::default().input(&[3]).unwrap(),
+        graph.input([]).unwrap(),
+        Tracer::default().input([3]).unwrap(),
     ] {
         assert!(
             forward
@@ -246,7 +246,7 @@ fn explicit_elementwise_derivative_validates_and_prunes_forward_only_edges() {
         [0]
     );
     let gradient = output
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[x])
         .unwrap()
@@ -260,9 +260,9 @@ fn explicit_elementwise_derivative_validates_and_prunes_forward_only_edges() {
 fn real_explicit_elementwise_derivative_vjp_and_higher_order() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let graph = Tracer::default();
-    let forward = graph.input(&[3]).unwrap();
-    let x = graph.input(&[3]).unwrap();
-    let seed = graph.input(&[3]).unwrap();
+    let forward = graph.input([3]).unwrap();
+    let x = graph.input([3]).unwrap();
+    let seed = graph.input([3]).unwrap();
     let derivative = x.mul(&x).unwrap().mul_scalar(3.).unwrap();
     let output = forward
         .with_elementwise_derivative(&x, &derivative)
@@ -272,12 +272,12 @@ fn real_explicit_elementwise_derivative_vjp_and_higher_order() {
         .unwrap()
         .mul_scalar(0.5)
         .unwrap()
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[forward, x.clone()])
         .unwrap();
     let higher = gradients[1]
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()
@@ -318,18 +318,15 @@ fn real_explicit_elementwise_derivative_vjp_and_higher_order() {
 #[test]
 fn validates_contract_and_prunes_only_forward_dependencies() {
     let g = Tracer::default();
-    let x = g.input(&[3]).unwrap();
-    let s = g.input(&[3]).unwrap();
-    for bad in [
-        g.input(&[]).unwrap(),
-        Tracer::default().input(&[3]).unwrap(),
-    ] {
+    let x = g.input([3]).unwrap();
+    let s = g.input([3]).unwrap();
+    for bad in [g.input([]).unwrap(), Tracer::default().input([3]).unwrap()] {
         assert!(x.with_gradient_of(&bad).is_err());
     }
     let y = x.with_gradient_of(&s.exp().unwrap()).unwrap();
     let (_, mapping) = g.prepare_pruned(std::slice::from_ref(&y)).unwrap();
     assert_eq!(mapping, [0]);
-    let ds = y.sum(&[0], false).unwrap().grad(&[s]).unwrap().remove(0);
+    let ds = y.sum([0], false).unwrap().grad(&[s]).unwrap().remove(0);
     assert_eq!(g.prepare_pruned(&[ds]).unwrap().1, [1]);
     // Inspecting/compiling snapshots must not erase the original AD edge.
     assert_eq!(g.prepare_pruned(&[y]).unwrap().1, [0]);
@@ -337,7 +334,7 @@ fn validates_contract_and_prunes_only_forward_dependencies() {
     assert!(
         x.with_gradient_of(&unsupported)
             .unwrap()
-            .sum(&[0], false)
+            .sum([0], false)
             .unwrap()
             .grad(&[x])
             .is_err()
@@ -349,27 +346,27 @@ fn validates_contract_and_prunes_only_forward_dependencies() {
 fn real_surrogate_vjp_and_higher_derivatives_follow_backward_graph() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[3]).unwrap();
-    let s = g.input(&[3]).unwrap();
-    let seed = g.input(&[3]).unwrap();
+    let x = g.input([3]).unwrap();
+    let s = g.input([3]).unwrap();
+    let seed = g.input([3]).unwrap();
     let y = x.with_gradient_of(&s.mul(&s).unwrap()).unwrap();
     let gradients = y
         .mul(&y)
         .unwrap()
         .mul_scalar(0.5)
         .unwrap()
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[x.clone(), s.clone()])
         .unwrap();
     let higher = gradients[1]
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&s))
         .unwrap()
         .remove(0);
     let vjp = y.vjp(&[x.clone(), s], &seed).unwrap();
-    let unchanged = x.sum(&[0], false).unwrap().grad(&[x]).unwrap().remove(0);
+    let unchanged = x.sum([0], false).unwrap().grad(&[x]).unwrap().remove(0);
     let executable = g
         .compile_many(
             &client,
@@ -438,7 +435,7 @@ fn real_forward_preserves_nonfinite_bits_and_straight_through_mask() {
     let zero = g.constant(&[4], &[0.; 4]).unwrap();
     let mask = x.gt_mask(&zero).unwrap().with_gradient_of(&x).unwrap();
     let derivative = mask
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()

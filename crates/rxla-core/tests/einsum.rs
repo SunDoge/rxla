@@ -5,11 +5,11 @@ use rxla_core::{Client, Tracer};
 fn real_empty_one_sided_sum_ignores_nonfinite_other_operand() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[0]).unwrap();
-    let y = g.input(&[3]).unwrap();
+    let x = g.input([0]).unwrap();
+    let y = g.input([3]).unwrap();
     let output = x.einsum("i,j->j", &y).unwrap();
     let reverse = y.einsum("j,i->j", &x).unwrap();
-    let grads = output.sum(&[0], false).unwrap().grad(&[x, y]).unwrap();
+    let grads = output.sum([0], false).unwrap().grad(&[x, y]).unwrap();
     let exe = g
         .compile_many(
             &client,
@@ -30,8 +30,8 @@ fn real_empty_one_sided_sum_ignores_nonfinite_other_operand() {
 #[test]
 fn rejects_invalid_equations_and_dimensions() {
     let g = Tracer::default();
-    let x = g.input(&[2, 3]).unwrap();
-    let y = g.input(&[3, 2]).unwrap();
+    let x = g.input([2, 3]).unwrap();
+    let y = g.input([3, 2]).unwrap();
     for equation in [
         "ij,jk",
         "ij,jk->ii",
@@ -46,7 +46,7 @@ fn rejects_invalid_equations_and_dimensions() {
         assert!(x.einsum(equation, &y).is_err(), "{equation}");
     }
     assert!(
-        x.einsum("ij,jk->ik", &Tracer::default().input(&[3, 2]).unwrap())
+        x.einsum("ij,jk->ik", &Tracer::default().input([3, 2]).unwrap())
             .is_err()
     );
     assert_eq!(x.einsum(" iJ , Jk -> ki ", &y).unwrap().shape(), [2, 2]);
@@ -139,12 +139,12 @@ fn real_einsum_matches_dense_label_enumeration() {
 fn real_einsum_diagonal_contraction_higher_derivatives() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2, 2]).unwrap();
-    let w = g.input(&[2]).unwrap();
+    let x = g.input([2, 2]).unwrap();
+    let w = g.input([2]).unwrap();
     let y = x.einsum("ii,i->", &w).unwrap();
     let grads = y.mul(&y).unwrap().grad(&[x.clone(), w]).unwrap();
     let second = grads[0]
-        .sum(&[0, 1], false)
+        .sum([0, 1], false)
         .unwrap()
         .grad(&[x])
         .unwrap()

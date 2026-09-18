@@ -3,9 +3,9 @@ use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 #[test]
 fn validates_bitwise_shapes_owners_and_shift_counts() {
     let graph = Tracer::default();
-    let x = graph.input_i32(&[2]).unwrap();
-    let short = graph.input_i32(&[1]).unwrap();
-    let foreign = Tracer::default().input_i32(&[2]).unwrap();
+    let x = graph.input_i32([2]).unwrap();
+    let short = graph.input_i32([1]).unwrap();
+    let foreign = Tracer::default().input_i32([2]).unwrap();
     for rhs in [&short, &foreign] {
         assert!(x.bitwise_and(rhs).is_err());
         assert!(x.bitwise_or(rhs).is_err());
@@ -122,7 +122,7 @@ fn real_resident_bitwise_transition_and_nondifferentiable_float_selection() {
     }
     assert_eq!(compiler.stats().misses, 1);
     let graph = Tracer::default();
-    let x = graph.input(&[3]).unwrap();
+    let x = graph.input([3]).unwrap();
     let selected = x
         .argmax(0, false)
         .unwrap()

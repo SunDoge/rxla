@@ -3,24 +3,21 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn vjp_requires_matching_shape_owner_and_leaf_targets() {
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
+    let x = g.input([2]).unwrap();
     let y = x.exp().unwrap();
     assert!(
-        y.vjp(std::slice::from_ref(&x), &g.input(&[]).unwrap())
+        y.vjp(std::slice::from_ref(&x), &g.input([]).unwrap())
             .is_err()
     );
     assert!(
         y.vjp(
             std::slice::from_ref(&x),
-            &Tracer::default().input(&[2]).unwrap()
+            &Tracer::default().input([2]).unwrap()
         )
         .is_err()
     );
     assert!(y.vjp(std::slice::from_ref(&y), &x).is_err());
-    assert!(
-        y.vjp(&[Tracer::default().input(&[2]).unwrap()], &x)
-            .is_err()
-    );
+    assert!(y.vjp(&[Tracer::default().input([2]).unwrap()], &x).is_err());
 }
 
 #[test]
@@ -28,10 +25,10 @@ fn vjp_requires_matching_shape_owner_and_leaf_targets() {
 fn real_vjp_runtime_cotangents_and_non_scalar_outputs() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2, 3]).unwrap();
-    let w = g.input(&[3, 2]).unwrap();
-    let seed = g.input(&[2, 2]).unwrap();
-    let unused = g.input(&[]).unwrap();
+    let x = g.input([2, 3]).unwrap();
+    let w = g.input([3, 2]).unwrap();
+    let seed = g.input([2, 2]).unwrap();
+    let unused = g.input([]).unwrap();
     let y = x.matmul(&w).unwrap();
     let grads = y.vjp(&[x, w, unused], &seed).unwrap();
     let exe = g.compile_many(&client, &grads).unwrap();
@@ -58,11 +55,11 @@ fn real_vjp_runtime_cotangents_and_non_scalar_outputs() {
 fn real_vjp_does_not_differentiate_seed_as_an_extra_loss_factor() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
+    let x = g.input([2]).unwrap();
     let y = x.mul(&x).unwrap();
     let gradient = y.vjp(std::slice::from_ref(&x), &x).unwrap().remove(0);
     let second = gradient
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()
@@ -79,7 +76,7 @@ fn real_vjp_does_not_differentiate_seed_as_an_extra_loss_factor() {
         .unwrap()
         .remove(0);
     let detached_second = detached
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()

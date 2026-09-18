@@ -53,7 +53,7 @@ fn real_tensor_artifact_cross_process() {
         return;
     }
     let graph = Tracer::default();
-    let x = graph.input(&[3]).unwrap();
+    let x = graph.input([3]).unwrap();
     let index = graph.input_i32_scalar().unwrap();
     let shifted = x.add_scalar(1.).unwrap();
     let selected = shifted.take(&index, 0).unwrap();
@@ -86,8 +86,8 @@ fn real_tensor_artifact_cross_process() {
 fn real_signature_retains_unused_inputs_and_zero_input_programs() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let graph = Tracer::default();
-    let _unused = graph.input_i32(&[0, 3]).unwrap();
-    let output = graph.constant(&[], &[7.]).unwrap();
+    let _unused = graph.input_i32([0, 3]).unwrap();
+    let output = graph.constant([], [7.]).unwrap();
     let executable = graph.compile(&client, &output).unwrap();
     drop(graph);
     assert_eq!(executable.input_count(), 1);
@@ -109,7 +109,7 @@ fn real_signature_retains_unused_inputs_and_zero_input_programs() {
         [7.]
     );
     let graph = Tracer::default();
-    let output = graph.constant(&[], &[9.]).unwrap();
+    let output = graph.constant([], [9.]).unwrap();
     let executable = graph.compile(&client, &output).unwrap();
     assert_eq!(executable.input_count(), 0);
     assert_eq!(executable.output_count(), 1);
@@ -122,7 +122,7 @@ fn real_signature_retains_unused_inputs_and_zero_input_programs() {
 fn real_tensor_artifact_host_convenience() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let graph = Tracer::default();
-    let x = graph.input(&[2]).unwrap();
+    let x = graph.input([2]).unwrap();
     let y = x.add_scalar(1.).unwrap();
     let bytes = graph
         .compile(&client, &y)
@@ -141,7 +141,7 @@ fn real_tensor_artifact_host_convenience() {
 fn real_serialized_executable_lifetimes() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
+    let x = g.input([2]).unwrap();
     let y = x.add_scalar(1.).unwrap();
     let executable = g.compile_many(&client, &[y.clone(), y]).unwrap();
     let bytes = executable.serialize().unwrap();

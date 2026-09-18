@@ -3,11 +3,11 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn index_arithmetic_stays_i32_and_requires_explicit_broadcast() {
     let g = Tracer::default();
-    let x = g.input_i32(&[2, 3]).unwrap();
+    let x = g.input_i32([2, 3]).unwrap();
     let scalar = g.input_i32_scalar().unwrap();
     assert!(x.wrapping_add(&scalar).is_err());
     assert!(
-        x.wrapping_sub(&Tracer::default().input_i32(&[2, 3]).unwrap())
+        x.wrapping_sub(&Tracer::default().input_i32([2, 3]).unwrap())
             .is_err()
     );
     let rhs = scalar.broadcast_to(x.shape()).unwrap();
@@ -24,7 +24,7 @@ fn index_arithmetic_stays_i32_and_requires_explicit_broadcast() {
         assert!(stablehlo.contains(&format!("stablehlo.{opcode}")));
     }
     assert!(stablehlo.contains("tensor<2x3xi32>"));
-    let empty = g.input_i32(&[0, 3]).unwrap();
+    let empty = g.input_i32([0, 3]).unwrap();
     assert_eq!(empty.wrapping_add_scalar(1).unwrap().shape(), [0, 3]);
 }
 
@@ -33,10 +33,10 @@ fn index_arithmetic_stays_i32_and_requires_explicit_broadcast() {
 fn real_i32_arithmetic_matches_wrapping_reference_exactly() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let a = g.input_i32(&[8]).unwrap();
-    let b = g.input_i32(&[8]).unwrap();
+    let a = g.input_i32([8]).unwrap();
+    let b = g.input_i32([8]).unwrap();
     let expected = (0..3)
-        .map(|_| g.input_i32(&[8]).unwrap())
+        .map(|_| g.input_i32([8]).unwrap())
         .collect::<Vec<_>>();
     let arithmetic = [
         a.wrapping_add(&b).unwrap(),
@@ -72,16 +72,16 @@ fn real_runtime_positions_drive_strided_gather() {
     let g = Tracer::default();
     let base = g.input_i32_scalar().unwrap();
     let stride = g.input_i32_scalar().unwrap();
-    let offsets = g.constant_i32(&[3], &[0, 1, 2]).unwrap();
+    let offsets = g.constant_i32([3], [0, 1, 2]).unwrap();
     let positions = offsets
-        .wrapping_mul(&stride.broadcast_to(&[3]).unwrap())
+        .wrapping_mul(&stride.broadcast_to([3]).unwrap())
         .unwrap()
-        .wrapping_add(&base.broadcast_to(&[3]).unwrap())
+        .wrapping_add(&base.broadcast_to([3]).unwrap())
         .unwrap()
         .wrapping_add_scalar(-1)
         .unwrap();
     let table = g
-        .constant(&[8], &[0., 10., 20., 30., 40., 50., 60., 70.])
+        .constant([8], [0., 10., 20., 30., 40., 50., 60., 70.])
         .unwrap();
     let exe = g
         .compile(&client, &table.take(&positions, 0).unwrap())

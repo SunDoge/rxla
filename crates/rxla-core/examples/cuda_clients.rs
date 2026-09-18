@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         unsafe { Client::load_with_options(&plugin, &options)? },
     ];
     let program = Tracer::trace(|trace| {
-        let input = trace.input(&[2, 2])?;
+        let input = trace.input([2, 2])?;
         Ok(vec![input.matmul(&input)?])
     })?;
     let mut programs = Vec::new();

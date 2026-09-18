@@ -13,10 +13,10 @@ const OPS: [Compare; 6] = [
 #[test]
 fn comparison_shapes_and_ownership() {
     let g = Tracer::default();
-    let a = g.input(&[2]).unwrap();
-    let b = g.input(&[2]).unwrap();
-    let scalar = g.input(&[]).unwrap();
-    let foreign = Tracer::default().input(&[2]).unwrap();
+    let a = g.input([2]).unwrap();
+    let b = g.input([2]).unwrap();
+    let scalar = g.input([]).unwrap();
+    let foreign = Tracer::default().input([2]).unwrap();
     for op in OPS {
         assert_eq!(op(&a, &b).unwrap().shape(), [2]);
         assert!(op(&a, &scalar).is_err());
@@ -29,8 +29,8 @@ fn comparison_shapes_and_ownership() {
 fn real_comparison_ieee_semantics_and_selection() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let a = g.input(&[6, 6]).unwrap();
-    let b = g.input(&[6, 6]).unwrap();
+    let a = g.input([6, 6]).unwrap();
+    let b = g.input([6, 6]).unwrap();
     let mut outputs: Vec<_> = OPS.iter().map(|op| op(&a, &b).unwrap()).collect();
     outputs.push(outputs[4].select(&a, &b).unwrap());
     let exe = g.compile_many(&client, &outputs).unwrap();
@@ -66,11 +66,7 @@ fn real_comparison_ieee_semantics_and_selection() {
     for shape in [vec![], vec![0, 2]] {
         let g = Tracer::default();
         let a = g.input(&shape).unwrap();
-        let b = g
-            .constant(&[], &[0.])
-            .unwrap()
-            .broadcast_to(&shape)
-            .unwrap();
+        let b = g.constant([], [0.]).unwrap().broadcast_to(&shape).unwrap();
         let outputs: Vec<_> = OPS.iter().map(|op| op(&a, &b).unwrap()).collect();
         let exe = g.compile_many(&client, &outputs).unwrap();
         let values = if shape.is_empty() { vec![0.] } else { vec![] };

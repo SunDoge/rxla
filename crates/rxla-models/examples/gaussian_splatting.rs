@@ -67,12 +67,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pixels.extend_from_slice(&[x as f32 + 0.5, y as f32 + 0.5]);
         }
     }
-    let means = tracer.constant(&[count, 3], &means)?;
-    let covariances = tracer.constant(&[count, 3, 3], &covariances)?;
-    let colors = tracer.constant(&[count, 3], &colors)?;
-    let opacities = tracer.constant(&[count], &opacities)?;
-    let pixels = tracer.constant(&[i64::from(args.height), i64::from(args.width), 2], &pixels)?;
-    let background = tracer.constant(&[3], &[0.025, 0.035, 0.06])?;
+    let means = tracer.constant([count, 3], &means)?;
+    let covariances = tracer.constant([count, 3, 3], &covariances)?;
+    let colors = tracer.constant([count, 3], &colors)?;
+    let opacities = tracer.constant([count], &opacities)?;
+    let pixels = tracer.constant([i64::from(args.height), i64::from(args.width), 2], &pixels)?;
+    let background = tracer.constant([3], [0.025, 0.035, 0.06])?;
     let focal = args.width.min(args.height) as f32 * 0.9;
     let render = render_gaussians(
         &means,

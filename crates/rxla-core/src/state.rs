@@ -1229,7 +1229,7 @@ mod tests {
         let loss = input
             .matmul(weight.tensor())
             .unwrap()
-            .sum(&[0, 1], false)
+            .sum([0, 1], false)
             .unwrap();
         let gradient = loss.grad(&[weight.tensor().clone()]).unwrap().remove(0);
         assert!(

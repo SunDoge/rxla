@@ -15,11 +15,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cpu_compiler = Compiler::new(cpu.clone(), CacheLimits::default());
     let mut gpu_compiler = Compiler::new(gpu.clone(), CacheLimits::default());
     let preprocess = Tracer::default();
-    let x = preprocess.input(&[1, 2])?;
+    let x = preprocess.input([1, 2])?;
     let pre = cpu_compiler.compile(&preprocess, &x.mul_scalar(0.5)?.add_scalar(1.)?)?;
     let model = Tracer::default();
-    let x = model.input(&[1, 2])?;
-    let w = model.input(&[2, 2])?;
+    let x = model.input([1, 2])?;
+    let w = model.input([2, 2])?;
     let prepared_model = model.prepare(&x.matmul(&w)?)?;
     let infer = gpu_compiler.compile_lowered(&prepared_model)?;
     let cpu_infer = cpu_compiler.compile_lowered(&prepared_model)?;
@@ -34,8 +34,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(compiler.stats().compile_time, compiled_time);
     }
     let postprocess = Tracer::default();
-    let x = postprocess.input(&[1, 2])?;
-    let post = cpu_compiler.compile(&postprocess, &x.sum(&[1], false)?)?;
+    let x = postprocess.input([1, 2])?;
+    let post = cpu_compiler.compile(&postprocess, &x.sum([1], false)?)?;
     let weights = gpu.buffer(&[2, 2], &[2., 3., 4., 5.])?;
     let cpu_weights = cpu.buffer(&[2, 2], &[2., 3., 4., 5.])?;
     // Cross-backend transport preserves integer extremes and BF16 payload bits.

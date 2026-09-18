@@ -542,14 +542,14 @@ impl Tensor {
             }
             let mut pieces = Vec::with_capacity(3);
             if low > 0 {
-                pieces.push(result.narrow(axis, 1, low)?.flip(&[axis])?);
+                pieces.push(result.narrow(axis, 1, low)?.flip([axis])?);
             }
             pieces.push(result.clone());
             if high > 0 {
                 pieces.push(
                     result
                         .narrow(axis, result.shape()[axis] - high - 1, high)?
-                        .flip(&[axis])?,
+                        .flip([axis])?,
                 );
             }
             result = Self::concatenate(&pieces, axis)?;

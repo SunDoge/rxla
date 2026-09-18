@@ -3,7 +3,7 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn diagonal_validates_axes_and_extreme_offsets() {
     let g = Tracer::default();
-    let x = g.input(&[3, 2, 4]).unwrap();
+    let x = g.input([3, 2, 4]).unwrap();
     assert_eq!(x.diagonal(0, 0, 2).unwrap().shape(), [2, 3]);
     assert_eq!(x.diagonal(-1, 0, 2).unwrap().shape(), [2, 2]);
     for offset in [i64::MIN, i64::MAX, -3, 4] {
@@ -11,8 +11,8 @@ fn diagonal_validates_axes_and_extreme_offsets() {
     }
     assert!(x.diagonal(0, 0, 0).is_err());
     assert!(x.trace(0, 0, 3).is_err());
-    assert!(g.input(&[]).unwrap().diagonal(0, 0, 1).is_err());
-    assert!(g.input(&[]).unwrap().diag_embed(0).is_err());
+    assert!(g.input([]).unwrap().diagonal(0, 0, 1).is_err());
+    assert!(g.input([]).unwrap().diag_embed(0).is_err());
     assert!(x.diag_embed(i64::MIN).is_err());
     assert!(x.diag_embed(i64::MAX).is_err());
 }
@@ -22,18 +22,18 @@ fn diagonal_validates_axes_and_extreme_offsets() {
 fn real_diag_embed_offsets_nonfinite_and_derivatives() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2, 3]).unwrap();
+    let x = g.input([2, 3]).unwrap();
     let positive = x.diag_embed(1).unwrap();
     let negative = x.diag_embed(-2).unwrap();
     let main = x.diag_embed(0).unwrap();
     let loss = positive
         .mul(&positive)
         .unwrap()
-        .sum(&[0, 1, 2], false)
+        .sum([0, 1, 2], false)
         .unwrap();
     let dx = loss.grad(std::slice::from_ref(&x)).unwrap().remove(0);
     let ddx = dx
-        .sum(&[0, 1], false)
+        .sum([0, 1], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()
@@ -77,13 +77,13 @@ fn real_diag_embed_offsets_nonfinite_and_derivatives() {
 fn real_empty_diag_embed() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2, 0]).unwrap();
+    let x = g.input([2, 0]).unwrap();
     let y = x.diag_embed(-2).unwrap();
     assert_eq!(y.shape(), [2, 2, 2]);
     let empty = x.diag_embed(0).unwrap();
     assert_eq!(empty.shape(), [2, 0, 0]);
     let dx = y
-        .sum(&[0, 1, 2], false)
+        .sum([0, 1, 2], false)
         .unwrap()
         .grad(&[x])
         .unwrap()
@@ -101,16 +101,12 @@ fn real_empty_diag_embed() {
 fn real_batched_offset_diagonals_trace_and_second_derivative() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[3, 2, 4]).unwrap();
+    let x = g.input([3, 2, 4]).unwrap();
     let positive = x.diagonal(1, 0, 2).unwrap();
-    let loss = positive
-        .mul(&positive)
-        .unwrap()
-        .sum(&[0, 1], false)
-        .unwrap();
+    let loss = positive.mul(&positive).unwrap().sum([0, 1], false).unwrap();
     let gradient = loss.grad(std::slice::from_ref(&x)).unwrap().remove(0);
     let second = gradient
-        .sum(&[0, 1, 2], false)
+        .sum([0, 1, 2], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()
@@ -157,16 +153,11 @@ fn real_batched_offset_diagonals_trace_and_second_derivative() {
 fn real_empty_matrix_diagonal_and_trace() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2, 0, 3]).unwrap();
+    let x = g.input([2, 0, 3]).unwrap();
     let diagonal = x.diagonal(0, 1, 2).unwrap();
     assert_eq!(diagonal.shape(), [2, 0]);
     let trace = x.trace(0, 1, 2).unwrap();
-    let gradient = trace
-        .sum(&[0], false)
-        .unwrap()
-        .grad(&[x])
-        .unwrap()
-        .remove(0);
+    let gradient = trace.sum([0], false).unwrap().grad(&[x]).unwrap().remove(0);
     let exe = g
         .compile_many(&client, &[diagonal, trace, gradient])
         .unwrap();

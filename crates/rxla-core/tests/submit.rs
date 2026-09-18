@@ -5,8 +5,8 @@ use rxla_core::{Client, Tracer};
 fn real_device_pipeline_with_shared_intermediate_outputs() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
-    let i = g.input_i32(&[2]).unwrap();
+    let x = g.input([2]).unwrap();
+    let i = g.input_i32([2]).unwrap();
     let exe = g
         .compile_many(
             &client,
@@ -59,7 +59,7 @@ fn real_device_pipeline_with_shared_intermediate_outputs() {
 fn real_completion_queries_preserve_outputs_and_owners() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
+    let x = g.input([2]).unwrap();
     let exe = g.compile(&client, &x.add_scalar(2.).unwrap()).unwrap();
     let input = client.buffer(&[2], &[3., -7.]).unwrap();
     let pending = exe.submit(&[&input]).unwrap();
@@ -88,7 +88,7 @@ fn real_completion_queries_preserve_outputs_and_owners() {
 fn real_submit_without_inputs_retains_constant_executable() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let value = g.constant(&[2], &[3., -7.]).unwrap();
+    let value = g.constant([2], [3., -7.]).unwrap();
     let exe = g.compile(&client, &value).unwrap();
     let pending = exe.submit(&[]).unwrap();
     drop(exe);
@@ -105,8 +105,8 @@ fn real_submit_without_inputs_retains_constant_executable() {
 fn real_submissions_own_inputs_and_executable_until_wait() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2, 2]).unwrap();
-    let i = g.input_i32(&[2]).unwrap();
+    let x = g.input([2, 2]).unwrap();
+    let i = g.input_i32([2]).unwrap();
     let exe = g
         .compile_many(
             &client,
@@ -139,7 +139,7 @@ fn real_submissions_own_inputs_and_executable_until_wait() {
 fn real_submit_validates_signatures_and_drop_does_not_cancel() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
+    let x = g.input([2]).unwrap();
     let exe = g.compile(&client, &x.add_scalar(1.).unwrap()).unwrap();
     let good = client.buffer(&[2], &[1., 2.]).unwrap();
     let wrong_shape = client.buffer(&[], &[1.]).unwrap();

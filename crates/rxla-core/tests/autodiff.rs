@@ -3,18 +3,15 @@ use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 #[test]
 fn grad_rejects_unsupported_non_scalar_and_non_leaf_requests() {
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
+    let x = g.input([2]).unwrap();
     assert!(x.grad(std::slice::from_ref(&x)).is_err());
-    let loss = x.sum(&[0], false).unwrap();
+    let loss = x.sum([0], false).unwrap();
     assert!(loss.grad(&[x.neg().unwrap()]).is_err());
-    assert!(
-        loss.grad(&[Tracer::default().input(&[2]).unwrap()])
-            .is_err()
-    );
+    assert!(loss.grad(&[Tracer::default().input([2]).unwrap()]).is_err());
     assert!(
         x.is_finite_mask()
             .unwrap()
-            .sum(&[0], false)
+            .sum([0], false)
             .unwrap()
             .grad(&[x])
             .is_err()
@@ -26,7 +23,7 @@ fn grad_rejects_unsupported_non_scalar_and_non_leaf_requests() {
 fn real_grad_smooth_unary_rules() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[3]).unwrap();
+    let x = g.input([3]).unwrap();
     let ops = [
         x.neg(),
         x.exp(),
@@ -42,7 +39,7 @@ fn real_grad_smooth_unary_rules() {
         .into_iter()
         .map(|op| {
             op.unwrap()
-                .sum(&[0], false)
+                .sum([0], false)
                 .unwrap()
                 .grad(std::slice::from_ref(&x))
                 .unwrap()
@@ -78,9 +75,9 @@ fn real_grad_smooth_unary_rules() {
 fn real_grad_batched_matmul_vector_promotion_and_empty_broadcast() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let a = g.input(&[2, 1, 3]).unwrap();
-    let b = g.input(&[1, 3, 2]).unwrap();
-    let loss = a.matmul(&b).unwrap().sum(&[0, 1, 2], false).unwrap();
+    let a = g.input([2, 1, 3]).unwrap();
+    let b = g.input([1, 3, 2]).unwrap();
+    let loss = a.matmul(&b).unwrap().sum([0, 1, 2], false).unwrap();
     let gradients = loss.grad(&[a, b]).unwrap();
     assert_eq!(
         g.compile_many(&client, &gradients)
@@ -90,8 +87,8 @@ fn real_grad_batched_matmul_vector_promotion_and_empty_broadcast() {
         [vec![3., 7., 11., 3., 7., 11.], vec![5., 5., 7., 7., 9., 9.]]
     );
     let g = Tracer::default();
-    let a = g.input(&[3]).unwrap();
-    let b = g.input(&[3]).unwrap();
+    let a = g.input([3]).unwrap();
+    let b = g.input([3]).unwrap();
     let grads = a.matmul(&b).unwrap().grad(&[a, b]).unwrap();
     assert_eq!(
         g.compile_many(&client, &grads)
@@ -101,12 +98,8 @@ fn real_grad_batched_matmul_vector_promotion_and_empty_broadcast() {
         [vec![4., 5., 6.], vec![1., 2., 3.]]
     );
     let g = Tracer::default();
-    let x = g.input(&[]).unwrap();
-    let loss = x
-        .broadcast_to(&[0, 2])
-        .unwrap()
-        .sum(&[0, 1], false)
-        .unwrap();
+    let x = g.input([]).unwrap();
+    let loss = x.broadcast_to([0, 2]).unwrap().sum([0, 1], false).unwrap();
     let grad = loss.grad(&[x]).unwrap();
     assert_eq!(
         g.compile_many(&client, &grad)
@@ -134,17 +127,17 @@ fn reference(x: &[f64], w: &[f64], b: &[f64]) -> f64 {
 fn real_grad_mlp_matches_independent_f64_finite_differences() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2, 3]).unwrap();
-    let w = g.input(&[3, 2]).unwrap();
-    let b = g.input(&[2]).unwrap();
+    let x = g.input([2, 3]).unwrap();
+    let w = g.input([3, 2]).unwrap();
+    let b = g.input([2]).unwrap();
     let h = x
         .matmul(&w)
         .unwrap()
-        .add(&b.broadcast_to(&[2, 2]).unwrap())
+        .add(&b.broadcast_to([2, 2]).unwrap())
         .unwrap()
         .silu()
         .unwrap();
-    let loss = h.mul(&h).unwrap().mean(&[0, 1], false).unwrap();
+    let loss = h.mul(&h).unwrap().mean([0, 1], false).unwrap();
     let grads = loss.grad(&[x, w, b]).unwrap();
     let exe = g.compile_many(&client, &grads).unwrap();
     for scale in [1., -0.7] {
@@ -189,10 +182,10 @@ fn real_grad_mlp_matches_independent_f64_finite_differences() {
 fn real_grad_layouts_shared_inputs_disconnected_and_second_derivative() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[1, 2]).unwrap();
-    let unused = g.input(&[3]).unwrap();
-    let y = x.broadcast_to(&[3, 2]).unwrap().transpose(&[1, 0]).unwrap();
-    let loss = y.mul(&y).unwrap().sum(&[0, 1], false).unwrap();
+    let x = g.input([1, 2]).unwrap();
+    let unused = g.input([3]).unwrap();
+    let y = x.broadcast_to([3, 2]).unwrap().transpose([1, 0]).unwrap();
+    let loss = y.mul(&y).unwrap().sum([0, 1], false).unwrap();
     let grads = loss.grad(&[x.clone(), unused, x]).unwrap();
     assert_eq!(
         g.compile_many(&client, &grads)
@@ -202,7 +195,7 @@ fn real_grad_layouts_shared_inputs_disconnected_and_second_derivative() {
         [vec![12., 18.], vec![0.; 3], vec![12., 18.]]
     );
     let g = Tracer::default();
-    let x = g.input(&[]).unwrap();
+    let x = g.input([]).unwrap();
     let cubic = x.mul(&x).unwrap().mul(&x).unwrap();
     let first = cubic.grad(std::slice::from_ref(&x)).unwrap().remove(0);
     let second = first.grad(&[x]).unwrap();
@@ -228,13 +221,13 @@ fn real_resident_linear_regression_training_compiles_once() {
     let x = graph.input(&[4]).unwrap();
     let target = graph.input(&[4]).unwrap();
     let error = x
-        .mul(&w.broadcast_to(&[4]).unwrap())
+        .mul(&w.broadcast_to([4]).unwrap())
         .unwrap()
-        .add(&b.broadcast_to(&[4]).unwrap())
+        .add(&b.broadcast_to([4]).unwrap())
         .unwrap()
         .sub(&target)
         .unwrap();
-    let loss = error.mul(&error).unwrap().mean(&[0], false).unwrap();
+    let loss = error.mul(&error).unwrap().mean([0], false).unwrap();
     let grad = loss.grad(&[w.clone(), b.clone()]).unwrap();
     graph
         .write_many(&[

@@ -22,10 +22,10 @@ impl Tensor {
             return Err(err("cross-graph causal positions"));
         }
         let shape = [self.shape()[0], key_positions.shape()[0]];
-        let query = self.reshape(&[shape[0], 1])?.broadcast_to(&shape)?;
+        let query = self.reshape([shape[0], 1])?.broadcast_to(shape)?;
         key_positions
-            .reshape(&[1, shape[1]])?
-            .broadcast_to(&shape)?
+            .reshape([1, shape[1]])?
+            .broadcast_to(shape)?
             .le_mask(&query)?
             .log()?
             .detach()

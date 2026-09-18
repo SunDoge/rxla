@@ -168,7 +168,7 @@ fn real_running_statistics_ema_rejection_detach_and_session_isolation() {
         let gradient = mean
             .add(&variance)
             .unwrap()
-            .sum(&[0], false)
+            .sum([0], false)
             .unwrap()
             .grad(&[x])
             .unwrap()

@@ -3,7 +3,7 @@ use rxla_core::{Client, DType, Tracer};
 #[test]
 fn floating_cast_is_explicit_and_shape_preserving() {
     let graph = Tracer::default();
-    let input = graph.input(&[4]).unwrap();
+    let input = graph.input([4]).unwrap();
     let half = input.cast(DType::F16).unwrap();
     assert_eq!(half.shape(), [4]);
     assert_eq!(half.dtype(), DType::F16);
@@ -16,7 +16,7 @@ fn floating_cast_is_explicit_and_shape_preserving() {
 fn real_f16_and_bf16_round_trips_execute() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let graph = Tracer::default();
-    let input = graph.input(&[5]).unwrap();
+    let input = graph.input([5]).unwrap();
     let outputs =
         [DType::F16, DType::BF16].map(|dtype| input.cast(dtype).unwrap().cast(DType::F32).unwrap());
     let executable = graph.compile_many(&client, &outputs).unwrap();

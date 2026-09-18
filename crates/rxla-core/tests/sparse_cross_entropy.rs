@@ -3,8 +3,8 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn sparse_targets_require_exact_nonclass_shape_and_owner() {
     let g = Tracer::default();
-    let x = g.input(&[2, 3]).unwrap();
-    let labels = g.input_i32(&[2]).unwrap();
+    let x = g.input([2, 3]).unwrap();
+    let labels = g.input_i32([2]).unwrap();
     assert_eq!(
         x.cross_entropy_with_indices(&labels, 1).unwrap().shape(),
         [2]
@@ -12,15 +12,15 @@ fn sparse_targets_require_exact_nonclass_shape_and_owner() {
     assert!(x.cross_entropy_with_indices(&labels, 0).is_err());
     assert!(x.cross_entropy_with_indices(&labels, 2).is_err());
     assert!(
-        x.cross_entropy_with_indices(&g.input_i32(&[2, 1]).unwrap(), 1)
+        x.cross_entropy_with_indices(&g.input_i32([2, 1]).unwrap(), 1)
             .is_err()
     );
     assert!(
-        x.cross_entropy_with_indices(&Tracer::default().input_i32(&[2]).unwrap(), 1)
+        x.cross_entropy_with_indices(&Tracer::default().input_i32([2]).unwrap(), 1)
             .is_err()
     );
     assert!(
-        g.input(&[2, 0])
+        g.input([2, 0])
             .unwrap()
             .cross_entropy_with_indices(&labels, 1)
             .is_err()
@@ -33,12 +33,12 @@ fn real_sparse_loss_gradient_and_invalid_labels() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for axis in [0, 1] {
         let g = Tracer::default();
-        let x = g.input(&[2, 3]).unwrap();
+        let x = g.input([2, 3]).unwrap();
         let groups = if axis == 0 { 3 } else { 2 };
         let classes = if axis == 0 { 2 } else { 3 };
-        let ids = g.input_i32(&[groups as i64]).unwrap();
+        let ids = g.input_i32([groups as i64]).unwrap();
         let loss = x.cross_entropy_with_indices(&ids, axis).unwrap();
-        let grad = loss.sum(&[0], false).unwrap().grad(&[x]).unwrap().remove(0);
+        let grad = loss.sum([0], false).unwrap().grad(&[x]).unwrap().remove(0);
         let exe = g.compile_many(&client, &[loss, grad]).unwrap();
         let values = [1000.0f32, 999., -1000., 3., 3., 3.];
         let xb = client.buffer(&[2, 3], &values).unwrap();
@@ -113,10 +113,10 @@ fn real_sparse_loss_gradient_and_invalid_labels() {
 fn real_select_routes_data_gradients_but_not_mask_gradients() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let mask = g.input(&[4]).unwrap();
-    let a = g.input(&[4]).unwrap();
-    let b = g.input(&[4]).unwrap();
-    let loss = mask.select(&a, &b).unwrap().sum(&[0], false).unwrap();
+    let mask = g.input([4]).unwrap();
+    let a = g.input([4]).unwrap();
+    let b = g.input([4]).unwrap();
+    let loss = mask.select(&a, &b).unwrap().sum([0], false).unwrap();
     let grads = loss.grad(&[mask, a, b]).unwrap();
     let exe = g.compile_many(&client, &grads).unwrap();
     assert_eq!(

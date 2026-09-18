@@ -3,7 +3,7 @@ use rxla_core::{Client, DType, Tracer};
 #[test]
 fn dynamic_index_validation() {
     let g = Tracer::default();
-    let x = g.input(&[4, 2]).unwrap();
+    let x = g.input([4, 2]).unwrap();
     let i = g.input_i32_scalar().unwrap();
     let z = g.scalar_i32(0).unwrap();
     assert!(x.dynamic_slice(std::slice::from_ref(&i), &[1, 2]).is_err());
@@ -15,11 +15,11 @@ fn dynamic_index_validation() {
             .is_err()
     );
     assert!(
-        x.dynamic_update_slice(&other.input(&[1, 2]).unwrap(), &[i.clone(), z.clone()])
+        x.dynamic_update_slice(&other.input([1, 2]).unwrap(), &[i.clone(), z.clone()])
             .is_err()
     );
     assert!(
-        x.dynamic_update_slice(&g.input(&[1]).unwrap(), &[i, z])
+        x.dynamic_update_slice(&g.input([1]).unwrap(), &[i, z])
             .is_err()
     );
 }
@@ -29,8 +29,8 @@ fn dynamic_index_validation() {
 fn real_runtime_indexed_cache() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let cache = g.input(&[4, 2]).unwrap();
-    let update = g.input(&[1, 2]).unwrap();
+    let cache = g.input([4, 2]).unwrap();
+    let update = g.input([1, 2]).unwrap();
     let position = g.input_i32_scalar().unwrap();
     let zero = g.scalar_i32(0).unwrap();
     let indices = [position, zero];

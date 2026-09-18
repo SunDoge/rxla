@@ -15,7 +15,7 @@ fn real_streaming_session_preserves_carry_across_calls_and_rejected_updates() {
     let output = offset
         .affine_scan_from(&multiplier, &carry.read(&graph).unwrap(), 1)
         .unwrap();
-    let next = output.narrow(1, 2, 1).unwrap().reshape(&[2]).unwrap();
+    let next = output.narrow(1, 2, 1).unwrap().reshape([2]).unwrap();
     let next_count = count.read(&graph).unwrap().wrapping_add_scalar(1).unwrap();
     graph
         .transaction()
@@ -118,18 +118,18 @@ fn real_streaming_session_preserves_carry_across_calls_and_rejected_updates() {
 #[test]
 fn explicit_initial_state_requires_the_non_scan_shape() {
     let g = Tracer::default();
-    let x = g.input(&[2, 5]).unwrap();
+    let x = g.input([2, 5]).unwrap();
     for bad in [
-        g.input(&[]).unwrap(),
-        g.input(&[2, 1]).unwrap(),
-        Tracer::default().input(&[2]).unwrap(),
+        g.input([]).unwrap(),
+        g.input([2, 1]).unwrap(),
+        Tracer::default().input([2]).unwrap(),
     ] {
         assert!(x.affine_scan_from(&x, &bad, 1).is_err());
     }
-    let initial = g.input(&[2]).unwrap();
+    let initial = g.input([2]).unwrap();
     assert!(x.affine_scan_from(&x, &initial, 2).is_err());
     assert!(
-        x.affine_scan_from(&g.input(&[5]).unwrap(), &initial, 1)
+        x.affine_scan_from(&g.input([5]).unwrap(), &initial, 1)
             .is_err()
     );
     assert!(x.affine_scan_from(&x, &initial, 1).is_ok());
@@ -140,16 +140,16 @@ fn explicit_initial_state_requires_the_non_scan_shape() {
 fn real_initial_state_and_symbolic_chunks_preserve_values_and_gradients() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let a = g.input(&[2, 5]).unwrap();
-    let b = g.input(&[2, 5]).unwrap();
-    let initial = g.input(&[2]).unwrap();
+    let a = g.input([2, 5]).unwrap();
+    let b = g.input([2, 5]).unwrap();
+    let initial = g.input([2]).unwrap();
     let whole = b.affine_scan_from(&a, &initial, 1).unwrap();
     let first = b
         .narrow(1, 0, 2)
         .unwrap()
         .affine_scan_from(&a.narrow(1, 0, 2).unwrap(), &initial, 1)
         .unwrap();
-    let carry = first.narrow(1, 1, 1).unwrap().reshape(&[2]).unwrap();
+    let carry = first.narrow(1, 1, 1).unwrap().reshape([2]).unwrap();
     let second = b
         .narrow(1, 2, 3)
         .unwrap()
@@ -157,8 +157,8 @@ fn real_initial_state_and_symbolic_chunks_preserve_values_and_gradients() {
         .unwrap();
     let chunked = rxla_core::Tensor::concatenate(&[first, second], 1).unwrap();
     let targets = [a, b, initial];
-    let whole_gradient = whole.sum(&[0, 1], false).unwrap().grad(&targets).unwrap();
-    let chunk_gradient = chunked.sum(&[0, 1], false).unwrap().grad(&targets).unwrap();
+    let whole_gradient = whole.sum([0, 1], false).unwrap().grad(&targets).unwrap();
+    let chunk_gradient = chunked.sum([0, 1], false).unwrap().grad(&targets).unwrap();
     let mut outputs = vec![whole, chunked];
     outputs.extend(whole_gradient);
     outputs.extend(chunk_gradient);
@@ -222,16 +222,16 @@ fn real_initial_state_and_symbolic_chunks_preserve_values_and_gradients() {
 fn real_discounted_returns_stop_at_terminal_boundaries() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let graph = Tracer::default();
-    let reward = graph.input(&[5]).unwrap();
-    let discount = graph.input(&[5]).unwrap();
+    let reward = graph.input([5]).unwrap();
+    let discount = graph.input([5]).unwrap();
     let returns = reward
-        .flip(&[0])
+        .flip([0])
         .unwrap()
-        .affine_scan(&discount.flip(&[0]).unwrap(), 0)
+        .affine_scan(&discount.flip([0]).unwrap(), 0)
         .unwrap()
-        .flip(&[0])
+        .flip([0])
         .unwrap();
-    let first = returns.narrow(0, 0, 1).unwrap().sum(&[0], false).unwrap();
+    let first = returns.narrow(0, 0, 1).unwrap().sum([0], false).unwrap();
     let gradient = first.grad(&[reward]).unwrap().remove(0);
     let exe = graph.compile_many(&client, &[returns, gradient]).unwrap();
     let inputs = [
@@ -246,14 +246,14 @@ fn real_discounted_returns_stop_at_terminal_boundaries() {
 #[test]
 fn rejects_invalid_axis_shape_and_owner() {
     let graph = Tracer::default();
-    let x = graph.input(&[4]).unwrap();
+    let x = graph.input([4]).unwrap();
     assert!(x.affine_scan(&x, 1).is_err());
-    assert!(x.affine_scan(&graph.input(&[]).unwrap(), 0).is_err());
+    assert!(x.affine_scan(&graph.input([]).unwrap(), 0).is_err());
     assert!(
-        x.affine_scan(&Tracer::default().input(&[4]).unwrap(), 0)
+        x.affine_scan(&Tracer::default().input([4]).unwrap(), 0)
             .is_err()
     );
-    let scalar = graph.input(&[]).unwrap();
+    let scalar = graph.input([]).unwrap();
     assert!(scalar.affine_scan(&scalar, 0).is_err());
 }
 
@@ -299,9 +299,9 @@ fn real_recurrence_and_gradients_match_sequential_adjoint() {
                     };
             }
             let g = Tracer::default();
-            let multiplier = g.input(&shape).unwrap();
-            let offset = g.input(&shape).unwrap();
-            let cotangent = g.input(&shape).unwrap();
+            let multiplier = g.input(shape).unwrap();
+            let offset = g.input(shape).unwrap();
+            let cotangent = g.input(shape).unwrap();
             let output = offset.affine_scan(&multiplier, axis).unwrap();
             let gradients = output.vjp(&[multiplier, offset], &cotangent).unwrap();
             let exe = g

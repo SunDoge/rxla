@@ -10,7 +10,7 @@ fn sampled_dropout_validates_probability_and_graph() {
     for p in [0., -0.1, 1.1, f32::NAN, f32::INFINITY] {
         assert!(sequence.dropout(&x, p).is_err());
     }
-    let foreign = Tracer::default().input(&[6]).unwrap();
+    let foreign = Tracer::default().input([6]).unwrap();
     for p in [0.5, 1.] {
         assert!(sequence.dropout(&foreign, p).is_err());
     }
@@ -37,15 +37,15 @@ fn real_sampled_dropout_reuses_mask_for_derivatives_and_explicit_recomputation()
     assert!(sequence.dropout(&x, 0.).is_err());
     assert!(
         sequence
-            .dropout(&Tracer::default().input(&[6]).unwrap(), 0.5)
+            .dropout(&Tracer::default().input([6]).unwrap(), 0.5)
             .is_err()
     );
     let sample = sequence.dropout(&x, 0.5).unwrap();
     let recomputed = x.dropout_with_mask(&sample.keep_mask, 0.5).unwrap();
-    let loss = sample.output.square().unwrap().sum(&[0], false).unwrap();
+    let loss = sample.output.square().unwrap().sum([0], false).unwrap();
     let gradient = loss.grad(std::slice::from_ref(&x)).unwrap().remove(0);
     let second = gradient
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()

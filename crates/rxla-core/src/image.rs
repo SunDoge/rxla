@@ -33,7 +33,7 @@ impl Tensor {
         if !factor.is_finite() {
             return Err(err("contrast factor must be finite"));
         }
-        let mean = self.mean(&[1, 2], true)?;
+        let mean = self.mean([1, 2], true)?;
         self.sub(&mean.broadcast_to(self.shape())?)?
             .mul_scalar(factor)?
             .add(&mean.broadcast_to(self.shape())?)
@@ -43,13 +43,13 @@ impl Tensor {
     /// not materialize a host-side copy.
     pub fn flip_left_right(&self) -> Result<Self> {
         require_f32_nhwc(self, "flip_left_right")?;
-        self.flip(&[2])
+        self.flip([2])
     }
 
     /// Flip NHWC images vertically without materializing a host-side copy.
     pub fn flip_up_down(&self) -> Result<Self> {
         require_f32_nhwc(self, "flip_up_down")?;
-        self.flip(&[1])
+        self.flip([1])
     }
 
     /// Center-crop spatial dimensions, treating a target larger than the input
@@ -113,8 +113,8 @@ impl Tensor {
         let weights = self
             .graph()
             .constant(&[1, 1, 1, 3], &weights)?
-            .broadcast_to(&[batch, height, width, 3])?;
-        self.mul(&weights)?.sum(&[3], true)
+            .broadcast_to([batch, height, width, 3])?;
+        self.mul(&weights)?.sum([3], true)
     }
 
     /// Invert values greater than or equal to `threshold`, leaving lower values

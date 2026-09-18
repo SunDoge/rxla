@@ -254,7 +254,7 @@ mod tests {
         let error = Model::new(|cx: Cx| {
             cx.param_initialized(
                 "weight",
-                &[2, 3],
+                [2, 3],
                 Initializer::Uniform {
                     low: f32::NAN,
                     high: 1.0,
@@ -302,7 +302,7 @@ mod tests {
         let output: Buffer = runner.run(&input).unwrap();
         assert_eq!(output.dimensions().unwrap(), [1, 2]);
 
-        let uninitialized = Model::new(|cx: Cx| cx.param("external", &[1]));
+        let uninitialized = Model::new(|cx: Cx| cx.param("external", [1]));
         let uninitialized = uninitialized.trace().unwrap();
         let schema = uninitialized.schema();
         assert!(matches!(
@@ -346,7 +346,7 @@ mod tests {
 
         let random_state = Model::new(|cx: Cx| {
             let state =
-                cx.state_initialized("random", &[8], DType::F32, Initializer::uniform(-1.0, 1.0))?;
+                cx.state_initialized("random", [8], DType::F32, Initializer::uniform(-1.0, 1.0))?;
             state.read(&cx)
         })
         .trace()

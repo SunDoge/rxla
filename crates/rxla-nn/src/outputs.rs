@@ -136,7 +136,7 @@ mod tests {
             Err(Error::OutputStructure)
         ));
 
-        let one = Model::new(|cx: Cx| -> Result<Tensor> { cx.constant(&[], &[1.0]) })
+        let one = Model::new(|cx: Cx| -> Result<Tensor> { cx.constant([], [1.0]) })
             .trace()
             .unwrap();
         assert!(matches!(
@@ -156,7 +156,7 @@ mod tests {
         }
         .unwrap();
         let applied = Model::new(|cx: Cx| {
-            Ok::<_, Error>((cx.constant(&[], &[3.0])?, cx.constant(&[2], &[4.0, 5.0])?))
+            Ok::<_, Error>((cx.constant([], [3.0])?, cx.constant([2], [4.0, 5.0])?))
         })
         .trace()
         .unwrap();

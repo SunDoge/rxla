@@ -15,7 +15,7 @@ fn window_partition(input: &Tensor, window: i64) -> Result<(Tensor, [i64; 2])> {
     let padded_height = height + pad_height;
     let padded_width = width + pad_width;
     let windows = padded
-        .reshape(&[
+        .reshape([
             batch,
             padded_height / window,
             window,
@@ -23,8 +23,8 @@ fn window_partition(input: &Tensor, window: i64) -> Result<(Tensor, [i64; 2])> {
             window,
             channels,
         ])?
-        .transpose(&[0, 1, 3, 2, 4, 5])?
-        .reshape(&[
+        .transpose([0, 1, 3, 2, 4, 5])?
+        .reshape([
             batch * (padded_height / window) * (padded_width / window),
             window,
             window,
@@ -44,7 +44,7 @@ fn window_unpartition(
     let batch = windows.shape()[0] / windows_per_image;
     let channels = windows.shape()[3];
     let output = windows
-        .reshape(&[
+        .reshape([
             batch,
             padded_height / window,
             padded_width / window,
@@ -52,8 +52,8 @@ fn window_unpartition(
             window,
             channels,
         ])?
-        .transpose(&[0, 1, 3, 2, 4, 5])?
-        .reshape(&[batch, padded_height, padded_width, channels])?;
+        .transpose([0, 1, 3, 2, 4, 5])?
+        .reshape([batch, padded_height, padded_width, channels])?;
     Ok(output
         .narrow(1, 0, original[0])?
         .narrow(2, 0, original[1])?)
@@ -90,7 +90,7 @@ impl MultiScaleAttention {
         let head_dim = self.dim_out / self.heads;
         let qkv = input
             .through(path!(cx / "qkv")?, Linear::new(self.dim_out * 3))?
-            .reshape(&[batch, height * width, 3, self.heads, head_dim])?
+            .reshape([batch, height * width, 3, self.heads, head_dim])?
             .unbind(2)?;
         let [mut query, key, value] =
             <[Tensor; 3]>::try_from(qkv).map_err(|_| Error::InvalidModel {
@@ -98,10 +98,10 @@ impl MultiScaleAttention {
             })?;
         let (query_height, query_width) = if let Some(stride) = self.q_stride {
             query = pool(
-                &query.reshape(&[batch, height, width, self.dim_out])?,
+                &query.reshape([batch, height, width, self.dim_out])?,
                 stride,
             )?
-            .reshape(&[
+            .reshape([
                 batch,
                 height / stride[0] * (width / stride[1]),
                 self.heads,
@@ -111,13 +111,13 @@ impl MultiScaleAttention {
         } else {
             (height, width)
         };
-        let query = query.transpose(&[0, 2, 1, 3])?;
-        let key = key.transpose(&[0, 2, 1, 3])?;
-        let value = value.transpose(&[0, 2, 1, 3])?;
+        let query = query.transpose([0, 2, 1, 3])?;
+        let key = key.transpose([0, 2, 1, 3])?;
+        let value = value.transpose([0, 2, 1, 3])?;
         let output = query
             .scaled_dot_product_attention(&key, &value, None, None)?
-            .transpose(&[0, 2, 1, 3])?
-            .reshape(&[batch, query_height, query_width, self.dim_out])?;
+            .transpose([0, 2, 1, 3])?
+            .reshape([batch, query_height, query_width, self.dim_out])?;
         Ok(output.through(path!(cx / "proj")?, Linear::new(self.dim_out))?)
     }
 }
@@ -206,21 +206,21 @@ fn position_embedding(cx: Cx, shape: [i64; 2], config: &HieraConfig) -> Result<T
     let base = cx
         .param(
             "pos_embed",
-            &[
+            [
                 1,
                 config.embed_dim,
                 config.position_embedding_size[0],
                 config.position_embedding_size[1],
             ],
         )?
-        .transpose(&[0, 2, 3, 1])?
+        .transpose([0, 2, 3, 1])?
         .resize_bicubic2d(shape)?;
     let window = config.window_spec[0];
     let tiled = cx
-        .param("pos_embed_window", &[1, config.embed_dim, window, window])?
-        .transpose(&[0, 2, 3, 1])?
-        .reshape(&[1, 1, window, 1, window, config.embed_dim])?
-        .broadcast_to(&[
+        .param("pos_embed_window", [1, config.embed_dim, window, window])?
+        .transpose([0, 2, 3, 1])?
+        .reshape([1, 1, window, 1, window, config.embed_dim])?
+        .broadcast_to([
             1,
             shape[0] / window,
             window,
@@ -228,7 +228,7 @@ fn position_embedding(cx: Cx, shape: [i64; 2], config: &HieraConfig) -> Result<T
             window,
             config.embed_dim,
         ])?
-        .reshape(&[1, shape[0], shape[1], config.embed_dim])?;
+        .reshape([1, shape[0], shape[1], config.embed_dim])?;
     Ok(base.add(&tiled)?)
 }
 
@@ -303,7 +303,7 @@ pub fn hiera(cx: Cx, image: &Tensor, config: &HieraConfig) -> Result<[Tensor; 4]
         hidden = block_cx.tap("output", &hidden)?;
         dim = dim_out;
         if stage_ends.contains(&index) {
-            outputs.push(hidden.transpose(&[0, 3, 1, 2])?);
+            outputs.push(hidden.transpose([0, 3, 1, 2])?);
         }
     }
     <[Tensor; 4]>::try_from(outputs).map_err(|_| Error::InvalidModel {

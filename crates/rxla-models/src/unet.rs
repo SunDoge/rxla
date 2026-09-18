@@ -262,9 +262,9 @@ mod tests {
     use rxla_nn::Model;
 
     fn tiny(cx: Cx) -> Result<Tensor> {
-        let sample = cx.input(&[1, 8, 8, 4])?;
-        let timestep = cx.input(&[1, 32])?;
-        let context = cx.input(&[1, 5, 32])?;
+        let sample = cx.input([1, 8, 8, 4])?;
+        let timestep = cx.input([1, 32])?;
+        let context = cx.input([1, 5, 32])?;
         unet(cx, &sample, &timestep, &context, &UnetConfig::tiny())
     }
 

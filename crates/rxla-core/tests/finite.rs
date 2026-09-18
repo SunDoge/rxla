@@ -14,9 +14,9 @@ fn finite_mask_preserves_shape() {
 fn real_finite_mask_and_count() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[8]).unwrap();
+    let x = g.input([8]).unwrap();
     let mask = x.is_finite_mask().unwrap();
-    let count = mask.sum(&[0], false).unwrap();
+    let count = mask.sum([0], false).unwrap();
     let exe = g.compile_many(&client, &[mask, count]).unwrap();
     for values in [
         [

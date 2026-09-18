@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bits
     );
     let graph = Tracer::default();
-    let x = graph.input(&[3, 2])?;
+    let x = graph.input([3, 2])?;
     let y = x.mul(&x)?;
     let dropped = Arc::new(AtomicBool::new(false));
     let owner = Owner {

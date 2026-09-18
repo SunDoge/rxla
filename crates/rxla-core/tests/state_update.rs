@@ -56,7 +56,7 @@ fn conditional_updates_validate_before_invoking_closure() {
     );
     for invalid in [
         graph.constant(&[1], &[1.]).unwrap(),
-        Tracer::default().constant(&[], &[1.]).unwrap(),
+        Tracer::default().constant([], [1.]).unwrap(),
     ] {
         assert!(
             graph
@@ -160,17 +160,17 @@ fn real_updates_are_recorded_once_and_errors_preserve_current_version() {
         .update(&counter, |old| old.wrapping_add_scalar(1))
         .unwrap();
     // Each error must preserve the already-recorded updates, not reset to inputs.
-    assert!(graph.update(&value, |old| old.reshape(&[2])).is_err());
+    assert!(graph.update(&value, |old| old.reshape([2])).is_err());
     assert!(
         graph
-            .update(&value, |_| Tracer::default().input(&[]))
+            .update(&value, |_| Tracer::default().input([]))
             .is_err()
     );
     let wrong = graph.constant(&[1], &[99.]).unwrap();
     assert!(graph.update(&value, |_| Ok(wrong)).is_err());
     assert!(
         graph
-            .update(&counter, |_| Tracer::default().input_i32(&[]))
+            .update(&counter, |_| Tracer::default().input_i32([]))
             .is_err()
     );
     let plan = graph.compile(&mut compiler, &[first, second]).unwrap();

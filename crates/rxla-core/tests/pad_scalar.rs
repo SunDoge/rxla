@@ -3,15 +3,15 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn scalar_padding_validates_graph_rank_and_widths() {
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
-    let fill = g.input(&[]).unwrap();
+    let x = g.input([2]).unwrap();
+    let fill = g.input([]).unwrap();
     assert_eq!(x.pad_with_scalar(&[[1, 2]], &fill).unwrap().shape(), [5]);
     assert!(
-        x.pad_with_scalar(&[[0, 0]], &g.input(&[1]).unwrap())
+        x.pad_with_scalar(&[[0, 0]], &g.input([1]).unwrap())
             .is_err()
     );
     assert!(
-        x.pad_with_scalar(&[[0, 0]], &Tracer::default().input(&[]).unwrap())
+        x.pad_with_scalar(&[[0, 0]], &Tracer::default().input([]).unwrap())
             .is_err()
     );
     for widths in [vec![], vec![[-1, 0]], vec![[i64::MAX, 0]]] {
@@ -24,17 +24,17 @@ fn scalar_padding_validates_graph_rank_and_widths() {
 fn real_runtime_fill_and_both_gradients_with_second_derivative() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
-    let fill = g.input(&[]).unwrap();
+    let x = g.input([2]).unwrap();
+    let fill = g.input([]).unwrap();
     let padded = x.pad_with_scalar(&[[1, 2]], &fill).unwrap();
-    let loss = padded.square().unwrap().sum(&[0], false).unwrap();
+    let loss = padded.square().unwrap().sum([0], false).unwrap();
     let gradients = loss.grad(&[x.clone(), fill.clone()]).unwrap();
     let second = gradients[1]
         .grad(std::slice::from_ref(&fill))
         .unwrap()
         .remove(0);
-    let weights = g.constant(&[5], &[1., 1e30, 1e30, 2., 3.]).unwrap();
-    let weighted = padded.mul(&weights).unwrap().sum(&[0], false).unwrap();
+    let weights = g.constant([5], [1., 1e30, 1e30, 2., 3.]).unwrap();
+    let weighted = padded.mul(&weights).unwrap().sum([0], false).unwrap();
     let border_gradient = weighted
         .grad(std::slice::from_ref(&fill))
         .unwrap()
@@ -69,11 +69,11 @@ fn real_empty_and_noop_padding_fill_gradients() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for (size, widths, expected) in [(0, [2, 1], 3.), (2, [0, 0], 0.)] {
         let g = Tracer::default();
-        let x = g.input(&[size]).unwrap();
-        let fill = g.input(&[]).unwrap();
+        let x = g.input([size]).unwrap();
+        let fill = g.input([]).unwrap();
         let y = x.pad_with_scalar(&[widths], &fill).unwrap();
         let gradient = y
-            .sum(&[0], false)
+            .sum([0], false)
             .unwrap()
             .grad(std::slice::from_ref(&fill))
             .unwrap()

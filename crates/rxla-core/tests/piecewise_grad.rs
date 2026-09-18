@@ -9,9 +9,9 @@ fn client() -> Client {
 fn real_minmax_broadcast_ties_and_shared_operands() {
     let client = client();
     let g = Tracer::default();
-    let a = g.input(&[2, 3]).unwrap();
-    let b = g.input(&[3]).unwrap();
-    let seed = g.input(&[2, 3]).unwrap();
+    let a = g.input([2, 3]).unwrap();
+    let b = g.input([3]).unwrap();
+    let seed = g.input([2, 3]).unwrap();
     let broadcast_b = b.broadcast_to(a.shape()).unwrap();
     let mut outputs = a
         .maximum(&broadcast_b)
@@ -60,8 +60,8 @@ fn real_minmax_broadcast_ties_and_shared_operands() {
 fn real_abs_clamp_and_nonfinite_conventions() {
     let client = client();
     let g = Tracer::default();
-    let x = g.input(&[8]).unwrap();
-    let seed = g.constant(&[8], &[2.; 8]).unwrap();
+    let x = g.input([8]).unwrap();
+    let seed = g.constant([8], [2.; 8]).unwrap();
     let mut outputs = x
         .abs()
         .unwrap()
@@ -88,9 +88,9 @@ fn real_abs_clamp_and_nonfinite_conventions() {
     assert_eq!(actual[2], [0.; 8]);
 
     let g = Tracer::default();
-    let a = g.input(&[6]).unwrap();
-    let b = g.input(&[6]).unwrap();
-    let seed = g.constant(&[6], &[2.; 6]).unwrap();
+    let a = g.input([6]).unwrap();
+    let b = g.input([6]).unwrap();
+    let seed = g.constant([6], [2.; 6]).unwrap();
     let mut roots = a
         .maximum(&b)
         .unwrap()
@@ -129,10 +129,10 @@ fn real_abs_clamp_and_nonfinite_conventions() {
 fn real_softplus_gradient_at_zero_and_smooth_second_derivative() {
     let client = client();
     let g = Tracer::default();
-    let x = g.input(&[7]).unwrap();
+    let x = g.input([7]).unwrap();
     let y = x.softplus().unwrap();
     let gradient = y
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()
@@ -161,21 +161,16 @@ fn real_softplus_gradient_at_zero_and_smooth_second_derivative() {
         );
     }
     let g = Tracer::default();
-    let x = g.input(&[3]).unwrap();
+    let x = g.input([3]).unwrap();
     let first = x
         .softplus()
         .unwrap()
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()
         .remove(0);
-    let second = first
-        .sum(&[0], false)
-        .unwrap()
-        .grad(&[x])
-        .unwrap()
-        .remove(0);
+    let second = first.sum([0], false).unwrap().grad(&[x]).unwrap().remove(0);
     let exe = g.compile_many(&client, &[second]).unwrap();
     let actual = exe.run_many(&[&[-3., 0., 3.]]).unwrap();
     for (actual, x) in actual[0].iter().zip([-3.0_f64, 0., 3.]) {

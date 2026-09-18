@@ -7,7 +7,7 @@ use rxla_core::{
 fn bounded_shape_survives_tensor_ir_and_elementwise_lowering() {
     let tracer = Tracer::new();
     let input = tracer
-        .input_shape(&[Dim::Bounded { upper: 8 }, Dim::Static(4)], DType::F32)
+        .input_shape([Dim::Bounded { upper: 8 }, Dim::Static(4)], DType::F32)
         .unwrap();
     assert_eq!(input.static_dim(0), None);
     assert_eq!(input.dim_bound(0), Some(8));
@@ -28,7 +28,7 @@ fn bounded_shape_survives_tensor_ir_and_elementwise_lowering() {
     assert_eq!(spec.bound(1), None);
 
     let invalid = Tracer::new()
-        .input_shape(&[Dim::Bounded { upper: 0 }], DType::F32)
+        .input_shape([Dim::Bounded { upper: 0 }], DType::F32)
         .err()
         .unwrap();
     assert!(matches!(
@@ -42,12 +42,12 @@ fn axis_transforms_keep_dynamic_bounds_attached_to_their_axes() {
     let tracer = Tracer::new();
     let input = tracer
         .input_shape(
-            &[Dim::Bounded { upper: 8 }, Dim::Static(1), Dim::Static(4)],
+            [Dim::Bounded { upper: 8 }, Dim::Static(1), Dim::Static(4)],
             DType::F32,
         )
         .unwrap();
 
-    let transposed = input.transpose(&[2, 0, 1]).unwrap();
+    let transposed = input.transpose([2, 0, 1]).unwrap();
     assert_eq!(transposed.shape(), [4, -1, 1]);
     assert_eq!(transposed.dim_bound(1), Some(8));
 
@@ -57,15 +57,15 @@ fn axis_transforms_keep_dynamic_bounds_attached_to_their_axes() {
     let restored = squeezed.unsqueeze(0).unwrap();
     assert_eq!(restored.shape(), [1, 4, -1]);
     assert_eq!(restored.dim_bound(2), Some(8));
-    let broadcast = squeezed.broadcast_in_dim(&[2, 4, -1], &[1, 2]).unwrap();
+    let broadcast = squeezed.broadcast_in_dim([2, 4, -1], [1, 2]).unwrap();
     assert_eq!(broadcast.shape(), [2, 4, -1]);
     assert_eq!(broadcast.dim_bound(2), Some(8));
-    assert!(squeezed.broadcast_in_dim(&[-1, 4, -1], &[1, 2]).is_err());
+    assert!(squeezed.broadcast_in_dim([-1, 4, -1], [1, 2]).is_err());
 
-    let reduced = restored.sum(&[1], false).unwrap();
+    let reduced = restored.sum([1], false).unwrap();
     assert_eq!(reduced.shape(), [1, -1]);
     assert_eq!(reduced.dim_bound(1), Some(8));
-    let keepdims = restored.sum(&[1], true).unwrap();
+    let keepdims = restored.sum([1], true).unwrap();
     assert_eq!(keepdims.shape(), [1, 1, -1]);
     assert_eq!(keepdims.dim_bound(2), Some(8));
 
@@ -87,9 +87,9 @@ fn axis_transforms_keep_dynamic_bounds_attached_to_their_axes() {
 fn concatenate_and_stack_infer_bounds_from_all_operands() {
     let tracer = Tracer::new();
     let dynamic = tracer
-        .input_shape(&[Dim::Bounded { upper: 8 }, Dim::Static(4)], DType::F32)
+        .input_shape([Dim::Bounded { upper: 8 }, Dim::Static(4)], DType::F32)
         .unwrap();
-    let fixed = tracer.input(&[2, 4]).unwrap();
+    let fixed = tracer.input([2, 4]).unwrap();
     let concatenated = Tensor::concatenate(&[dynamic.clone(), fixed], 0).unwrap();
     assert_eq!(concatenated.shape(), [-1, 4]);
     assert_eq!(concatenated.dim_bound(0), Some(10));
@@ -99,7 +99,7 @@ fn concatenate_and_stack_infer_bounds_from_all_operands() {
     assert_eq!(stacked.dim_bound(1), Some(8));
 
     let incompatible = tracer
-        .input_shape(&[Dim::Static(2), Dim::Bounded { upper: 5 }], DType::F32)
+        .input_shape([Dim::Static(2), Dim::Bounded { upper: 5 }], DType::F32)
         .unwrap();
     assert!(Tensor::concatenate(&[concatenated.clone(), incompatible], 0).is_err());
 
@@ -114,7 +114,7 @@ fn attention_preserves_bounded_batch_and_sequence_axes() {
     let tracer = Tracer::new();
     let query = tracer
         .input_shape(
-            &[
+            [
                 Dim::Bounded { upper: 4 },
                 Dim::Static(2),
                 Dim::Bounded { upper: 8 },
@@ -125,7 +125,7 @@ fn attention_preserves_bounded_batch_and_sequence_axes() {
         .unwrap();
     let key = tracer
         .input_shape(
-            &[
+            [
                 Dim::Static(1),
                 Dim::Static(2),
                 Dim::Bounded { upper: 16 },
@@ -136,7 +136,7 @@ fn attention_preserves_bounded_batch_and_sequence_axes() {
         .unwrap();
     let value = tracer
         .input_shape(
-            &[
+            [
                 Dim::Static(1),
                 Dim::Static(2),
                 Dim::Bounded { upper: 16 },
@@ -147,7 +147,7 @@ fn attention_preserves_bounded_batch_and_sequence_axes() {
         .unwrap();
     let mask = tracer
         .input_shape(
-            &[Dim::Bounded { upper: 8 }, Dim::Bounded { upper: 16 }],
+            [Dim::Bounded { upper: 8 }, Dim::Bounded { upper: 16 }],
             DType::F32,
         )
         .unwrap();
@@ -174,7 +174,7 @@ fn attention_preserves_bounded_batch_and_sequence_axes() {
 
     let incompatible_key = tracer
         .input_shape(
-            &[
+            [
                 Dim::Static(1),
                 Dim::Static(2),
                 Dim::Bounded { upper: 12 },
@@ -195,7 +195,7 @@ fn vision_ops_preserve_a_bounded_batch_axis() {
     let tracer = Tracer::new();
     let input = tracer
         .input_shape(
-            &[
+            [
                 Dim::Bounded { upper: 16 },
                 Dim::Static(8),
                 Dim::Static(8),
@@ -204,7 +204,7 @@ fn vision_ops_preserve_a_bounded_batch_axis() {
             DType::F32,
         )
         .unwrap();
-    let kernel = tracer.input(&[3, 3, 3, 4]).unwrap();
+    let kernel = tracer.input([3, 3, 3, 4]).unwrap();
     let convolution = input.conv2d(&kernel, Conv2dOptions::default()).unwrap();
     assert_eq!(convolution.shape(), [-1, 6, 6, 4]);
     assert_eq!(convolution.dim_bound(0), Some(16));
@@ -216,7 +216,7 @@ fn vision_ops_preserve_a_bounded_batch_axis() {
         assert_eq!(output.dim_bound(0), Some(16));
     }
 
-    let transpose_kernel = tracer.input(&[3, 3, 4, 3]).unwrap();
+    let transpose_kernel = tracer.input([3, 3, 4, 3]).unwrap();
     let transposed = input
         .conv_transpose2d(&transpose_kernel, ConvTranspose2dOptions::default())
         .unwrap();
@@ -225,7 +225,7 @@ fn vision_ops_preserve_a_bounded_batch_axis() {
 
     let dynamic_spatial = tracer
         .input_shape(
-            &[
+            [
                 Dim::Static(1),
                 Dim::Bounded { upper: 8 },
                 Dim::Static(8),
@@ -259,7 +259,7 @@ fn matmul_broadcasts_bounded_batch_axes_into_unbatched_weights() {
     let tracer = Tracer::new();
     let activations = tracer
         .input_shape(
-            &[
+            [
                 Dim::Bounded { upper: 16 },
                 Dim::Bounded { upper: 8 },
                 Dim::Static(32),
@@ -267,13 +267,13 @@ fn matmul_broadcasts_bounded_batch_axes_into_unbatched_weights() {
             DType::F32,
         )
         .unwrap();
-    let weights = tracer.input(&[32, 64]).unwrap();
+    let weights = tracer.input([32, 64]).unwrap();
     let output = activations.matmul(&weights).unwrap();
     assert_eq!(output.shape(), [-1, -1, 64]);
     assert_eq!(output.dim_bound(0), Some(16));
     assert_eq!(output.dim_bound(1), Some(8));
 
-    let batched_weights = tracer.input(&[1, 32, 64]).unwrap();
+    let batched_weights = tracer.input([1, 32, 64]).unwrap();
     let broadcast_output = activations.matmul(&batched_weights).unwrap();
     assert_eq!(broadcast_output.shape(), [-1, -1, 64]);
     assert_eq!(broadcast_output.dim_bound(0), Some(16));
@@ -281,7 +281,7 @@ fn matmul_broadcasts_bounded_batch_axes_into_unbatched_weights() {
 
     let incompatible = tracer
         .input_shape(
-            &[Dim::Bounded { upper: 12 }, Dim::Static(32), Dim::Static(64)],
+            [Dim::Bounded { upper: 12 }, Dim::Static(32), Dim::Static(64)],
             DType::F32,
         )
         .unwrap();
@@ -298,7 +298,7 @@ fn matmul_broadcasts_bounded_batch_axes_into_unbatched_weights() {
 fn xla_cpu_accepts_bounded_dynamic_stablehlo() {
     let tracer = Tracer::new();
     let input = tracer
-        .input_shape(&[Dim::Bounded { upper: 8 }], DType::F32)
+        .input_shape([Dim::Bounded { upper: 8 }], DType::F32)
         .unwrap();
     assert_eq!(input.static_dim(0), None);
     assert_eq!(input.dim_bound(0), Some(8));

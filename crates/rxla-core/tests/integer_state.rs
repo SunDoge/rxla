@@ -141,8 +141,8 @@ fn real_mixed_outputs_survive_executable_restoration() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let g = Tracer::default();
-    let indices = g.input_i32(&[2]).unwrap();
-    let x = g.input(&[2]).unwrap();
+    let indices = g.input_i32([2]).unwrap();
+    let x = g.input([2]).unwrap();
     let outputs = [
         indices.wrapping_add_scalar(1).unwrap(),
         x.add_scalar(2.).unwrap(),

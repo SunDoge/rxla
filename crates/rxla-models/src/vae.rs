@@ -138,13 +138,13 @@ fn attention(cx: Cx, input: &Tensor, groups: i64, epsilon: f32) -> Result<Tensor
         .group_norm(groups)
         .epsilon(epsilon)
         .apply(input)?
-        .reshape(&[*batch, height * width, *channels])?;
+        .reshape([*batch, height * width, *channels])?;
     let q = hidden.apply(&cx.named_layer("to_q", Linear::new(*channels))?)?;
     let k = cx
         .scope("to_k")?
         .linear(*channels)
         .apply(&hidden)?
-        .transpose(&[0, 2, 1])?;
+        .transpose([0, 2, 1])?;
     let v = hidden.apply(&cx.named_layer("to_v", Linear::new(*channels))?)?;
     let attended = q
         .matmul(&k)?
@@ -277,24 +277,22 @@ pub fn flux2_autoencoder_decoder(
         });
     }
     let cx = cx.with_parameter_storage_dtype(DType::BF16)?;
-    let grid = tokens.reshape(&[*batch, height, width, 128])?;
+    let grid = tokens.reshape([*batch, height, width, 128])?;
     let bn = cx.scope("bn")?;
-    let mean = bn.param("running_mean", &[128])?;
-    let variance = bn.param("running_var", &[128])?;
+    let mean = bn.param("running_mean", [128])?;
+    let variance = bn.param("running_var", [128])?;
     let scale = variance.add_scalar(1e-4)?.sqrt()?;
     let normalized_shape = [1, 1, 1, 128];
-    let mean = mean
-        .reshape(&normalized_shape)?
-        .broadcast_to(grid.shape())?;
+    let mean = mean.reshape(normalized_shape)?.broadcast_to(grid.shape())?;
     let scale = scale
-        .reshape(&normalized_shape)?
+        .reshape(normalized_shape)?
         .broadcast_to(grid.shape())?;
     let latent = grid
         .mul(&scale)?
         .add(&mean)?
-        .reshape(&[*batch, height, width, 32, 2, 2])?
-        .transpose(&[0, 1, 4, 2, 5, 3])?
-        .reshape(&[*batch, height * 2, width * 2, 32])?;
+        .reshape([*batch, height, width, 32, 2, 2])?
+        .transpose([0, 1, 4, 2, 5, 3])?
+        .reshape([*batch, height * 2, width * 2, 32])?;
     autoencoder_kl_decoder(cx, &latent, &AutoencoderKlDecoderConfig::flux2())
 }
 
@@ -304,7 +302,7 @@ mod tests {
     use rxla_nn::Model;
 
     fn tiny(cx: Cx) -> Result<Tensor> {
-        let latent = cx.input(&[1, 8, 6, 4])?;
+        let latent = cx.input([1, 8, 6, 4])?;
         autoencoder_kl_decoder(cx, &latent, &AutoencoderKlDecoderConfig::tiny())
     }
 
@@ -325,7 +323,7 @@ mod tests {
     #[test]
     fn stable_diffusion_decoder_has_expected_shape() {
         let model = Model::new(|cx: Cx| {
-            let latent = cx.input(&[1, 8, 8, 4])?;
+            let latent = cx.input([1, 8, 8, 4])?;
             autoencoder_kl_decoder(cx, &latent, &AutoencoderKlDecoderConfig::stable_diffusion())
         })
         .trace()
@@ -336,7 +334,7 @@ mod tests {
     #[test]
     fn flux2_tokens_decode_to_sixteen_times_larger_image() {
         let model = Model::new(|cx: Cx| {
-            let tokens = cx.input(&[1, 12, 128])?;
+            let tokens = cx.input([1, 12, 128])?;
             flux2_autoencoder_decoder(cx, &tokens, 3, 4)
         })
         .trace()

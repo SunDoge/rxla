@@ -3,18 +3,18 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn flatten_checks_ranges_and_dimension_overflow_without_plugin() {
     let g = Tracer::default();
-    let x = g.input(&[2, 3, 4]).unwrap();
-    let ids = g.input_i32(&[2, 3, 4]).unwrap();
+    let x = g.input([2, 3, 4]).unwrap();
+    let ids = g.input_i32([2, 3, 4]).unwrap();
     assert_eq!(x.flatten(1, 2).unwrap().shape(), [2, 12]);
     assert_eq!(ids.flatten(0, 1).unwrap().shape(), [6, 4]);
     for (start, end) in [(2, 1), (0, 3), (usize::MAX, usize::MAX)] {
         assert!(x.flatten(start, end).is_err());
         assert!(ids.flatten(start, end).is_err());
     }
-    let scalar = g.input(&[]).unwrap();
+    let scalar = g.input([]).unwrap();
     assert_eq!(scalar.flatten(0, 0).unwrap().shape(), [1]);
     assert!(scalar.flatten(0, 1).is_err());
-    let huge_empty = g.input(&[0, i64::MAX, 2]).unwrap();
+    let huge_empty = g.input([0, i64::MAX, 2]).unwrap();
     assert!(huge_empty.flatten(1, 2).is_err());
     assert_eq!(huge_empty.flatten(0, 2).unwrap().shape(), [0]);
 }

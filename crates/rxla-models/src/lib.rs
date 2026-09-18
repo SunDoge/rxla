@@ -203,7 +203,7 @@ pub fn resnet2d(
         .scope("time_emb_proj")?
         .linear(options.out_channels)
         .apply(&timestep_embedding.silu()?)?
-        .reshape(&[timestep_embedding.shape()[0], 1, 1, options.out_channels])?
+        .reshape([timestep_embedding.shape()[0], 1, 1, options.out_channels])?
         .broadcast_to(hidden.shape())?;
     hidden = hidden.add(&time)?;
     let normalized = cx
@@ -278,26 +278,26 @@ fn cross_attention(cx: Cx, query: &Tensor, context: &Tensor, head_dim: i64) -> R
         .linear(*width)
         .bias(false)
         .apply(query)?
-        .reshape(&[*batch, *query_length, heads, head_dim])?
-        .transpose(&[0, 2, 1, 3])?;
+        .reshape([*batch, *query_length, heads, head_dim])?
+        .transpose([0, 2, 1, 3])?;
     let k = cx
         .scope("to_k")?
         .linear(*width)
         .bias(false)
         .apply(context)?
-        .reshape(&[*batch, context_length, heads, head_dim])?
-        .transpose(&[0, 2, 1, 3])?;
+        .reshape([*batch, context_length, heads, head_dim])?
+        .transpose([0, 2, 1, 3])?;
     let v = cx
         .scope("to_v")?
         .linear(*width)
         .bias(false)
         .apply(context)?
-        .reshape(&[*batch, context_length, heads, head_dim])?
-        .transpose(&[0, 2, 1, 3])?;
+        .reshape([*batch, context_length, heads, head_dim])?
+        .transpose([0, 2, 1, 3])?;
     let hidden = q
         .scaled_dot_product_attention(&k, &v, None, None)?
-        .transpose(&[0, 2, 1, 3])?
-        .reshape(&[*batch, *query_length, *width])?;
+        .transpose([0, 2, 1, 3])?
+        .reshape([*batch, *query_length, *width])?;
     Ok(cx
         .scope("to_out")?
         .scope("0")?
@@ -372,12 +372,12 @@ pub fn spatial_transformer(
         .scope("proj_in")?
         .conv2d(*channels, [1, 1])
         .apply(&normalized)?
-        .reshape(&[*batch, height * width, *channels])?;
+        .reshape([*batch, height * width, *channels])?;
     for layer in 0..options.layers {
         let scope = cx.scope_path(["transformer_blocks".to_owned(), layer.to_string()])?;
         hidden = transformer_block(scope, &hidden, context, options.head_dim)?;
     }
-    let hidden = hidden.reshape(&[*batch, *height, *width, *channels])?;
+    let hidden = hidden.reshape([*batch, *height, *width, *channels])?;
     Ok(cx
         .scope("proj_out")?
         .conv2d(*channels, [1, 1])
@@ -391,8 +391,8 @@ mod tests {
     use rxla_nn::Model;
 
     fn model(cx: Cx) -> Result<Tensor> {
-        let image = cx.input(&[2, 16, 12, 32])?;
-        let timestep = cx.input(&[2, 128])?;
+        let image = cx.input([2, 16, 12, 32])?;
+        let timestep = cx.input([2, 128])?;
         let scope = cx.scope("block")?;
         resnet2d(scope, &image, &timestep, Resnet2dOptions::new(64))
     }
@@ -400,7 +400,7 @@ mod tests {
     #[test]
     fn timestep_mlp_infers_input_width() {
         let model = Model::new(|cx: Cx| {
-            let input = cx.input(&[2, 32])?;
+            let input = cx.input([2, 32])?;
             let scope = cx.scope("time_embedding")?;
             timestep_embedding(scope, &input, 128)
         })
@@ -446,8 +446,8 @@ mod tests {
     #[test]
     fn equal_width_resnet_omits_shortcut_parameters() {
         let model = Model::new(|cx: Cx| {
-            let image = cx.input(&[1, 8, 8, 32])?;
-            let timestep = cx.input(&[1, 128])?;
+            let image = cx.input([1, 8, 8, 32])?;
+            let timestep = cx.input([1, 128])?;
             resnet2d(cx, &image, &timestep, Resnet2dOptions::new(32))
         })
         .trace()
@@ -461,8 +461,8 @@ mod tests {
     #[test]
     fn spatial_transformer_infers_width_and_diffusers_paths() {
         let model = |cx: Cx| {
-            let image = cx.input(&[2, 8, 6, 64])?;
-            let context = cx.input(&[2, 77, 32])?;
+            let image = cx.input([2, 8, 6, 64])?;
+            let context = cx.input([2, 77, 32])?;
             spatial_transformer(cx, &image, &context, SpatialTransformerOptions::new(8))
         };
         let model = Model::new(model).trace().unwrap();

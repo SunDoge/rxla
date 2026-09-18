@@ -31,7 +31,7 @@ impl Tensor {
         }
         // Counts depend only on spatial shape. Do not materialize one mask per
         // batch/channel: XLA can fold this broadcast + reduce-window subgraph.
-        let ones = self.graph().constant(&[], &[1.])?.broadcast_to(&[
+        let ones = self.graph().constant(&[], &[1.])?.broadcast_to([
             1,
             self.shape[1],
             self.shape[2],
@@ -58,9 +58,9 @@ impl Tensor {
             .checked_mul(input_shape[3])
             .ok_or_else(|| err("pool gradient batch/channel size overflow"))?;
         let channels_first =
-            self.transpose(&[0, 3, 1, 2])?
-                .reshape(&[batch, self.shape[1], self.shape[2], 1])?;
-        let kernel = self.graph().constant(&[], &[1.])?.broadcast_to(&[
+            self.transpose([0, 3, 1, 2])?
+                .reshape([batch, self.shape[1], self.shape[2], 1])?;
+        let kernel = self.graph().constant(&[], &[1.])?.broadcast_to([
             options.window[0],
             options.window[1],
             1,
@@ -84,13 +84,13 @@ impl Tensor {
                     ..Default::default()
                 },
             )?
-            .reshape(&[
+            .reshape([
                 input_shape[0],
                 input_shape[3],
                 input_shape[1],
                 input_shape[2],
             ])?
-            .transpose(&[0, 2, 3, 1])
+            .transpose([0, 2, 3, 1])
     }
 
     fn pool2d_shape(&self, options: Pool2dOptions) -> Result<TensorType> {

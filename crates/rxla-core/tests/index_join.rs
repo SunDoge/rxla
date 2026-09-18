@@ -53,23 +53,23 @@ fn real_unequal_integer_fragments_with_empty_part() {
 #[test]
 fn integer_join_validation() {
     let g = Tracer::default();
-    let a = g.input_i32(&[2, 3]).unwrap();
+    let a = g.input_i32([2, 3]).unwrap();
     assert!(Tensor::stack(&[], 0).is_err());
     assert!(Tensor::concatenate(&[], 0).is_err());
     assert!(Tensor::stack(std::slice::from_ref(&a), 3).is_err());
     assert!(Tensor::concatenate(std::slice::from_ref(&a), 2).is_err());
     for b in [
-        g.input_i32(&[2, 4]).unwrap(),
-        g.input_i32(&[2]).unwrap(),
-        Tracer::default().input_i32(&[2, 3]).unwrap(),
+        g.input_i32([2, 4]).unwrap(),
+        g.input_i32([2]).unwrap(),
+        Tracer::default().input_i32([2, 3]).unwrap(),
     ] {
         assert!(Tensor::stack(&[a.clone(), b.clone()], 0).is_err());
         assert!(Tensor::concatenate(&[a.clone(), b], 0).is_err());
     }
-    let scalar = g.input_i32(&[]).unwrap();
+    let scalar = g.input_i32([]).unwrap();
     assert!(Tensor::concatenate(&[scalar], 0).is_err());
-    let huge = g.input_i32(&[i64::MAX, 0]).unwrap();
-    let small = g.input_i32(&[1, 0]).unwrap();
+    let huge = g.input_i32([i64::MAX, 0]).unwrap();
+    let small = g.input_i32([1, 0]).unwrap();
     assert!(Tensor::concatenate(&[huge, small], 0).is_err());
 }
 

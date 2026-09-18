@@ -3,14 +3,14 @@ use rxla_core::{CacheLimits, Client, Compiler, KvCache, StateGraph, Tracer};
 #[test]
 fn mask_shape_validation() {
     let g = Tracer::default();
-    let x = g.input_i32(&[2, 1]).unwrap();
-    assert_eq!(x.broadcast_to(&[2, 3]).unwrap().shape(), [2, 3]);
-    assert!(x.broadcast_to(&[3]).is_err());
-    assert!(x.broadcast_to(&[3, 3]).is_err());
-    assert!(x.broadcast_to(&[-1, 3]).is_err());
+    let x = g.input_i32([2, 1]).unwrap();
+    assert_eq!(x.broadcast_to([2, 3]).unwrap().shape(), [2, 3]);
+    assert!(x.broadcast_to([3]).is_err());
+    assert!(x.broadcast_to([3, 3]).is_err());
+    assert!(x.broadcast_to([-1, 3]).is_err());
     assert!(x.le_mask(&g.input_i32_scalar().unwrap()).is_err());
     assert!(
-        x.le_mask(&Tracer::default().input_i32(&[2, 1]).unwrap())
+        x.le_mask(&Tracer::default().input_i32([2, 1]).unwrap())
             .is_err()
     );
 }
@@ -20,10 +20,10 @@ fn mask_shape_validation() {
 fn real_signed_masks_and_integer_broadcast() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let values = g.constant_i32(&[4], &[i32::MIN, -1, 0, i32::MAX]).unwrap();
+    let values = g.constant_i32([4], [i32::MIN, -1, 0, i32::MAX]).unwrap();
     let threshold = g.input_i32_scalar().unwrap();
     let mask = values
-        .le_mask(&threshold.broadcast_to(&[4]).unwrap())
+        .le_mask(&threshold.broadcast_to([4]).unwrap())
         .unwrap();
     let exponent = mask.log().unwrap().exp().unwrap();
     let exe = g.compile_many(&client, &[mask, exponent]).unwrap();
@@ -33,14 +33,14 @@ fn real_signed_masks_and_integer_broadcast() {
     }
     let h = Tracer::default();
     let x = h
-        .constant_i32(&[2, 1], &[1, 4])
+        .constant_i32([2, 1], [1, 4])
         .unwrap()
-        .broadcast_to(&[2, 3])
+        .broadcast_to([2, 3])
         .unwrap();
     let y = h
-        .constant_i32(&[3], &[0, 2, 5])
+        .constant_i32([3], [0, 2, 5])
         .unwrap()
-        .broadcast_to(&[2, 3])
+        .broadcast_to([2, 3])
         .unwrap();
     assert_eq!(
         h.compile(&client, &x.le_mask(&y).unwrap())
@@ -69,14 +69,14 @@ fn real_stateful_masked_decode_matches_prefix_attention() {
     let (next_k, next_v) = cache.update_at(&mut g, &k, &v, &starts).unwrap();
     let positions = g.constant_i32(&[4], &[0, 1, 2, 3]).unwrap();
     let mask = positions
-        .le_mask(&position.broadcast_to(&[4]).unwrap())
+        .le_mask(&position.broadcast_to([4]).unwrap())
         .unwrap()
         .log()
         .unwrap()
-        .broadcast_to(&[2, 1, 4])
+        .broadcast_to([2, 1, 4])
         .unwrap();
     let probabilities = q
-        .matmul(&next_k.transpose(&[0, 2, 1]).unwrap())
+        .matmul(&next_k.transpose([0, 2, 1]).unwrap())
         .unwrap()
         .mul_scalar(1. / 2f32.sqrt())
         .unwrap()

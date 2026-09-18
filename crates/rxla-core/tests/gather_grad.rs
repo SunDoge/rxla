@@ -5,13 +5,13 @@ use rxla_core::{Client, Tracer};
 fn real_embedding_nonlinear_loss_accumulates_repeated_rows() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let table = g.input(&[4, 2]).unwrap();
-    let ids = g.input_i32(&[3]).unwrap();
+    let table = g.input([4, 2]).unwrap();
+    let ids = g.input_i32([3]).unwrap();
     let embeddings = table.take(&ids, 0).unwrap();
     let loss = embeddings
         .mul(&embeddings)
         .unwrap()
-        .sum(&[0, 1], false)
+        .sum([0, 1], false)
         .unwrap();
     let grad = loss.grad(&[table]).unwrap();
     let exe = g.compile_many(&client, &grad).unwrap();
@@ -32,8 +32,8 @@ fn real_embedding_nonlinear_loss_accumulates_repeated_rows() {
 fn real_indexed_log_probability_loss_gradient() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let logits = g.input(&[2, 3]).unwrap();
-    let labels = g.input_i32(&[2, 1]).unwrap();
+    let logits = g.input([2, 3]).unwrap();
+    let labels = g.input_i32([2, 1]).unwrap();
     let loss = logits
         .log_softmax(1)
         .unwrap()
@@ -41,7 +41,7 @@ fn real_indexed_log_probability_loss_gradient() {
         .unwrap()
         .neg()
         .unwrap()
-        .mean(&[0, 1], false)
+        .mean([0, 1], false)
         .unwrap();
     let grad = loss.grad(&[logits]).unwrap();
     let exe = g.compile_many(&client, &grad).unwrap();
@@ -74,7 +74,7 @@ fn real_take_grad_all_axes_multidimensional_repeated_and_clamped_indices() {
     for axis in 0..3 {
         for index_shape in [vec![], vec![2, 2], vec![0]] {
             let g = Tracer::default();
-            let x = g.input(&shape).unwrap();
+            let x = g.input(shape).unwrap();
             let ids = g.input_i32(&index_shape).unwrap();
             let selected = x.take(&ids, axis).unwrap();
             let weights = g.input(selected.shape()).unwrap();
@@ -122,14 +122,14 @@ fn real_take_along_axis_grad_all_axes_and_empty_batches() {
         let mut index_shape = shape;
         index_shape[axis] = 5;
         let g = Tracer::default();
-        let x = g.input(&shape).unwrap();
-        let ids = g.input_i32(&index_shape).unwrap();
-        let weights = g.input(&index_shape).unwrap();
+        let x = g.input(shape).unwrap();
+        let ids = g.input_i32(index_shape).unwrap();
+        let weights = g.input(index_shape).unwrap();
         let y = x.take_along_axis(&ids, axis).unwrap();
         let grad = y
             .mul(&weights)
             .unwrap()
-            .sum(&[0, 1, 2], false)
+            .sum([0, 1, 2], false)
             .unwrap()
             .grad(&[x])
             .unwrap();
@@ -160,12 +160,12 @@ fn real_take_along_axis_grad_all_axes_and_empty_batches() {
         );
     }
     let g = Tracer::default();
-    let x = g.input(&[0, 3]).unwrap();
-    let ids = g.input_i32(&[0, 2]).unwrap();
+    let x = g.input([0, 3]).unwrap();
+    let ids = g.input_i32([0, 2]).unwrap();
     let grad = x
         .take_along_axis(&ids, 1)
         .unwrap()
-        .sum(&[0, 1], false)
+        .sum([0, 1], false)
         .unwrap()
         .grad(&[x])
         .unwrap();

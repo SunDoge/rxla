@@ -145,8 +145,8 @@ impl BatchNormUpdate {
     pub fn finite_mask(&self) -> Result<Tensor> {
         self.proposed[0]
             .is_finite_mask()?
-            .min(&[0], false)?
-            .mul(&self.proposed[1].is_finite_mask()?.min(&[0], false)?)
+            .min([0], false)?
+            .mul(&self.proposed[1].is_finite_mask()?.min([0], false)?)
     }
 
     /// Commit without a finite guard, preserving update() semantics.

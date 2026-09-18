@@ -42,18 +42,18 @@ fn real_mqa_gqa_mha_gradients_match_independent_f64_differences() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for kv_heads in [1, 2, 4] {
         let g = Tracer::default();
-        let q = g.input(&[2, 4, 2, 2]).unwrap();
-        let k = g.input(&[2, kv_heads as i64, 3, 2]).unwrap();
-        let v = g.input(&[2, kv_heads as i64, 3, 3]).unwrap();
-        let mask = g.input(&[1, 4, 2, 3]).unwrap();
+        let q = g.input([2, 4, 2, 2]).unwrap();
+        let k = g.input([2, kv_heads as i64, 3, 2]).unwrap();
+        let v = g.input([2, kv_heads as i64, 3, 3]).unwrap();
+        let mask = g.input([1, 4, 2, 3]).unwrap();
         let weights: Vec<_> = (0..48).map(|i| ((i * 7 % 17) as f32 - 8.) / 16.).collect();
         let output = q
             .grouped_query_attention(&k, &v, Some(&mask), Some(0.7))
             .unwrap();
         let loss = output
-            .mul(&g.constant(&[2, 4, 2, 3], &weights).unwrap())
+            .mul(&g.constant([2, 4, 2, 3], &weights).unwrap())
             .unwrap()
-            .sum(&[0, 1, 2, 3], false)
+            .sum([0, 1, 2, 3], false)
             .unwrap();
         let mut roots = vec![loss.clone()];
         roots.extend(loss.grad(&[q, k, v, mask]).unwrap());

@@ -3,7 +3,7 @@ use rxla_core::{Client, Pool2dOptions, Tracer};
 #[test]
 fn pooling_shape_validation() {
     let g = Tracer::default();
-    let x = g.input(&[2, 5, 7, 3]).unwrap();
+    let x = g.input([2, 5, 7, 3]).unwrap();
     assert_eq!(
         x.max_pool2d(Pool2dOptions::default()).unwrap().shape(),
         [2, 2, 3, 3]
@@ -31,7 +31,7 @@ fn pooling_shape_validation() {
         assert!(x.avg_pool2d(options, false).is_err());
     }
     assert!(
-        g.input(&[2, 3])
+        g.input([2, 3])
             .unwrap()
             .max_pool2d(Pool2dOptions::default())
             .is_err()
@@ -76,7 +76,7 @@ fn real_average_pooling_matches_f64_window_reference() {
         },
     ] {
         let graph = Tracer::default();
-        let x = graph.input(&shape).unwrap();
+        let x = graph.input(shape).unwrap();
         let included = x.avg_pool2d(options, true).unwrap();
         let excluded = x.avg_pool2d(options, false).unwrap();
         let dims = included.shape().to_vec();
@@ -128,7 +128,7 @@ fn real_average_pooling_matches_f64_window_reference() {
     }
     for shape in [[0, 3, 4, 2], [2, 3, 4, 0]] {
         let graph = Tracer::default();
-        let x = graph.input(&shape).unwrap();
+        let x = graph.input(shape).unwrap();
         let y = x.avg_pool2d(Pool2dOptions::default(), false).unwrap();
         assert!(
             graph
@@ -171,7 +171,7 @@ fn real_pooling_matches_window_reference() {
         },
     ] {
         let g = Tracer::default();
-        let x = g.input(&shape).unwrap();
+        let x = g.input(shape).unwrap();
         let pooled = x.max_pool2d(options).unwrap();
         let dims = pooled.shape();
         let mut expected = Vec::new();

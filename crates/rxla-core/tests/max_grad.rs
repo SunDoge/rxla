@@ -11,7 +11,7 @@ fn real_max_grad_axes_keepdims_and_equal_winner_sharing() {
     for axes in [vec![], vec![0], vec![1], vec![2], vec![2, 0], vec![0, 1, 2]] {
         for keepdims in [false, true] {
             let g = Tracer::default();
-            let x = g.input(&[2, 3, 2]).unwrap();
+            let x = g.input([2, 3, 2]).unwrap();
             let y = x.max(&axes, keepdims).unwrap();
             let seed = g.input(y.shape()).unwrap();
             let dx = y.vjp(std::slice::from_ref(&x), &seed).unwrap().remove(0);
@@ -73,9 +73,9 @@ fn real_max_grad_axes_keepdims_and_equal_winner_sharing() {
 fn real_max_grad_nonfinite_empty_and_higher_order() {
     let client = client();
     let g = Tracer::default();
-    let x = g.input(&[4, 3]).unwrap();
-    let y = x.max(&[1], false).unwrap();
-    let seed = g.constant(&[4], &[6., 6., 6., 6.]).unwrap();
+    let x = g.input([4, 3]).unwrap();
+    let y = x.max([1], false).unwrap();
+    let seed = g.constant([4], [6., 6., 6., 6.]).unwrap();
     let dx = y.vjp(&[x], &seed).unwrap().remove(0);
     let exe = g.compile_many(&client, &[y, dx]).unwrap();
     let actual = exe
@@ -120,15 +120,10 @@ fn real_max_grad_nonfinite_empty_and_higher_order() {
     }
 
     let g = Tracer::default();
-    let x = g.input(&[3]).unwrap();
-    let loss = x.max(&[0], false).unwrap().square().unwrap();
+    let x = g.input([3]).unwrap();
+    let loss = x.max([0], false).unwrap().square().unwrap();
     let first = loss.grad(std::slice::from_ref(&x)).unwrap().remove(0);
-    let second = first
-        .sum(&[0], false)
-        .unwrap()
-        .grad(&[x])
-        .unwrap()
-        .remove(0);
+    let second = first.sum([0], false).unwrap().grad(&[x]).unwrap().remove(0);
     let exe = g.compile_many(&client, &[first, second]).unwrap();
     assert_eq!(
         exe.run_many(&[&[3., 3., 1.]]).unwrap(),

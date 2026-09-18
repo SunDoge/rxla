@@ -9,7 +9,7 @@ fn real_gather_polynomial_derivatives_with_runtime_repeated_clamped_indices() {
         for batched in [false, true] {
             for empty in [false, true] {
                 let g = Tracer::default();
-                let x = g.input(&shape).unwrap();
+                let x = g.input(shape).unwrap();
                 let mut index_shape = if batched { shape.to_vec() } else { vec![2, 2] };
                 if batched {
                     index_shape[axis] = if empty { 0 } else { 4 };

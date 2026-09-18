@@ -6,15 +6,15 @@ fn real_rotary_composite_gradients_match_independent_formula() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for layout in [RotaryLayout::SplitHalf, RotaryLayout::Interleaved] {
         let g = Tracer::default();
-        let x = g.input(&[2, 4]).unwrap();
-        let cos = g.input(&[2]).unwrap();
-        let sin = g.input(&[2]).unwrap();
-        let weights = g.input(&[2, 4]).unwrap();
+        let x = g.input([2, 4]).unwrap();
+        let cos = g.input([2]).unwrap();
+        let sin = g.input([2]).unwrap();
+        let weights = g.input([2, 4]).unwrap();
         let output = x.rotary_embedding(&cos, &sin, layout).unwrap();
         let grads = output
             .mul(&weights)
             .unwrap()
-            .sum(&[0, 1], false)
+            .sum([0, 1], false)
             .unwrap()
             .grad(&[x, cos, sin])
             .unwrap();
@@ -57,10 +57,10 @@ fn real_strided_slice_gradient_inserts_zeros() {
         ([4, 5], [5, 6], [99, 99]),
     ] {
         let g = Tracer::default();
-        let x = g.input(&[5, 6]).unwrap();
+        let x = g.input([5, 6]).unwrap();
         let sliced = x.slice(&starts, &limits, &strides).unwrap();
         let weights = g.input(sliced.shape()).unwrap();
-        let loss = sliced.mul(&weights).unwrap().sum(&[0, 1], false).unwrap();
+        let loss = sliced.mul(&weights).unwrap().sum([0, 1], false).unwrap();
         let grad = loss.grad(&[x]).unwrap();
         let exe = g.compile_many(&client, &grad).unwrap();
         let count = sliced.shape().iter().product::<i64>() as usize;
@@ -83,14 +83,14 @@ fn real_concat_pad_split_gradients_accumulate_shared_inputs() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for axis in [0, 1] {
         let g = Tracer::default();
-        let x = g.input(&[2, 3]).unwrap();
+        let x = g.input([2, 3]).unwrap();
         let parts = x
             .split(axis, if axis == 0 { &[1, 0, 1] } else { &[1, 0, 2] })
             .unwrap();
         let rebuilt = Tensor::concatenate(&parts, axis).unwrap();
         let repeated = Tensor::concatenate(&[rebuilt, x.clone()], axis).unwrap();
         let padded = repeated.pad(&[[1, 2], [2, 1]], 9.).unwrap();
-        let loss = padded.mul(&padded).unwrap().sum(&[0, 1], false).unwrap();
+        let loss = padded.mul(&padded).unwrap().sum([0, 1], false).unwrap();
         let grad = loss.grad(&[x]).unwrap();
         let exe = g.compile_many(&client, &grad).unwrap();
         assert_eq!(

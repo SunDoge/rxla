@@ -76,7 +76,7 @@ impl Tensor {
             return self.graph().constant_i32(&[0], &[]);
         }
         let dimensions = (0..self.ndim())
-            .map(|axis| self.dim(axis)?.reshape(&[1]))
+            .map(|axis| self.dim(axis)?.reshape([1]))
             .collect::<Result<Vec<_>>>()?;
         let shape = Tensor::concatenate(&dimensions, 0)?;
         debug_assert_eq!(shape.dtype(), DType::I32);

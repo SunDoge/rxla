@@ -18,9 +18,9 @@ fn advantages(
         .add(&bootstrap_discounts.mul(next_values)?)?
         .sub(values)?;
     let advantage = delta
-        .flip(&[1])?
-        .affine_scan(&trace_discounts.flip(&[1])?, 1)?
-        .flip(&[1])?;
+        .flip([1])?
+        .affine_scan(&trace_discounts.flip([1])?, 1)?
+        .flip([1])?;
     // Rollout estimates are fixed targets, not a path through the critic graph.
     let returns = advantage.add(values)?.detach()?;
     Ok((advantage.detach()?, returns))
@@ -30,15 +30,15 @@ fn run() -> Result<()> {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?) }?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let graph = Tracer::default();
-    let rewards = graph.input(&[2, 5])?;
-    let values = graph.input(&[2, 5])?;
-    let next_values = graph.input(&[2, 5])?;
-    let bootstrap = graph.input(&[2, 5])?;
-    let trace = graph.input(&[2, 5])?;
+    let rewards = graph.input([2, 5])?;
+    let values = graph.input([2, 5])?;
+    let next_values = graph.input([2, 5])?;
+    let bootstrap = graph.input([2, 5])?;
+    let trace = graph.input([2, 5])?;
     let (advantage, returns) = advantages(&rewards, &values, &next_values, &bootstrap, &trace)?;
     let detached_gradients = advantage
         .add(&returns)?
-        .sum(&[0, 1], false)?
+        .sum([0, 1], false)?
         .grad(&[values, next_values])?;
     let expressions = [
         advantage,

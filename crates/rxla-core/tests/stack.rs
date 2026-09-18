@@ -3,7 +3,7 @@ use rxla_core::{Client, Tensor, Tracer};
 #[test]
 fn stack_and_singleton_shape_validation() {
     let graph = Tracer::default();
-    let x = graph.input(&[2, 1, 3]).unwrap();
+    let x = graph.input([2, 1, 3]).unwrap();
     assert_eq!(x.squeeze(1).unwrap().shape(), [2, 3]);
     assert_eq!(x.unsqueeze(0).unwrap().shape(), [1, 2, 1, 3]);
     assert_eq!(x.unsqueeze(3).unwrap().shape(), [2, 1, 3, 1]);
@@ -12,8 +12,8 @@ fn stack_and_singleton_shape_validation() {
     assert!(x.squeeze(3).is_err());
     assert!(Tensor::stack(&[], 0).is_err());
     assert!(Tensor::stack(std::slice::from_ref(&x), 4).is_err());
-    assert!(Tensor::stack(&[x.clone(), graph.input(&[2, 3]).unwrap()], 0).is_err());
-    assert!(Tensor::stack(&[x, Tracer::default().input(&[2, 1, 3]).unwrap()], 0).is_err());
+    assert!(Tensor::stack(&[x.clone(), graph.input([2, 3]).unwrap()], 0).is_err());
+    assert!(Tensor::stack(&[x, Tracer::default().input([2, 1, 3]).unwrap()], 0).is_err());
 }
 
 #[test]

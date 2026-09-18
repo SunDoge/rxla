@@ -105,9 +105,9 @@ impl Tensor {
         if scales == [1, 1] {
             return Ok(self.clone());
         }
-        self.reshape(&[n, h, 1, w, 1, c])?
-            .broadcast_to(&[n, h, scales[0], w, scales[1], c])?
-            .reshape(&shape)
+        self.reshape([n, h, 1, w, 1, c])?
+            .broadcast_to([n, h, scales[0], w, scales[1], c])?
+            .reshape(shape)
     }
 
     /// Resize an NHWC tensor to an arbitrary positive spatial size using the
@@ -149,8 +149,8 @@ impl Tensor {
         let row1 = graph.constant_i32(&[size[0]], &row1)?;
         let row_weight = graph
             .constant(&[size[0]], &row_weight)?
-            .reshape(&[1, size[0], 1, 1])?
-            .broadcast_to(&[batch, size[0], width, channels])?;
+            .reshape([1, size[0], 1, 1])?
+            .broadcast_to([batch, size[0], width, channels])?;
         let top = self.take(&row0, 1)?;
         let bottom = self.take(&row1, 1)?;
         let vertical = top.add(&bottom.sub(&top)?.mul(&row_weight)?)?;
@@ -159,8 +159,8 @@ impl Tensor {
         let column1 = graph.constant_i32(&[size[1]], &column1)?;
         let column_weight = graph
             .constant(&[size[1]], &column_weight)?
-            .reshape(&[1, 1, size[1], 1])?
-            .broadcast_to(&[batch, size[0], size[1], channels])?;
+            .reshape([1, 1, size[1], 1])?
+            .broadcast_to([batch, size[0], size[1], channels])?;
         let left = vertical.take(&column0, 2)?;
         let right = vertical.take(&column1, 2)?;
         left.add(&right.sub(&left)?.mul(&column_weight)?)
@@ -191,7 +191,7 @@ impl Tensor {
                 let indices = graph.constant_i32(&[output_size], &indices)?;
                 let weights = graph
                     .constant(&[output_size], &weights)?
-                    .reshape(&weight_shape)?;
+                    .reshape(weight_shape)?;
                 let selected = input.take(&indices, axis)?;
                 let term = selected.mul(&weights.broadcast_to(selected.shape())?)?;
                 output = Some(match output {
@@ -204,7 +204,7 @@ impl Tensor {
 
         let vertical = interpolate_axis(self, height, size[0], 1, [1, size[0], 1, 1])?;
         interpolate_axis(&vertical, width, size[1], 2, [1, 1, size[1], 1])?
-            .broadcast_to(&[batch, size[0], size[1], channels])
+            .broadcast_to([batch, size[0], size[1], channels])
     }
 
     /// Apply per-channel `(x - mean) / stddev` normalization to an F32 NHWC

@@ -3,13 +3,13 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn huber_validates_delta_shape_and_graph() {
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
+    let x = g.input([2]).unwrap();
     for delta in [0., -1., f32::INFINITY, f32::NAN] {
         assert!(x.huber_loss(&x, delta).is_err());
     }
-    assert!(x.huber_loss(&g.input(&[]).unwrap(), 1.).is_err());
+    assert!(x.huber_loss(&g.input([]).unwrap(), 1.).is_err());
     assert!(
-        x.huber_loss(&Tracer::default().input(&[2]).unwrap(), 1.)
+        x.huber_loss(&Tracer::default().input([2]).unwrap(), 1.)
             .is_err()
     );
 }
@@ -34,16 +34,16 @@ fn real_huber_values_gradients_curvature_and_extreme_residuals() {
             f32::MAX,
         ];
         let g = Tracer::default();
-        let x = g.input(&[values.len() as i64]).unwrap();
+        let x = g.input([values.len() as i64]).unwrap();
         let target = g.input(x.shape()).unwrap();
         let loss = x.huber_loss(&target, delta).unwrap();
         let grad = loss
-            .sum(&[0], false)
+            .sum([0], false)
             .unwrap()
             .grad(&[x.clone(), target.clone()])
             .unwrap();
         let curvature = grad[0]
-            .sum(&[0], false)
+            .sum([0], false)
             .unwrap()
             .grad(&[x.clone(), target])
             .unwrap();
@@ -88,11 +88,7 @@ fn real_huber_values_gradients_curvature_and_extreme_residuals() {
     for shape in [vec![], vec![0, 2]] {
         let g = Tracer::default();
         let x = g.input(&shape).unwrap();
-        let target = g
-            .constant(&[], &[0.])
-            .unwrap()
-            .broadcast_to(&shape)
-            .unwrap();
+        let target = g.constant([], [0.]).unwrap().broadcast_to(&shape).unwrap();
         let loss = x.huber_loss(&target, 1.).unwrap();
         let axes: Vec<_> = (0..shape.len()).collect();
         let grad = loss

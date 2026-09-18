@@ -3,12 +3,12 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn validates_count_axis_and_overflow() {
     let graph = Tracer::default();
-    let x = graph.input(&[2, 3]).unwrap();
+    let x = graph.input([2, 3]).unwrap();
     assert!(x.repeat_interleave(-1, 0).is_err());
     assert!(x.repeat_interleave(i64::MAX, 0).is_err());
     assert!(
         graph
-            .input(&[1, 3])
+            .input([1, 3])
             .unwrap()
             .repeat_interleave(i64::MAX, 0)
             .is_err()
@@ -17,7 +17,7 @@ fn validates_count_axis_and_overflow() {
         assert!(x.repeat_interleave(repeats, 2).is_err());
         assert!(
             graph
-                .input(&[])
+                .input([])
                 .unwrap()
                 .repeat_interleave(repeats, 0)
                 .is_err()
@@ -27,7 +27,7 @@ fn validates_count_axis_and_overflow() {
     assert_eq!(x.repeat_interleave(2, 1).unwrap().shape(), [2, 6]);
     assert_eq!(
         graph
-            .input(&[0, 3])
+            .input([0, 3])
             .unwrap()
             .repeat_interleave(4, 0)
             .unwrap()

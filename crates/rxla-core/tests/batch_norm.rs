@@ -3,8 +3,8 @@ use rxla_core::{CacheLimits, Client, Compiler, Tracer};
 #[test]
 fn inference_batch_norm_validation() {
     let g = Tracer::default();
-    let x = g.input(&[2, 3, 4]).unwrap();
-    let p = g.input(&[3]).unwrap();
+    let x = g.input([2, 3, 4]).unwrap();
+    let p = g.input([3]).unwrap();
     assert_eq!(
         x.batch_norm_inference(1, &p, &p, &p, &p, 1e-5)
             .unwrap()
@@ -15,8 +15,8 @@ fn inference_batch_norm_validation() {
     for epsilon in [0., -1., f32::INFINITY, f32::NAN] {
         assert!(x.batch_norm_inference(1, &p, &p, &p, &p, epsilon).is_err());
     }
-    let wrong = g.input(&[1, 3]).unwrap();
-    let foreign = Tracer::default().input(&[3]).unwrap();
+    let wrong = g.input([1, 3]).unwrap();
+    let foreign = Tracer::default().input([3]).unwrap();
     // Every parameter position must enforce both exact shape and graph ownership.
     for invalid in [&wrong, &foreign] {
         for position in 0..4 {
@@ -36,7 +36,7 @@ fn inference_batch_norm_validation() {
         }
     }
     assert!(
-        g.input(&[2, 0])
+        g.input([2, 0])
             .unwrap()
             .batch_norm_inference(1, &p, &p, &p, &p, 1e-5)
             .is_err()
@@ -52,12 +52,12 @@ fn real_inference_batch_norm_uses_runtime_statistics_without_recompile() {
     let values: Vec<f32> = (0..24).map(|i| i as f32 * 0.25 - 2.).collect();
     for axis in [0, 1, 3] {
         let g = Tracer::default();
-        let x = g.input(&shape).unwrap();
+        let x = g.input(shape).unwrap();
         let channels = shape[axis];
-        let mean = g.input(&[channels]).unwrap();
-        let variance = g.input(&[channels]).unwrap();
-        let scale = g.input(&[channels]).unwrap();
-        let bias = g.input(&[channels]).unwrap();
+        let mean = g.input([channels]).unwrap();
+        let variance = g.input([channels]).unwrap();
+        let scale = g.input([channels]).unwrap();
+        let bias = g.input([channels]).unwrap();
         let y = x
             .batch_norm_inference(axis, &mean, &variance, &scale, &bias, 1e-3)
             .unwrap();

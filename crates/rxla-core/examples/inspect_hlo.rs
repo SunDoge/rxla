@@ -24,7 +24,7 @@ fn print_module(label: &str, module: &HloModuleProto) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?)? };
     let graph = Tracer::default();
-    let x = graph.input(&[4])?;
+    let x = graph.input([4])?;
     let output = x.add_scalar(0.)?.mul_scalar(2.)?;
     println!("Frontend StableHLO:\n{}", graph.stablehlo(&output)?);
     let executable = graph.compile(&client, &output)?;

@@ -32,8 +32,8 @@ fn real_convolution_both_gradients_match_independent_scalar_loops() {
     ];
     for (shape, kernel_shape, options) in cases {
         let g = Tracer::default();
-        let x = g.input(&shape).unwrap();
-        let w = g.input(&kernel_shape).unwrap();
+        let x = g.input(shape).unwrap();
+        let w = g.input(kernel_shape).unwrap();
         let y = x.conv2d(&w, options).unwrap();
         let output_shape = y.shape().to_vec();
         let seed = g.input(y.shape()).unwrap();
@@ -125,12 +125,12 @@ fn real_convolution_empty_inputs_and_outputs_have_zero_gradients() {
         ([1, 1, 1, 2], [3, 3, 2, 3], Conv2dOptions::default()),
     ] {
         let g = Tracer::default();
-        let x = g.input(&shape).unwrap();
-        let w = g.input(&kernel_shape).unwrap();
+        let x = g.input(shape).unwrap();
+        let w = g.input(kernel_shape).unwrap();
         let loss = x
             .conv2d(&w, options)
             .unwrap()
-            .sum(&[0, 1, 2, 3], false)
+            .sum([0, 1, 2, 3], false)
             .unwrap();
         let gradients = loss.grad(&[x, w]).unwrap();
         let exe = g.compile_many(&client, &gradients).unwrap();
@@ -146,12 +146,12 @@ fn real_convolution_empty_inputs_and_outputs_have_zero_gradients() {
 #[test]
 fn ungrouped_convolution_training_lowers_to_supported_ir() {
     let g = Tracer::default();
-    let x = g.input(&[1, 3, 3, 1]).unwrap();
-    let w = g.input(&[2, 2, 1, 1]).unwrap();
+    let x = g.input([1, 3, 3, 1]).unwrap();
+    let w = g.input([2, 2, 1, 1]).unwrap();
     let loss = x
         .conv2d(&w, Conv2dOptions::default())
         .unwrap()
-        .sum(&[0, 1, 2, 3], false)
+        .sum([0, 1, 2, 3], false)
         .unwrap();
     let gradients = loss.grad(&[x, w]).unwrap();
     let lowered = g.prepare_many(&gradients).unwrap();

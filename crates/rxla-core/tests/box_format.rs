@@ -38,7 +38,7 @@ fn real_box_formats_match_linear_values_and_vjps() {
             }
             .unwrap();
             let seed = g
-                .constant(&[4], &[1., 2., 3., 4.])
+                .constant([4], [1., 2., 3., 4.])
                 .unwrap()
                 .broadcast_to(&shape)
                 .unwrap();

@@ -3,7 +3,7 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn rounding_stops_unsupported_reverse_paths() {
     let g = Tracer::default();
-    let x = g.input(&[3]).unwrap();
+    let x = g.input([3]).unwrap();
     let mask = x.gt_mask(&x).unwrap();
     for y in [
         mask.floor().unwrap(),
@@ -12,7 +12,7 @@ fn rounding_stops_unsupported_reverse_paths() {
         mask.round_ties_even().unwrap(),
     ] {
         assert!(
-            y.sum(&[0], false)
+            y.sum([0], false)
                 .unwrap()
                 .grad(std::slice::from_ref(&x))
                 .is_ok()
@@ -55,7 +55,7 @@ fn real_rounding_matches_rust_and_explicit_zero_derivatives() {
             x.round().unwrap(),
             x.round_ties_even().unwrap(),
         ];
-        let seed = g.constant(&shape, &vec![f32::INFINITY; n]).unwrap();
+        let seed = g.constant(&shape, vec![f32::INFINITY; n]).unwrap();
         let mut outputs = rounded.to_vec();
         for y in &rounded {
             let dx = y
@@ -106,7 +106,7 @@ fn real_rounding_matches_rust_and_explicit_zero_derivatives() {
 fn real_fake_quantization_uses_explicit_clipped_surrogate() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[9]).unwrap();
+    let x = g.input([9]).unwrap();
     let clipped = x.clamp(-1., 1.).unwrap();
     let forward = clipped
         .mul_scalar(2.)
@@ -117,7 +117,7 @@ fn real_fake_quantization_uses_explicit_clipped_surrogate() {
         .unwrap();
     let quantized = forward.with_gradient_of(&clipped).unwrap();
     let gradient = quantized
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()

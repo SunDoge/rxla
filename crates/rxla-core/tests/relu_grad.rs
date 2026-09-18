@@ -5,13 +5,13 @@ use rxla_core::{Client, Tracer};
 fn real_relu_forward_and_zero_point_gradient() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[6]).unwrap();
-    let weights = g.input(&[6]).unwrap();
+    let x = g.input([6]).unwrap();
+    let weights = g.input([6]).unwrap();
     let y = x.relu().unwrap();
     let dy = y
         .mul(&weights)
         .unwrap()
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[x])
         .unwrap()
@@ -26,7 +26,7 @@ fn real_relu_forward_and_zero_point_gradient() {
         ]
     );
     let g = Tracer::default();
-    let x = g.input(&[3]).unwrap();
+    let x = g.input([3]).unwrap();
     let exe = g.compile(&client, &x.relu().unwrap()).unwrap();
     let values = exe
         .run(&[&[f32::NEG_INFINITY, f32::INFINITY, f32::NAN]])

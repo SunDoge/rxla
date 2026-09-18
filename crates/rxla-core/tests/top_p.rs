@@ -3,19 +3,19 @@ use rxla_core::{Client, Tracer, random::top_p_categorical_from_bits};
 #[test]
 fn validates_top_p_inputs() {
     let g = Tracer::default();
-    let x = g.input(&[4]).unwrap();
-    let bits = g.input_i32(&[4]).unwrap();
+    let x = g.input([4]).unwrap();
+    let bits = g.input_i32([4]).unwrap();
     for p in [0., -1., 1.1, f32::NAN, f32::INFINITY] {
         assert!(top_p_categorical_from_bits(&x, &bits, p, 0).is_err());
     }
     assert!(top_p_categorical_from_bits(&x, &bits, 0.5, 1).is_err());
-    assert!(top_p_categorical_from_bits(&x, &g.input_i32(&[3]).unwrap(), 0.5, 0).is_err());
+    assert!(top_p_categorical_from_bits(&x, &g.input_i32([3]).unwrap(), 0.5, 0).is_err());
     assert!(
-        top_p_categorical_from_bits(&x, &Tracer::default().input_i32(&[4]).unwrap(), 0.5, 0)
+        top_p_categorical_from_bits(&x, &Tracer::default().input_i32([4]).unwrap(), 0.5, 0)
             .is_err()
     );
     assert!(
-        top_p_categorical_from_bits(&g.input(&[0]).unwrap(), &g.input_i32(&[0]).unwrap(), 0.5, 0)
+        top_p_categorical_from_bits(&g.input([0]).unwrap(), &g.input_i32([0]).unwrap(), 0.5, 0)
             .is_err()
     );
 }
@@ -43,8 +43,8 @@ fn real_top_p_cutoff_boundaries_original_validity_and_axis_mapping() {
         ] {
             let shape = if axis == 1 { [5, 4] } else { [4, 5] };
             let g = Tracer::default();
-            let x = g.input(&shape).unwrap();
-            let bits = g.input_i32(&shape).unwrap();
+            let x = g.input(shape).unwrap();
+            let bits = g.input_i32(shape).unwrap();
             let draw = top_p_categorical_from_bits(&x, &bits, p, axis).unwrap();
             let exe = g
                 .compile_many(&client, &[draw.indices, draw.valid])
@@ -82,8 +82,8 @@ fn real_top_p_includes_crossing_category_and_sequence_reserves_full_shape() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for (p, expected) in [(0.6, 1), (0.8, 2), (1., 3)] {
         let g = Tracer::default();
-        let x = g.input(&[4]).unwrap();
-        let bits = g.input_i32(&[4]).unwrap();
+        let x = g.input([4]).unwrap();
+        let bits = g.input_i32([4]).unwrap();
         let draw = top_p_categorical_from_bits(&x, &bits, p, 0).unwrap();
         let exe = g.compile_many(&client, &[draw.indices]).unwrap();
         let x = client

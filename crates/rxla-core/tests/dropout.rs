@@ -3,17 +3,17 @@ use rxla_core::{CacheLimits, Client, Compiler, Tracer};
 #[test]
 fn dropout_validates_probability_shape_and_owner() {
     let graph = Tracer::default();
-    let x = graph.input(&[2, 3]).unwrap();
-    let mask = graph.input(&[2, 3]).unwrap();
+    let x = graph.input([2, 3]).unwrap();
+    let mask = graph.input([2, 3]).unwrap();
     for probability in [0., -0.1, 1.1, f32::NAN, f32::INFINITY] {
         assert!(x.dropout_with_mask(&mask, probability).is_err());
     }
     assert!(
-        x.dropout_with_mask(&graph.input(&[3]).unwrap(), 0.5)
+        x.dropout_with_mask(&graph.input([3]).unwrap(), 0.5)
             .is_err()
     );
     assert!(
-        x.dropout_with_mask(&Tracer::default().input(&[2, 3]).unwrap(), 0.5)
+        x.dropout_with_mask(&Tracer::default().input([2, 3]).unwrap(), 0.5)
             .is_err()
     );
     assert!(x.dropout_with_mask(&mask, 1.).is_ok());
@@ -25,9 +25,9 @@ fn real_dropout_scalar_empty_and_select_mask_semantics() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let graph = Tracer::default();
-    let x = graph.input(&[]).unwrap();
-    let mask = graph.input(&[]).unwrap();
-    let empty = graph.input(&[0, 3]).unwrap();
+    let x = graph.input([]).unwrap();
+    let mask = graph.input([]).unwrap();
+    let empty = graph.input([0, 3]).unwrap();
     let outputs = [
         x.dropout_with_mask(&mask, 1.).unwrap(),
         x.dropout_with_mask(&mask, 0.25).unwrap(),
@@ -59,19 +59,19 @@ fn real_dropout_runtime_masks_and_higher_order_gradients() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let graph = Tracer::default();
-    let x = graph.input(&[2, 3]).unwrap();
-    let mask = graph.input(&[2, 3]).unwrap();
+    let x = graph.input([2, 3]).unwrap();
+    let mask = graph.input([2, 3]).unwrap();
     let y = x.dropout_with_mask(&mask, 0.5).unwrap();
-    let loss = y.mul(&y).unwrap().sum(&[0, 1], false).unwrap();
+    let loss = y.mul(&y).unwrap().sum([0, 1], false).unwrap();
     let grads = loss.grad(&[x.clone(), mask.clone()]).unwrap();
     let second = grads[0]
-        .sum(&[0, 1], false)
+        .sum([0, 1], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()
         .remove(0);
     let forward_grad = y
-        .sum(&[0, 1], false)
+        .sum([0, 1], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()

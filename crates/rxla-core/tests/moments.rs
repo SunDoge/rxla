@@ -3,15 +3,15 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn moments_validates_axes_and_degrees_of_freedom() {
     let g = Tracer::default();
-    let x = g.input(&[2, 3]).unwrap();
+    let x = g.input([2, 3]).unwrap();
     for axes in [vec![2], vec![1, 1]] {
         assert!(x.moments(&axes, false, 0).is_err());
     }
     for correction in [3, usize::MAX] {
-        assert!(x.variance(&[1], false, correction).is_err());
+        assert!(x.variance([1], false, correction).is_err());
     }
-    assert!(x.variance(&[], false, 1).is_err());
-    assert!(g.input(&[2, 0]).unwrap().variance(&[1], false, 0).is_err());
+    assert!(x.variance([], false, 1).is_err());
+    assert!(g.input([2, 0]).unwrap().variance([1], false, 0).is_err());
 }
 
 #[test]
@@ -22,7 +22,7 @@ fn real_moments_values_and_joint_gradient_match_f64() {
         for keepdims in [false, true] {
             for correction in [0, 1] {
                 let g = Tracer::default();
-                let x = g.input(&[2, 3]).unwrap();
+                let x = g.input([2, 3]).unwrap();
                 let (mean, variance) = x.moments(&axes, keepdims, correction).unwrap();
                 assert_eq!(mean.shape(), variance.shape());
                 let weight = g.input(mean.shape()).unwrap();
@@ -31,7 +31,7 @@ fn real_moments_values_and_joint_gradient_match_f64() {
                     .unwrap()
                     .mul(&weight)
                     .unwrap()
-                    .sum(&(0..mean.shape().len()).collect::<Vec<_>>(), false)
+                    .sum((0..mean.shape().len()).collect::<Vec<_>>(), false)
                     .unwrap();
                 let gradient = loss.grad(&[x]).unwrap().remove(0);
                 let count: usize = mean.shape().iter().map(|&v| v as usize).product();
@@ -94,7 +94,7 @@ fn real_moments_values_and_joint_gradient_match_f64() {
 fn real_moments_scalar_identity_and_empty_output() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[]).unwrap();
+    let x = g.input([]).unwrap();
     let (mean, variance) = x.moments(&[], true, 0).unwrap();
     let gradient = variance.grad(&[x]).unwrap().remove(0);
     let exe = g
@@ -105,10 +105,10 @@ fn real_moments_scalar_identity_and_empty_output() {
         [vec![3.], vec![0.], vec![0.]]
     );
     let g = Tracer::default();
-    let x = g.input(&[0, 3]).unwrap();
+    let x = g.input([0, 3]).unwrap();
     let (mean, variance) = x.moments(&[1], false, 1).unwrap();
     let gradient = variance
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[x])
         .unwrap()

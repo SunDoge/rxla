@@ -265,7 +265,7 @@ impl Tensor {
                     let centered = d_probabilities.sub(
                         &d_probabilities
                             .mul(&probabilities)?
-                            .sum(&[rank - 1], true)?
+                            .sum([rank - 1], true)?
                             .broadcast_to(probabilities.shape())?,
                     )?;
                     let d_scores = probabilities.mul(&centered)?;
@@ -413,7 +413,7 @@ impl Tensor {
                         let border = interior.select(&zero.broadcast_to(dy.shape())?, &dy)?;
                         add(
                             1,
-                            border.sum(&(0..dy.shape().len()).collect::<Vec<_>>(), false)?,
+                            border.sum((0..dy.shape().len()).collect::<Vec<_>>(), false)?,
                         );
                     }
                 }
@@ -443,7 +443,7 @@ impl Tensor {
                         .collect();
                     add(0, dy.sum(&reduce, true)?.reshape(input.shape())?);
                 }
-                Op::Cumsum { axis } => add(0, dy.flip(&[*axis])?.cumsum(*axis)?.flip(&[*axis])?),
+                Op::Cumsum { axis } => add(0, dy.flip([*axis])?.cumsum(*axis)?.flip([*axis])?),
                 Op::Reduce { kind, axes } => {
                     let input = value(node.operands[0]);
                     let dims: Vec<_> = input
@@ -637,7 +637,7 @@ impl Tensor {
                                 .broadcast_to(kernel.shape())?,
                         );
                     } else {
-                        let hwio = kernel.transpose(&[2, 3, 1, 0])?;
+                        let hwio = kernel.transpose([2, 3, 1, 0])?;
                         let hwio_shape = [
                             kernel.shape()[2],
                             kernel.shape()[3],
@@ -668,7 +668,7 @@ impl Tensor {
                             )
                         };
                         add(0, input_gradient);
-                        add(1, gradient.transpose(&[3, 2, 0, 1])?);
+                        add(1, gradient.transpose([3, 2, 0, 1])?);
                     }
                 }
                 Op::DynamicSlice | Op::DynamicUpdateSlice => {
@@ -776,7 +776,7 @@ mod tests {
         let loss = x
             .is_finite_mask()
             .unwrap()
-            .sum(&[0], false)
+            .sum([0], false)
             .unwrap()
             .exp()
             .unwrap();
@@ -795,7 +795,7 @@ mod tests {
             .unwrap()
             .mul(&weight)
             .unwrap()
-            .sum(&[0], false)
+            .sum([0], false)
             .unwrap();
         let gradient = loss.grad(&[weight]).unwrap().remove(0);
         assert_eq!(gradient.dtype(), DType::F32);

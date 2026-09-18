@@ -110,7 +110,7 @@ mod tests {
     use rxla_core::Tensor;
 
     fn branched(cx: Cx) -> crate::Result<Tensor> {
-        let input = cx.input(&[2, 4])?;
+        let input = cx.input([2, 4])?;
         let body = input.apply(&cx.named_layer("body", Linear::new(4))?)?;
         body.apply(&cx.named_layer("head", Linear::new(2))?)
     }

@@ -76,8 +76,8 @@ pub fn top_p_categorical_from_bits(
     let finite = logits.is_finite_mask()?;
     let valid = finite
         .add(&logits.eq_mask(&masked)?)?
-        .min(&[axis], false)?
-        .mul(&finite.max(&[axis], false)?)?
+        .min([axis], false)?
+        .mul(&finite.max([axis], false)?)?
         .mul(&draw.valid)?;
     let indices = valid.select(
         &indices,
@@ -126,8 +126,8 @@ pub fn topk_categorical_from_bits(
         .broadcast_to(logits.shape())?;
     let valid = finite
         .add(&logits.eq_mask(&masked)?)?
-        .min(&[axis], false)?
-        .mul(&finite.max(&[axis], false)?)?
+        .min([axis], false)?
+        .mul(&finite.max([axis], false)?)?
         .mul(&draw.valid)?;
     let indices = valid.select(
         &indices,
@@ -189,12 +189,12 @@ pub fn categorical_from_bits(
     let finite = logits.is_finite_mask()?;
     let allowed = finite.add(&logits.eq_mask(&masked)?)?;
     let valid = allowed
-        .min(&[axis], false)?
-        .mul(&finite.max(&[axis], false)?)?;
+        .min([axis], false)?
+        .mul(&finite.max([axis], false)?)?;
     // Sanitize invalid entries before reductions; the validity mask remains
     // authoritative even though an invalid row has a deterministic result.
     let safe = finite.select(logits, &masked)?;
-    let maximum = safe.max(&[axis], true)?;
+    let maximum = safe.max([axis], true)?;
     let maximum = maximum.is_finite_mask()?.select(
         &maximum,
         &graph.constant(&[], &[0.])?.broadcast_to(maximum.shape())?,

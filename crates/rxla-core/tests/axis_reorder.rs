@@ -8,25 +8,25 @@ fn attention_head_layout_helpers_preserve_exact_hlo() {
         for heads in [4, 32] {
             let build = |helpers: bool| {
                 let g = Tracer::default();
-                let x = g.input(&[chunk, heads * 64]).unwrap();
+                let x = g.input([chunk, heads * 64]).unwrap();
                 let split = if helpers {
                     x.unflatten(1, &[heads, 64])
                         .unwrap()
                         .move_axis(1, 0)
                         .unwrap()
                 } else {
-                    x.reshape(&[chunk, heads, 64])
+                    x.reshape([chunk, heads, 64])
                         .unwrap()
-                        .transpose(&[1, 0, 2])
+                        .transpose([1, 0, 2])
                         .unwrap()
                 };
                 let merged = if helpers {
                     split.move_axis(0, 1).unwrap().flatten(1, 2).unwrap()
                 } else {
                     split
-                        .transpose(&[1, 0, 2])
+                        .transpose([1, 0, 2])
                         .unwrap()
-                        .reshape(&[chunk, heads * 64])
+                        .reshape([chunk, heads * 64])
                         .unwrap()
                 };
                 g.stablehlo_many(&[split, merged]).unwrap()
@@ -39,7 +39,7 @@ fn attention_head_layout_helpers_preserve_exact_hlo() {
 #[test]
 fn axis_reorder_validates_axes_and_preserves_other_dimensions() {
     let g = Tracer::default();
-    let x = g.input(&[2, 3, 4, 5]).unwrap();
+    let x = g.input([2, 3, 4, 5]).unwrap();
     assert_eq!(x.move_axis(1, 3).unwrap().shape(), [2, 4, 5, 3]);
     assert_eq!(x.move_axis(3, 1).unwrap().shape(), [2, 5, 3, 4]);
     assert_eq!(x.swap_axes(1, 3).unwrap().shape(), [2, 5, 4, 3]);

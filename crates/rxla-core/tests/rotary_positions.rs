@@ -3,20 +3,20 @@ use rxla_core::{Client, RotaryLayout, Tracer};
 #[test]
 fn angles_require_matching_graph_and_half_width_broadcast() {
     let graph = Tracer::default();
-    let x = graph.input(&[2, 3, 4]).unwrap();
+    let x = graph.input([2, 3, 4]).unwrap();
     assert!(
-        x.rotary_embedding_angles(&graph.input(&[3, 4]).unwrap(), RotaryLayout::SplitHalf)
+        x.rotary_embedding_angles(&graph.input([3, 4]).unwrap(), RotaryLayout::SplitHalf)
             .is_err()
     );
     assert!(
         x.rotary_embedding_angles(
-            &Tracer::default().input(&[3, 2]).unwrap(),
+            &Tracer::default().input([3, 2]).unwrap(),
             RotaryLayout::SplitHalf
         )
         .is_err()
     );
     assert_eq!(
-        x.rotary_embedding_angles(&graph.input(&[3, 2]).unwrap(), RotaryLayout::SplitHalf)
+        x.rotary_embedding_angles(&graph.input([3, 2]).unwrap(), RotaryLayout::SplitHalf)
             .unwrap()
             .shape(),
         [2, 3, 4]
@@ -29,20 +29,20 @@ fn real_rope_runtime_positions_and_frequency_gradients_for_both_layouts() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for layout in [RotaryLayout::SplitHalf, RotaryLayout::Interleaved] {
         let graph = Tracer::default();
-        let x = graph.input(&[2, 3, 4]).unwrap();
-        let positions = graph.input(&[3, 1]).unwrap();
-        let frequencies = graph.input(&[2]).unwrap();
+        let x = graph.input([2, 3, 4]).unwrap();
+        let positions = graph.input([3, 1]).unwrap();
+        let frequencies = graph.input([2]).unwrap();
         let angles = positions
-            .broadcast_to(&[3, 2])
+            .broadcast_to([3, 2])
             .unwrap()
-            .mul(&frequencies.broadcast_to(&[3, 2]).unwrap())
+            .mul(&frequencies.broadcast_to([3, 2]).unwrap())
             .unwrap();
         let y = x.rotary_embedding_angles(&angles, layout).unwrap();
         let weights: Vec<_> = (0..24).map(|i| ((i % 5) as f32 - 2.) * 0.25).collect();
         let loss = y
-            .mul(&graph.constant(&[2, 3, 4], &weights).unwrap())
+            .mul(&graph.constant([2, 3, 4], &weights).unwrap())
             .unwrap()
-            .sum(&[0, 1, 2], false)
+            .sum([0, 1, 2], false)
             .unwrap();
         let gradients = loss.grad(&[x, positions, frequencies]).unwrap();
         let executable = graph

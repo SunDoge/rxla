@@ -3,9 +3,9 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn detach_only_stops_its_own_path() {
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
+    let x = g.input([2]).unwrap();
     // Direct mask derivatives remain unsupported; max reductions now have a rule.
-    let finite_count = x.is_finite_mask().unwrap().sum(&[0], false).unwrap();
+    let finite_count = x.is_finite_mask().unwrap().sum([0], false).unwrap();
     assert!(
         finite_count
             .detach()
@@ -22,7 +22,7 @@ fn detach_only_stops_its_own_path() {
 fn real_detach_keeps_forward_values_and_other_gradient_paths() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[]).unwrap();
+    let x = g.input([]).unwrap();
     let detached = x.mul(&x).unwrap().detach().unwrap();
     let loss = detached.mul(&x).unwrap();
     let gradient = loss.grad(std::slice::from_ref(&x)).unwrap().remove(0);
@@ -42,13 +42,13 @@ fn real_softmax_and_log_softmax_gradients_match_f64_formulas() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for axis in [0, 1] {
         let g = Tracer::default();
-        let x = g.input(&[2, 3]).unwrap();
-        let weights = g.input(&[2, 3]).unwrap();
+        let x = g.input([2, 3]).unwrap();
+        let weights = g.input([2, 3]).unwrap();
         let soft = x.softmax(axis).unwrap();
         let log = x.log_softmax(axis).unwrap();
         let mut roots = vec![soft.clone(), log.clone()];
         for result in [soft, log] {
-            let loss = result.mul(&weights).unwrap().sum(&[0, 1], false).unwrap();
+            let loss = result.mul(&weights).unwrap().sum([0, 1], false).unwrap();
             roots.push(loss.grad(std::slice::from_ref(&x)).unwrap().remove(0));
         }
         let exe = g.compile_many(&client, &roots).unwrap();

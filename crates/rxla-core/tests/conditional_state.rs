@@ -10,7 +10,7 @@ fn real_finite_result_gate_preserves_state_and_allows_retry() {
     let position = g.state_i32(&[]).unwrap();
     let input = g.input(&[2]).unwrap();
     let proposed = g.read(&data).unwrap().add(&input).unwrap();
-    let count = proposed.is_finite_mask().unwrap().sum(&[0], false).unwrap();
+    let count = proposed.is_finite_mask().unwrap().sum([0], false).unwrap();
     let accepted = count.eq_mask(&g.constant(&[], &[2.]).unwrap()).unwrap();
     let next = g.read(&position).unwrap().wrapping_add_scalar(1).unwrap();
     g.write_many_if(&accepted, &[(&data, proposed.clone()), (&position, next)])

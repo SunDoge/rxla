@@ -65,11 +65,7 @@ fn attention_projection(
     width: i64,
     shape: [i64; 4],
 ) -> Result<Tensor> {
-    Ok(cx
-        .scope(name)?
-        .linear(width)
-        .apply(input)?
-        .reshape(&shape)?)
+    Ok(cx.scope(name)?.linear(width).apply(input)?.reshape(shape)?)
 }
 
 fn attention(cx: Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> Result<Tensor> {
@@ -86,15 +82,15 @@ fn attention(cx: Cx, input: &Tensor, causal_bias: &Tensor, heads: i64) -> Result
     let head_dim = width / heads;
     let projected_shape = [batch, length, heads, head_dim];
     let q = attention_projection(cx.clone(), "q_proj", input, width, projected_shape)?
-        .transpose(&[0, 2, 1, 3])?;
+        .transpose([0, 2, 1, 3])?;
     let k = attention_projection(cx.clone(), "k_proj", input, width, projected_shape)?
-        .transpose(&[0, 2, 1, 3])?;
+        .transpose([0, 2, 1, 3])?;
     let v = attention_projection(cx.clone(), "v_proj", input, width, projected_shape)?
-        .transpose(&[0, 2, 1, 3])?;
+        .transpose([0, 2, 1, 3])?;
     let hidden = q
         .scaled_dot_product_attention(&k, &v, Some(causal_bias), None)?
-        .transpose(&[0, 2, 1, 3])?
-        .reshape(&[batch, length, width])?;
+        .transpose([0, 2, 1, 3])?
+        .reshape([batch, length, width])?;
     Ok(hidden.apply(&cx.named_layer("out_proj", Linear::new(width))?)?)
 }
 
@@ -164,13 +160,13 @@ pub fn clip_text_encoder(cx: Cx, token_ids: &Tensor, config: &ClipTextConfig) ->
         tokens.add(&positions)?
     };
     let bias_shape = [1, 1, *length, *length];
-    let query = cx.iota_i32(&bias_shape, 2)?.to_f32()?;
-    let key = cx.iota_i32(&bias_shape, 3)?.to_f32()?;
+    let query = cx.iota_i32(bias_shape, 2)?.to_f32()?;
+    let key = cx.iota_i32(bias_shape, 3)?.to_f32()?;
     let allowed = query.ge_mask(&key)?;
-    let zero = cx.constant(&[], &[0.0])?.broadcast_to(&bias_shape)?;
+    let zero = cx.constant([], [0.0])?.broadcast_to(bias_shape)?;
     let blocked = cx
-        .constant(&[], &[f32::NEG_INFINITY])?
-        .broadcast_to(&bias_shape)?;
+        .constant([], [f32::NEG_INFINITY])?
+        .broadcast_to(bias_shape)?;
     let causal_bias = allowed.select(&zero, &blocked)?;
     {
         let layers = cx.scope_path(["text_model", "encoder", "layers"])?;
@@ -193,7 +189,7 @@ mod tests {
     use rxla_nn::Model;
 
     fn tiny(cx: Cx) -> Result<Tensor> {
-        let ids = cx.input_dtype(&[2, 77], DType::I32)?;
+        let ids = cx.input_dtype([2, 77], DType::I32)?;
         clip_text_encoder(cx, &ids, &ClipTextConfig::tiny())
     }
 

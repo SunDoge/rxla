@@ -3,20 +3,20 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn index_layout_validation() {
     let g = Tracer::default();
-    let ids = g.input_i32(&[2, 3]).unwrap();
-    assert_eq!(ids.reshape(&[6]).unwrap().shape(), [6]);
-    assert_eq!(ids.transpose(&[1, 0]).unwrap().shape(), [3, 2]);
+    let ids = g.input_i32([2, 3]).unwrap();
+    assert_eq!(ids.reshape([6]).unwrap().shape(), [6]);
+    assert_eq!(ids.transpose([1, 0]).unwrap().shape(), [3, 2]);
     for shape in [vec![5], vec![-1], vec![i64::MAX, i64::MAX]] {
         assert!(ids.reshape(&shape).is_err());
     }
     for permutation in [vec![0], vec![0, 0], vec![0, 2], vec![0, 1, 2]] {
         assert!(ids.transpose(&permutation).is_err());
     }
-    assert_eq!(g.scalar_i32(1).unwrap().transpose(&[]).unwrap().shape(), []);
+    assert_eq!(g.scalar_i32(1).unwrap().transpose([]).unwrap().shape(), []);
     assert_eq!(
-        g.input_i32(&[0, 3])
+        g.input_i32([0, 3])
             .unwrap()
-            .reshape(&[2, 0])
+            .reshape([2, 0])
             .unwrap()
             .shape(),
         [2, 0]
@@ -81,10 +81,10 @@ fn real_index_singleton_axes_preserve_integer_bits() {
 fn real_index_layouts_feed_batched_log_prob_selection() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let logits = g.input(&[2, 3, 4]).unwrap();
+    let logits = g.input([2, 3, 4]).unwrap();
     // Sequence-major IDs supplied by the host; normalize layout inside the graph.
-    let ids = g.input_i32(&[3, 2]).unwrap();
-    let ids = ids.transpose(&[1, 0]).unwrap().unsqueeze(2).unwrap();
+    let ids = g.input_i32([3, 2]).unwrap();
+    let ids = ids.transpose([1, 0]).unwrap().unsqueeze(2).unwrap();
     let output = logits
         .log_softmax(2)
         .unwrap()
@@ -110,14 +110,14 @@ fn real_index_layouts_feed_batched_log_prob_selection() {
     }
     // Constant scalar reshape and empty index layouts remain valid gather inputs.
     let g = Tracer::default();
-    let table = g.constant(&[3], &[10., 20., 30.]).unwrap();
-    let scalar = g.scalar_i32(1).unwrap().reshape(&[1, 1]).unwrap();
+    let table = g.constant([3], [10., 20., 30.]).unwrap();
+    let scalar = g.scalar_i32(1).unwrap().reshape([1, 1]).unwrap();
     let empty = g
-        .constant_i32(&[0, 2], &[])
+        .constant_i32([0, 2], [])
         .unwrap()
-        .transpose(&[1, 0])
+        .transpose([1, 0])
         .unwrap()
-        .reshape(&[0])
+        .reshape([0])
         .unwrap();
     let outputs = g
         .compile_many(

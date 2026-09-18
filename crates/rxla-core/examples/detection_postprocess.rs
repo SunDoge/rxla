@@ -6,9 +6,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?) }?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let graph = Tracer::default();
-    let boxes = graph.input(&[8, 4])?; // cxcywh model output
-    let scores = graph.input(&[8])?; // finite confidence scores
-    let classes = graph.input_i32(&[8])?;
+    let boxes = graph.input([8, 4])?; // cxcywh model output
+    let scores = graph.input([8])?; // finite confidence scores
+    let classes = graph.input_i32([8])?;
     let (selected_scores, ids) = scores.topk(4, 0)?;
     let selected_boxes = boxes.take(&ids, 0)?.box_cxcywh_to_xyxy()?;
     let selected_classes = classes.take_along_axis(&ids, 0)?;

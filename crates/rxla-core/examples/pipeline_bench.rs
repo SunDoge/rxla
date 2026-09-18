@@ -71,8 +71,8 @@ fn main() -> Result<()> {
         cfg!(debug_assertions)
     );
     let g = Tracer::default();
-    let x = g.input(&[BATCH as i64, WIDTH as i64])?;
-    let w = g.input(&[WIDTH as i64, WIDTH as i64])?;
+    let x = g.input([BATCH as i64, WIDTH as i64])?;
+    let w = g.input([WIDTH as i64, WIDTH as i64])?;
     let first = x.matmul(&w)?;
     let stage = g.compile(&client, &first)?;
     let fused = g.compile(&client, &first.matmul(&w)?)?;

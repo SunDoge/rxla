@@ -3,17 +3,17 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn training_batch_norm_validates_parameters_and_observation_count() {
     let g = Tracer::default();
-    let x = g.input(&[2, 3, 2]).unwrap();
-    let affine = g.input(&[2]).unwrap();
+    let x = g.input([2, 3, 2]).unwrap();
+    let affine = g.input([2]).unwrap();
     for epsilon in [0., -1., f32::NAN, f32::INFINITY] {
         assert!(x.batch_norm_training(2, &affine, &affine, epsilon).is_err());
     }
     assert!(x.batch_norm_training(3, &affine, &affine, 0.1).is_err());
     assert!(x.batch_norm_training(1, &affine, &affine, 0.1).is_err());
-    let foreign = Tracer::default().input(&[2]).unwrap();
+    let foreign = Tracer::default().input([2]).unwrap();
     assert!(x.batch_norm_training(2, &foreign, &affine, 0.1).is_err());
     assert!(
-        g.input(&[0, 2])
+        g.input([0, 2])
             .unwrap()
             .batch_norm_training(1, &affine, &affine, 0.1)
             .is_err()
@@ -28,10 +28,10 @@ fn real_training_batch_norm_statistics_and_all_gradients_match_f64() {
         let g = Tracer::default();
         let shape = [2, 3, 2];
         let channels = shape[axis] as usize;
-        let x = g.input(&shape).unwrap();
-        let gamma = g.input(&[channels as i64]).unwrap();
-        let beta = g.input(&[channels as i64]).unwrap();
-        let seed = g.input(&shape).unwrap();
+        let x = g.input(shape).unwrap();
+        let gamma = g.input([channels as i64]).unwrap();
+        let beta = g.input([channels as i64]).unwrap();
+        let seed = g.input(shape).unwrap();
         let result = x.batch_norm_training(axis, &gamma, &beta, 0.125).unwrap();
         assert_eq!(result.mean.shape(), [channels as i64]);
         assert_eq!(result.variance.shape(), [channels as i64]);
@@ -104,13 +104,13 @@ fn real_training_batch_norm_statistics_and_all_gradients_match_f64() {
 fn real_training_batch_norm_single_observation() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[2]).unwrap();
-    let gamma = g.input(&[2]).unwrap();
-    let beta = g.input(&[2]).unwrap();
+    let x = g.input([2]).unwrap();
+    let gamma = g.input([2]).unwrap();
+    let beta = g.input([2]).unwrap();
     let result = x.batch_norm_training(0, &gamma, &beta, 0.125).unwrap();
     let gradients = result
         .output
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[x, gamma, beta])
         .unwrap();

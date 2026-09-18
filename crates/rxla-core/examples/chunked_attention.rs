@@ -20,7 +20,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     graph.write(&position_slot, &next_position)?;
     let positions = graph
         .iota_i32(&[2], 0)?
-        .wrapping_add(&position.broadcast_to(&[2])?)?;
+        .wrapping_add(&position.broadcast_to([2])?)?;
     let mask = positions.causal_attention_mask(&graph.iota_i32(&[6], 0)?)?;
     let attention =
         q.scaled_dot_product_attention(&update.keys, &update.values, Some(&mask), Some(1.))?;
@@ -28,7 +28,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // graph select, not lazy execution or a native cancellation mechanism.
     let output = update
         .accepted
-        .broadcast_to(&[2, 2])?
+        .broadcast_to([2, 2])?
         .select(&attention, &graph.constant(&[2, 2], &[0.; 4])?)?;
     let program = graph.compile(&mut compiler, &[output, update.accepted])?;
     let mut session = program.session(vec![

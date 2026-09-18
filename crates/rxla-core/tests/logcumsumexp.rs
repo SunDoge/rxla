@@ -46,9 +46,9 @@ fn real_signed_prefix_vjp_and_nonuniform_hessian_vector() {
         assert!(expected_hvp.iter().any(|x| x.abs() > 0.01));
         for tree in [false, true] {
             let graph = Tracer::default();
-            let x = graph.input(&shape).unwrap();
-            let seed = graph.input(&shape).unwrap();
-            let vector = graph.input(&shape).unwrap();
+            let x = graph.input(shape).unwrap();
+            let seed = graph.input(shape).unwrap();
+            let vector = graph.input(shape).unwrap();
             let y = if tree {
                 x.logcumsumexp_tree(1)
             } else {
@@ -59,7 +59,7 @@ fn real_signed_prefix_vjp_and_nonuniform_hessian_vector() {
             let hvp = gradient
                 .mul(&vector)
                 .unwrap()
-                .sum(&[0, 1], false)
+                .sum([0, 1], false)
                 .unwrap()
                 .grad(&[x])
                 .unwrap()
@@ -91,15 +91,15 @@ fn real_signed_prefix_vjp_and_nonuniform_hessian_vector() {
 fn real_logaddexp_retains_small_increments_and_tie_hessian() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let graph = Tracer::default();
-    let x = graph.input(&[5]).unwrap();
-    let z = graph.input(&[5]).unwrap();
+    let x = graph.input([5]).unwrap();
+    let z = graph.input([5]).unwrap();
     let y = x.logaddexp(&z).unwrap();
     let gradient = y
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[x.clone(), z.clone()])
         .unwrap();
-    let hessian = gradient[0].sum(&[0], false).unwrap().grad(&[x, z]).unwrap();
+    let hessian = gradient[0].sum([0], false).unwrap().grad(&[x, z]).unwrap();
     let executable = graph
         .compile_many(
             &client,
@@ -142,25 +142,18 @@ fn real_logaddexp_retains_small_increments_and_tie_hessian() {
 #[test]
 fn validates_axes_and_builds_logarithmic_stages() {
     let g = Tracer::default();
-    assert!(g.input(&[]).unwrap().logcumsumexp(0).is_err());
-    assert!(g.input(&[2]).unwrap().logcumsumexp(1).is_err());
-    assert!(g.input(&[]).unwrap().logcumsumexp_tree(0).is_err());
-    assert!(g.input(&[2]).unwrap().logcumsumexp_tree(1).is_err());
-    let x = g.input(&[2]).unwrap();
-    assert!(x.logaddexp(&g.input(&[]).unwrap()).is_err());
-    assert!(
-        x.logaddexp(&Tracer::default().input(&[2]).unwrap())
-            .is_err()
-    );
+    assert!(g.input([]).unwrap().logcumsumexp(0).is_err());
+    assert!(g.input([2]).unwrap().logcumsumexp(1).is_err());
+    assert!(g.input([]).unwrap().logcumsumexp_tree(0).is_err());
+    assert!(g.input([2]).unwrap().logcumsumexp_tree(1).is_err());
+    let x = g.input([2]).unwrap();
+    assert!(x.logaddexp(&g.input([]).unwrap()).is_err());
+    assert!(x.logaddexp(&Tracer::default().input([2]).unwrap()).is_err());
     let counts: Vec<_> = [8, 4096]
         .into_iter()
         .map(|length| {
             let graph = Tracer::default();
-            let output = graph
-                .input(&[length])
-                .unwrap()
-                .logcumsumexp_tree(0)
-                .unwrap();
+            let output = graph.input([length]).unwrap().logcumsumexp_tree(0).unwrap();
             graph
                 .stablehlo(&output)
                 .unwrap()
@@ -181,7 +174,7 @@ fn real_prefix_values_and_gradients_match_stable_f64_reference() {
     {
         for axis in 0..2 {
             let g = Tracer::default();
-            let x = g.input(&shape).unwrap();
+            let x = g.input(shape).unwrap();
             let y = if tree {
                 x.logcumsumexp_tree(axis)
             } else {
@@ -189,13 +182,13 @@ fn real_prefix_values_and_gradients_match_stable_f64_reference() {
             }
             .unwrap();
             let dx = y
-                .sum(&[0, 1], false)
+                .sum([0, 1], false)
                 .unwrap()
                 .grad(std::slice::from_ref(&x))
                 .unwrap()
                 .remove(0);
             let ddx = dx
-                .sum(&[0, 1], false)
+                .sum([0, 1], false)
                 .unwrap()
                 .grad(std::slice::from_ref(&x))
                 .unwrap()
@@ -252,7 +245,7 @@ fn real_prefix_values_and_gradients_match_stable_f64_reference() {
 fn real_nonfinite_values_only_affect_prefix_successors() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[6]).unwrap();
+    let x = g.input([6]).unwrap();
     let exe = g.compile(&client, &x.logcumsumexp(0).unwrap()).unwrap();
     let input = client
         .buffer(

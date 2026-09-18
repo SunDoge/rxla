@@ -215,7 +215,7 @@ impl Tensor {
     /// other axes. An empty diagonal sums to zero.
     pub fn trace(&self, offset: i64, axis1: usize, axis2: usize) -> Result<Self> {
         let diagonal = self.diagonal(offset, axis1, axis2)?;
-        diagonal.sum(&[diagonal.shape.len() - 1], false)
+        diagonal.sum([diagonal.shape.len() - 1], false)
     }
 
     /// General F32 contraction with explicit paired contraction and batch axes.

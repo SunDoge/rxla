@@ -96,7 +96,7 @@ fn check_device(
         .ok_or("missing second device")?
         .id as i64;
     let g = Tracer::default();
-    let input = g.input(&[2])?;
+    let input = g.input([2])?;
     let output = input.add_scalar(1.)?;
     let module = g.stablehlo(&output)?;
     let options = |ids: Vec<i64>| {

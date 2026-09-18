@@ -7,7 +7,7 @@ fn client() -> Client {
 #[test]
 fn reduction_axes_are_validated() {
     let g = Tracer::default();
-    let x = g.input(&[2, 3]).unwrap();
+    let x = g.input([2, 3]).unwrap();
     for axes in [vec![2], vec![0, 0]] {
         assert!(x.logsumexp(&axes, false).is_err());
         assert!(x.min(&axes, false).is_err());
@@ -21,7 +21,7 @@ fn real_logsumexp_values_and_vjp_against_f64() {
     for axes in [vec![], vec![0], vec![1], vec![1, 0]] {
         for keepdims in [false, true] {
             let g = Tracer::default();
-            let x = g.input(&[2, 3]).unwrap();
+            let x = g.input([2, 3]).unwrap();
             let y = x.logsumexp(&axes, keepdims).unwrap();
             let seed = g.input(y.shape()).unwrap();
             let dx = y.vjp(&[x], &seed).unwrap().remove(0);
@@ -73,9 +73,9 @@ fn real_logsumexp_values_and_vjp_against_f64() {
 fn real_logsumexp_nonfinite_empty_and_second_derivative() {
     let client = client();
     let g = Tracer::default();
-    let x = g.input(&[4, 3]).unwrap();
-    let y = x.logsumexp(&[1], false).unwrap();
-    let gradient = y.sum(&[0], false).unwrap().grad(&[x]).unwrap().remove(0);
+    let x = g.input([4, 3]).unwrap();
+    let y = x.logsumexp([1], false).unwrap();
+    let gradient = y.sum([0], false).unwrap().grad(&[x]).unwrap().remove(0);
     let exe = g.compile_many(&client, &[y, gradient]).unwrap();
     let actual = exe
         .run_many(&[&[
@@ -102,18 +102,18 @@ fn real_logsumexp_nonfinite_empty_and_second_derivative() {
     for shape in [vec![2, 0], vec![0, 3]] {
         let g = Tracer::default();
         let x = g.input(&shape).unwrap();
-        let y = x.logsumexp(&[1], false).unwrap();
-        let gradient = y.sum(&[0], false).unwrap().grad(&[x]).unwrap().remove(0);
+        let y = x.logsumexp([1], false).unwrap();
+        let gradient = y.sum([0], false).unwrap().grad(&[x]).unwrap().remove(0);
         let exe = g.compile_many(&client, &[y, gradient]).unwrap();
         let actual = exe.run_many(&[&[]]).unwrap();
         assert_eq!(actual[0], vec![f32::NEG_INFINITY; shape[0] as usize]);
         assert!(actual[1].is_empty());
     }
     let g = Tracer::default();
-    let x = g.input(&[3]).unwrap();
-    let seed = g.constant(&[3], &[1., -2., 3.]).unwrap();
+    let x = g.input([3]).unwrap();
+    let seed = g.constant([3], [1., -2., 3.]).unwrap();
     let first = x
-        .logsumexp(&[0], false)
+        .logsumexp([0], false)
         .unwrap()
         .grad(std::slice::from_ref(&x))
         .unwrap()
@@ -121,7 +121,7 @@ fn real_logsumexp_nonfinite_empty_and_second_derivative() {
     let second = first
         .mul(&seed)
         .unwrap()
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[x])
         .unwrap()
@@ -139,18 +139,18 @@ fn real_logsumexp_nonfinite_empty_and_second_derivative() {
 fn real_min_reduction_ties_and_empty() {
     let client = client();
     let g = Tracer::default();
-    let x = g.input(&[2, 3]).unwrap();
-    let y = x.min(&[1], true).unwrap();
-    let gradient = y.sum(&[0, 1], false).unwrap().grad(&[x]).unwrap().remove(0);
+    let x = g.input([2, 3]).unwrap();
+    let y = x.min([1], true).unwrap();
+    let gradient = y.sum([0, 1], false).unwrap().grad(&[x]).unwrap().remove(0);
     let exe = g.compile_many(&client, &[y, gradient]).unwrap();
     assert_eq!(
         exe.run_many(&[&[1., -2., -2., 0., -0., 3.]]).unwrap(),
         [vec![-2., 0.], vec![0., 0.5, 0.5, 0.5, 0.5, 0.]]
     );
     let g = Tracer::default();
-    let x = g.input(&[2, 0]).unwrap();
-    let y = x.min(&[1], false).unwrap();
-    let gradient = y.sum(&[0], false).unwrap().grad(&[x]).unwrap().remove(0);
+    let x = g.input([2, 0]).unwrap();
+    let y = x.min([1], false).unwrap();
+    let gradient = y.sum([0], false).unwrap().grad(&[x]).unwrap().remove(0);
     let exe = g.compile_many(&client, &[y, gradient]).unwrap();
     assert_eq!(
         exe.run_many(&[&[]]).unwrap(),

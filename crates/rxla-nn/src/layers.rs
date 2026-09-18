@@ -78,7 +78,7 @@ impl Embedding {
             .scope(name)?
             .param_initialized(
                 "weight",
-                &[self.vocabulary, self.width],
+                [self.vocabulary, self.width],
                 Initializer::normal(0.0, 1.0),
             )?
             .take(indices, 0)?)
@@ -146,7 +146,7 @@ impl Layer for LoraLinear {
         );
         let weight = cx.param_initialized(
             "weight",
-            &[self.out_features, in_features],
+            [self.out_features, in_features],
             Initializer::kaiming_uniform(),
         )?;
         let bias_bound = (1.0 / in_features as f32).sqrt();
@@ -155,7 +155,7 @@ impl Layer for LoraLinear {
             .then(|| {
                 cx.param_initialized(
                     "bias",
-                    &[self.out_features],
+                    [self.out_features],
                     Initializer::uniform(-bias_bound, bias_bound),
                 )
             })
@@ -163,7 +163,7 @@ impl Layer for LoraLinear {
         let down = input.linear(
             &cx.scope("lora_A")?.param_initialized(
                 "weight",
-                &[self.rank, in_features],
+                [self.rank, in_features],
                 Initializer::kaiming_uniform(),
             )?,
             None,
@@ -171,7 +171,7 @@ impl Layer for LoraLinear {
         let adapter = down.linear(
             &cx.scope("lora_B")?.param_initialized(
                 "weight",
-                &[self.out_features, self.rank],
+                [self.out_features, self.rank],
                 Initializer::zeros(),
             )?,
             None,
@@ -230,18 +230,18 @@ fn apply_quantized_linear(scope: &Cx, input: &Tensor, layer: &QuantizedLinear) -
     );
     let groups = in_features / layer.group_size;
     let weight = scope
-        .param_dtype("weight", &[layer.out_features, in_features], DType::U8)?
+        .param_dtype("weight", [layer.out_features, in_features], DType::U8)?
         .cast(DType::F32)?
         .add_scalar(-128.0)?
-        .reshape(&[layer.out_features, groups, layer.group_size])?;
+        .reshape([layer.out_features, groups, layer.group_size])?;
     let scale = scope
-        .param("scale", &[layer.out_features, groups])?
-        .reshape(&[layer.out_features, groups, 1])?
-        .broadcast_to(&[layer.out_features, groups, layer.group_size])?;
+        .param("scale", [layer.out_features, groups])?
+        .reshape([layer.out_features, groups, 1])?
+        .broadcast_to([layer.out_features, groups, layer.group_size])?;
     Ok(input.linear(
         &weight
             .mul(&scale)?
-            .reshape(&[layer.out_features, in_features])?,
+            .reshape([layer.out_features, in_features])?,
         None,
     )?)
 }
@@ -421,7 +421,7 @@ impl RmsNorm {
         let width = *input.shape().last().expect("rank checked above");
         let weight = cx.scope(name)?.param_initialized(
             "weight",
-            &[width],
+            [width],
             if self.zero_centered {
                 Initializer::zeros()
             } else {
@@ -535,7 +535,7 @@ impl Layer for Embedding {
         Ok(cx
             .param_initialized(
                 "weight",
-                &[self.vocabulary, self.width],
+                [self.vocabulary, self.width],
                 Initializer::normal(0.0, 1.0),
             )?
             .take(indices, 0)?)
@@ -554,7 +554,7 @@ impl Layer for RmsNorm {
         let width = *input.shape().last().expect("rank checked above");
         let weight = cx.param_initialized(
             "weight",
-            &[width],
+            [width],
             if self.zero_centered {
                 Initializer::zeros()
             } else {
@@ -683,7 +683,7 @@ impl ScopedLayer<RmsNorm> {
         })?;
         let weight = self.scope.param_initialized(
             "weight",
-            &[width],
+            [width],
             if self.layer.zero_centered {
                 Initializer::zeros()
             } else {
@@ -712,7 +712,7 @@ impl ScopedLayer<Embedding> {
             .scope
             .param_initialized(
                 "weight",
-                &[self.layer.vocabulary, self.layer.width],
+                [self.layer.vocabulary, self.layer.width],
                 Initializer::normal(0.0, 1.0),
             )?
             .take(indices, 0)?)
@@ -810,7 +810,7 @@ fn apply_linear(cx: &Cx, input: &Tensor, out_features: i64, bias: bool) -> Resul
     );
     let weight = cx.param_initialized(
         "weight",
-        &[out_features, in_features],
+        [out_features, in_features],
         Initializer::kaiming_uniform(),
     )?;
     let bias_bound = (1.0 / in_features as f32).sqrt();
@@ -818,7 +818,7 @@ fn apply_linear(cx: &Cx, input: &Tensor, out_features: i64, bias: bool) -> Resul
         .then(|| {
             cx.param_initialized(
                 "bias",
-                &[out_features],
+                [out_features],
                 Initializer::uniform(-bias_bound, bias_bound),
             )
         })
@@ -861,7 +861,7 @@ fn apply_conv2d(
     );
     let weight = cx.param_initialized(
         "weight",
-        &[
+        [
             out_channels,
             in_channels / options.groups,
             kernel[0],
@@ -870,23 +870,22 @@ fn apply_conv2d(
         Initializer::kaiming_uniform(),
     )?;
     let input = match layout {
-        ImageLayout::Nchw => input.transpose(&[0, 2, 3, 1])?,
+        ImageLayout::Nchw => input.transpose([0, 2, 3, 1])?,
         ImageLayout::Nhwc => input.clone(),
     };
     let output = input.conv2d_oihw(&weight, options)?;
     if !bias {
         return match layout {
-            ImageLayout::Nchw => Ok(output.transpose(&[0, 3, 1, 2])?),
+            ImageLayout::Nchw => Ok(output.transpose([0, 3, 1, 2])?),
             ImageLayout::Nhwc => Ok(output),
         };
     }
     let fan_in = (in_channels / options.groups) * kernel[0] * kernel[1];
     let bound = (1.0 / fan_in as f32).sqrt();
-    let bias =
-        cx.param_initialized("bias", &[out_channels], Initializer::uniform(-bound, bound))?;
+    let bias = cx.param_initialized("bias", [out_channels], Initializer::uniform(-bound, bound))?;
     let output = output.add(&bias.broadcast_to(output.shape())?)?;
     match layout {
-        ImageLayout::Nchw => Ok(output.transpose(&[0, 3, 1, 2])?),
+        ImageLayout::Nchw => Ok(output.transpose([0, 3, 1, 2])?),
         ImageLayout::Nhwc => Ok(output),
     }
 }
@@ -921,20 +920,20 @@ fn apply_group_norm(
     );
     let (weight, bias) = if affine {
         (
-            Some(cx.param_initialized("weight", &[channels], Initializer::ones())?),
-            Some(cx.param_initialized("bias", &[channels], Initializer::zeros())?),
+            Some(cx.param_initialized("weight", [channels], Initializer::ones())?),
+            Some(cx.param_initialized("bias", [channels], Initializer::zeros())?),
         )
     } else {
         (None, None)
     };
     let input = match layout {
         ImageLayout::Nchw => input.clone(),
-        ImageLayout::Nhwc => input.transpose(&[0, 3, 1, 2])?,
+        ImageLayout::Nhwc => input.transpose([0, 3, 1, 2])?,
     };
     let output = input.group_norm(groups, weight.as_ref(), bias.as_ref(), epsilon)?;
     match layout {
         ImageLayout::Nchw => Ok(output),
-        ImageLayout::Nhwc => Ok(output.transpose(&[0, 2, 3, 1])?),
+        ImageLayout::Nhwc => Ok(output.transpose([0, 2, 3, 1])?),
     }
 }
 
@@ -963,15 +962,15 @@ fn apply_batch_norm(
         ImageLayout::Nhwc => 3,
     }];
     let input = match layout {
-        ImageLayout::Nchw => input.transpose(&[0, 2, 3, 1])?,
+        ImageLayout::Nchw => input.transpose([0, 2, 3, 1])?,
         ImageLayout::Nhwc => input.clone(),
     };
-    let weight = cx.param_initialized("weight", &[channels], Initializer::ones())?;
-    let bias = cx.param_initialized("bias", &[channels], Initializer::zeros())?;
-    let running_mean = cx.state("running_mean", &[channels], DType::F32)?;
+    let weight = cx.param_initialized("weight", [channels], Initializer::ones())?;
+    let bias = cx.param_initialized("bias", [channels], Initializer::zeros())?;
+    let running_mean = cx.state("running_mean", [channels], DType::F32)?;
     let running_variance = cx.state_initialized(
         "running_variance",
-        &[channels],
+        [channels],
         DType::F32,
         Initializer::ones(),
     )?;
@@ -985,7 +984,7 @@ fn apply_batch_norm(
             epsilon,
         )?;
         return match layout {
-            ImageLayout::Nchw => Ok(output.transpose(&[0, 3, 1, 2])?),
+            ImageLayout::Nchw => Ok(output.transpose([0, 3, 1, 2])?),
             ImageLayout::Nhwc => Ok(output),
         };
     }
@@ -1003,7 +1002,7 @@ fn apply_batch_norm(
     running_mean.write(cx, &next_mean)?;
     running_variance.write(cx, &next_variance)?;
     match layout {
-        ImageLayout::Nchw => Ok(batch.output.transpose(&[0, 3, 1, 2])?),
+        ImageLayout::Nchw => Ok(batch.output.transpose([0, 3, 1, 2])?),
         ImageLayout::Nhwc => Ok(batch.output),
     }
 }
@@ -1052,7 +1051,7 @@ mod tests {
     use crate::{apply, init};
 
     fn quantized_projection(cx: Cx) -> Result<Tensor> {
-        let input = cx.input(&[2, 64])?;
+        let input = cx.input([2, 64])?;
         cx.scope("projection")?
             .quantized_linear(32, 32)
             .apply(&input)
@@ -1073,7 +1072,7 @@ mod tests {
     #[test]
     fn scoped_builders_preserve_parameter_identity() {
         let (schema, output) = init(|cx| {
-            let input = cx.input(&[2, 8])?;
+            let input = cx.input([2, 8])?;
             let encoder = cx.named_layer("encoder", Linear::new(4))?;
             let hidden = encoder.apply(&input)?;
             hidden.apply(&cx.named_layer("head", Linear::new(3))?)
@@ -1090,7 +1089,7 @@ mod tests {
     #[test]
     fn layer_configs_apply_named_effects_without_a_builder_type() {
         let (schema, output) = init(|cx| {
-            let input = cx.input(&[2, 8])?;
+            let input = cx.input([2, 8])?;
             let hidden = input.through(cx.at("encoder")?, Linear::new(4).bias(false))?;
             hidden.through(cx.at("head")?, Linear::new(3))
         })
@@ -1106,8 +1105,8 @@ mod tests {
     #[test]
     fn named_layers_can_be_reused_without_owning_parameters() {
         let (schema, outputs) = init(|cx| {
-            let first = cx.input(&[2, 8])?;
-            let second = cx.input(&[2, 8])?;
+            let first = cx.input([2, 8])?;
+            let second = cx.input([2, 8])?;
             let projection = cx.named_layer("projection", Linear::new(4))?;
             Ok::<_, Error>([first.apply(&projection)?, second.apply(&projection)?])
         })
@@ -1122,7 +1121,7 @@ mod tests {
     #[test]
     fn one_lightweight_config_binds_multiple_parameter_identities() {
         let (schema, outputs) = init(|cx| {
-            let input = cx.input(&[2, 8])?;
+            let input = cx.input([2, 8])?;
             let config = Linear::new(8).bias(false);
             let first = cx.named_layer("first", config.clone())?;
             let second = cx.named_layer("second", config)?;
@@ -1141,7 +1140,7 @@ mod tests {
     #[test]
     fn spatial_builders_accept_checkpoint_native_nchw_activations() {
         let (schema, output) = init(|cx| {
-            let input = cx.input(&[2, 4, 16, 12])?;
+            let input = cx.input([2, 4, 16, 12])?;
             let convolved = cx
                 .scope("conv")?
                 .conv2d(8, [3, 3])
@@ -1172,7 +1171,7 @@ mod tests {
         }
 
         let (schema, output) = init(|cx| {
-            let input = cx.input(&[2, 8])?;
+            let input = cx.input([2, 8])?;
             input.apply(&cx.scope("adapter")?.projection(4)?)
         })
         .unwrap();

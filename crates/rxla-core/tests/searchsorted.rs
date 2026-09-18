@@ -3,8 +3,8 @@ use rxla_core::{Client, DType, Tracer};
 #[test]
 fn searchsorted_builds_logarithmic_static_graph() {
     let graph = Tracer::default();
-    let values = graph.input_i32(&[7]).unwrap();
-    let needles = graph.input_i32(&[2, 3]).unwrap();
+    let values = graph.input_i32([7]).unwrap();
+    let needles = graph.input_i32([2, 3]).unwrap();
     let left = values.searchsorted_i32(&needles, false).unwrap();
     let right = values.searchsorted_i32(&needles, true).unwrap();
     assert_eq!(left.shape(), [2, 3]);
@@ -17,7 +17,7 @@ fn searchsorted_builds_logarithmic_static_graph() {
 #[test]
 fn f32_to_i32_cast_is_nondifferentiable() {
     let graph = Tracer::default();
-    let input = graph.input(&[3]).unwrap();
+    let input = graph.input([3]).unwrap();
     let integers = input.floor().unwrap().cast(DType::I32).unwrap();
     assert_eq!(integers.dtype(), DType::I32);
     assert!(integers.grad(std::slice::from_ref(&input)).is_err());
@@ -28,8 +28,8 @@ fn f32_to_i32_cast_is_nondifferentiable() {
 fn real_searchsorted_handles_duplicates_edges_and_matrix_needles() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let graph = Tracer::default();
-    let values = graph.input_i32(&[7]).unwrap();
-    let needles = graph.input_i32(&[2, 3]).unwrap();
+    let values = graph.input_i32([7]).unwrap();
+    let needles = graph.input_i32([2, 3]).unwrap();
     let outputs = [
         values.searchsorted_i32(&needles, false).unwrap(),
         values.searchsorted_i32(&needles, true).unwrap(),

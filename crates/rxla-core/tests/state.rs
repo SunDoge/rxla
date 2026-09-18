@@ -46,7 +46,7 @@ fn symbolic_state_validation() {
     assert_eq!(value.shape(), [2]);
     assert!(
         graph
-            .write(&slot, &Tracer::default().input(&[2]).unwrap())
+            .write(&slot, &Tracer::default().input([2]).unwrap())
             .is_err()
     );
     let wrong_shape = graph.constant(&[1], &[1.]).unwrap();

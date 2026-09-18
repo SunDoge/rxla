@@ -53,7 +53,7 @@ fn real_average_pool_grad_matches_scalar_scatter_reference() {
     ];
     for (shape, options, include_pad) in cases {
         let g = Tracer::default();
-        let x = g.input(&shape).unwrap();
+        let x = g.input(shape).unwrap();
         let y = x.avg_pool2d(options, include_pad).unwrap();
         let seed = g.input(y.shape()).unwrap();
         let dx = y.vjp(std::slice::from_ref(&x), &seed).unwrap().remove(0);
@@ -137,9 +137,9 @@ fn real_average_pool_empty_gradients() {
     for shape in [[0, 3, 4, 2], [2, 0, 3, 2], [1, 3, 4, 0], [1, 1, 1, 2]] {
         for include_pad in [false, true] {
             let g = Tracer::default();
-            let x = g.input(&shape).unwrap();
+            let x = g.input(shape).unwrap();
             let y = x.avg_pool2d(Pool2dOptions::default(), include_pad).unwrap();
-            let gradient = y.sum(&[0, 1, 2, 3], false).unwrap().grad(&[x]).unwrap();
+            let gradient = y.sum([0, 1, 2, 3], false).unwrap().grad(&[x]).unwrap();
             let exe = g.compile_many(&client, &gradient).unwrap();
             let count = shape.iter().product::<i64>() as usize;
             assert_eq!(
@@ -155,17 +155,17 @@ fn real_average_pool_empty_gradients() {
 fn real_average_pool_squared_input_second_derivative() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[1, 3, 3, 1]).unwrap();
+    let x = g.input([1, 3, 3, 1]).unwrap();
     let loss = x
         .square()
         .unwrap()
         .avg_pool2d(Pool2dOptions::default(), true)
         .unwrap()
-        .sum(&[0, 1, 2, 3], false)
+        .sum([0, 1, 2, 3], false)
         .unwrap();
     let first = loss.grad(std::slice::from_ref(&x)).unwrap().remove(0);
     let second = first
-        .sum(&[0, 1, 2, 3], false)
+        .sum([0, 1, 2, 3], false)
         .unwrap()
         .grad(&[x])
         .unwrap()

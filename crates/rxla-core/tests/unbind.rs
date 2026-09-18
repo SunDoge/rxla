@@ -75,16 +75,16 @@ fn real_unbind_gradient_and_second_derivative() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for axis in 0..2 {
         let g = Tracer::default();
-        let x = g.input(&[2, 3]).unwrap();
+        let x = g.input([2, 3]).unwrap();
         let parts = x.unbind(axis).unwrap();
         // Use only one slice, twice, so reverse mode must both accumulate its
         // contributions and fill unused input slices with zeros.
         let part = &parts[1];
         let square = part.mul(part).unwrap();
-        let loss = square.add(&square).unwrap().sum(&[0], false).unwrap();
+        let loss = square.add(&square).unwrap().sum([0], false).unwrap();
         let grad = loss.grad(std::slice::from_ref(&x)).unwrap().remove(0);
         let second = grad
-            .sum(&[0, 1], false)
+            .sum([0, 1], false)
             .unwrap()
             .grad(std::slice::from_ref(&x))
             .unwrap()

@@ -3,8 +3,8 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn f32_matmul_requests_highest_operand_precision() {
     let graph = Tracer::default();
-    let a = graph.input(&[2, 3]).unwrap();
-    let b = graph.input(&[3, 4]).unwrap();
+    let a = graph.input([2, 3]).unwrap();
+    let b = graph.input([3, 4]).unwrap();
     let output = a.matmul(&b).unwrap();
     let stablehlo = graph.stablehlo(&output).unwrap();
     assert_eq!(stablehlo.matches("stablehlo.dot_general").count(), 1);
@@ -38,7 +38,7 @@ fn matmul_shapes_and_output_validation() {
         );
     }
     assert!(g.stablehlo_many(&[]).is_err());
-    let foreign = Tracer::default().input(&[3]).unwrap();
+    let foreign = Tracer::default().input([3]).unwrap();
     assert!(g.stablehlo_many(&[foreign]).is_err());
 }
 
@@ -47,10 +47,10 @@ fn matmul_shapes_and_output_validation() {
 fn real_broadcast_matmul_and_multiple_outputs() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let a = g.input(&[2, 1, 2, 3]).unwrap();
-    let b = g.input(&[3, 3, 2]).unwrap();
+    let a = g.input([2, 1, 2, 3]).unwrap();
+    let b = g.input([3, 3, 2]).unwrap();
     let y = a.matmul(&b).unwrap();
-    let sum = y.sum(&[2, 3], false).unwrap();
+    let sum = y.sum([2, 3], false).unwrap();
     let exe = g.compile_many(&client, &[sum, y.clone(), y]).unwrap();
     assert!(matches!(
         exe.run(&[]).unwrap_err(),
@@ -96,11 +96,11 @@ fn real_broadcast_matmul_and_multiple_outputs() {
 fn real_vector_matmul() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let v = g.input(&[3]).unwrap();
-    let m = g.constant(&[2, 3], &[1., 2., 3., 4., 5., 6.]).unwrap();
+    let v = g.input([3]).unwrap();
+    let m = g.constant([2, 3], [1., 2., 3., 4., 5., 6.]).unwrap();
     let dot = v.matmul(&v).unwrap();
     let mv = m.matmul(&v).unwrap();
-    let vm = v.matmul(&m.transpose(&[1, 0]).unwrap()).unwrap();
+    let vm = v.matmul(&m.transpose([1, 0]).unwrap()).unwrap();
     let exe = g.compile_many(&client, &[dot, mv, vm]).unwrap();
     assert_eq!(
         exe.run_many(&[&[1., 2., 3.]]).unwrap(),

@@ -43,7 +43,7 @@ fn real_max_pool_unique_winners_overlap_padding_and_stride() {
         ),
     ] {
         let g = Tracer::default();
-        let x = g.input(&shape).unwrap();
+        let x = g.input(shape).unwrap();
         let y = x.max_pool2d(options).unwrap();
         let output_shape = y.shape().to_vec();
         let seed = g.input(y.shape()).unwrap();
@@ -105,9 +105,9 @@ fn real_max_pool_unique_winners_overlap_padding_and_stride() {
 fn real_max_pool_ties_choose_one_winner_and_empty_gradients() {
     let client = client();
     let g = Tracer::default();
-    let x = g.input(&[1, 2, 2, 1]).unwrap();
+    let x = g.input([1, 2, 2, 1]).unwrap();
     let y = x.max_pool2d(Pool2dOptions::default()).unwrap();
-    let seed = g.constant(y.shape(), &[6.]).unwrap();
+    let seed = g.constant(y.shape(), [6.]).unwrap();
     let gradients = y.vjp(&[x], &seed).unwrap();
     let exe = g.compile_many(&client, &gradients).unwrap();
     for value in [1., 0., f32::NEG_INFINITY, f32::INFINITY] {
@@ -117,11 +117,11 @@ fn real_max_pool_ties_choose_one_winner_and_empty_gradients() {
     }
     for shape in [[0, 3, 4, 2], [2, 0, 3, 2], [1, 3, 4, 0], [1, 1, 1, 2]] {
         let g = Tracer::default();
-        let x = g.input(&shape).unwrap();
+        let x = g.input(shape).unwrap();
         let loss = x
             .max_pool2d(Pool2dOptions::default())
             .unwrap()
-            .sum(&[0, 1, 2, 3], false)
+            .sum([0, 1, 2, 3], false)
             .unwrap();
         let gradients = loss.grad(&[x]).unwrap();
         let exe = g.compile_many(&client, &gradients).unwrap();
@@ -136,11 +136,11 @@ fn real_max_pool_ties_choose_one_winner_and_empty_gradients() {
 #[test]
 fn max_pool_higher_order_fails_explicitly() {
     let g = Tracer::default();
-    let x = g.input(&[1, 3, 3, 1]).unwrap();
+    let x = g.input([1, 3, 3, 1]).unwrap();
     let loss = x
         .max_pool2d(Pool2dOptions::default())
         .unwrap()
-        .sum(&[0, 1, 2, 3], false)
+        .sum([0, 1, 2, 3], false)
         .unwrap();
     assert!(loss.grad(std::slice::from_ref(&x)).is_err());
 }

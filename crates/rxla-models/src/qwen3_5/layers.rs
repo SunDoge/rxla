@@ -42,7 +42,7 @@ pub(super) fn full_attention(
         config.attention_heads * config.head_dim * 2,
         config.quant_group_size,
     )?
-    .reshape(&[
+    .reshape([
         *batch,
         *sequence,
         config.attention_heads,
@@ -51,7 +51,7 @@ pub(super) fn full_attention(
     let query = q.narrow(3, 0, config.head_dim)?;
     let gate = q
         .narrow(3, config.head_dim, config.head_dim)?
-        .reshape(&[*batch, *sequence, config.attention_heads * config.head_dim])?
+        .reshape([*batch, *sequence, config.attention_heads * config.head_dim])?
         .sigmoid()?;
     let query = cx
         .scope("q_norm")?
@@ -59,7 +59,7 @@ pub(super) fn full_attention(
         .epsilon(config.epsilon)
         .zero_centered(true)
         .apply(&query)?
-        .transpose(&[0, 2, 1, 3])?;
+        .transpose([0, 2, 1, 3])?;
     let key = projection(
         cx.clone(),
         "k_proj",
@@ -67,14 +67,14 @@ pub(super) fn full_attention(
         config.key_value_heads * config.head_dim,
         config.quant_group_size,
     )?
-    .reshape(&[*batch, *sequence, config.key_value_heads, config.head_dim])?;
+    .reshape([*batch, *sequence, config.key_value_heads, config.head_dim])?;
     let key = cx
         .scope("k_norm")?
         .rms_norm()
         .epsilon(config.epsilon)
         .zero_centered(true)
         .apply(&key)?
-        .transpose(&[0, 2, 1, 3])?;
+        .transpose([0, 2, 1, 3])?;
     let value = projection(
         cx.clone(),
         "v_proj",
@@ -82,14 +82,14 @@ pub(super) fn full_attention(
         config.key_value_heads * config.head_dim,
         config.quant_group_size,
     )?
-    .reshape(&[*batch, *sequence, config.key_value_heads, config.head_dim])?
-    .transpose(&[0, 2, 1, 3])?;
+    .reshape([*batch, *sequence, config.key_value_heads, config.head_dim])?
+    .transpose([0, 2, 1, 3])?;
     let query = partial_rope(&query, angles, config.rotary_dim)?;
     let key = partial_rope(&key, angles, config.rotary_dim)?;
     let attended = query
         .grouped_query_attention(&key, &value, Some(mask), None)?
-        .transpose(&[0, 2, 1, 3])?
-        .reshape(&[*batch, *sequence, config.attention_heads * config.head_dim])?
+        .transpose([0, 2, 1, 3])?
+        .reshape([*batch, *sequence, config.attention_heads * config.head_dim])?
         .mul(&gate)?;
     projection(
         cx.clone(),
@@ -104,7 +104,7 @@ fn l2_norm(input: &Tensor) -> Result<Tensor> {
     let axis = input.shape().len() - 1;
     let scale = input
         .square()?
-        .sum(&[axis], true)?
+        .sum([axis], true)?
         .add_scalar(1e-6)?
         .rsqrt()?
         .broadcast_to(input.shape())?;
@@ -127,11 +127,11 @@ pub(super) fn gated_delta_attention(
         width * 3,
         config.quant_group_size,
     )?
-    .reshape(&[*batch, *sequence, 1, width * 3])?;
+    .reshape([*batch, *sequence, 1, width * 3])?;
     let kernel = {
         let conv = cx.scope("conv1d")?;
-        conv.param("weight", &[width * 3, 1, config.conv_kernel])?
-            .reshape(&[width * 3, 1, config.conv_kernel, 1])?
+        conv.param("weight", [width * 3, 1, config.conv_kernel])?
+            .reshape([width * 3, 1, config.conv_kernel, 1])?
     };
     let mixed = mixed
         .conv2d_oihw(
@@ -142,22 +142,22 @@ pub(super) fn gated_delta_attention(
                 ..Default::default()
             },
         )?
-        .reshape(&[*batch, *sequence, width * 3])?
+        .reshape([*batch, *sequence, width * 3])?
         .silu()?;
-    let query = l2_norm(&mixed.narrow(2, 0, width)?.reshape(&[
+    let query = l2_norm(&mixed.narrow(2, 0, width)?.reshape([
         *batch,
         *sequence,
         config.linear_heads,
         config.linear_head_dim,
     ])?)?
     .mul_scalar((config.linear_head_dim as f32).sqrt().recip())?;
-    let key = l2_norm(&mixed.narrow(2, width, width)?.reshape(&[
+    let key = l2_norm(&mixed.narrow(2, width, width)?.reshape([
         *batch,
         *sequence,
         config.linear_heads,
         config.linear_head_dim,
     ])?)?;
-    let value = mixed.narrow(2, width * 2, width)?.reshape(&[
+    let value = mixed.narrow(2, width * 2, width)?.reshape([
         *batch,
         *sequence,
         config.linear_heads,
@@ -170,7 +170,7 @@ pub(super) fn gated_delta_attention(
         width,
         config.quant_group_size,
     )?
-    .reshape(&[
+    .reshape([
         *batch,
         *sequence,
         config.linear_heads,
@@ -191,13 +191,13 @@ pub(super) fn gated_delta_attention(
         config.linear_heads,
         config.quant_group_size,
     )?;
-    let a_log = cx.param("A_log", &[config.linear_heads])?;
-    let dt_bias = cx.param("dt_bias", &[config.linear_heads])?;
+    let a_log = cx.param("A_log", [config.linear_heads])?;
+    let dt_bias = cx.param("dt_bias", [config.linear_heads])?;
     let decay = a.add(&dt_bias.broadcast_to(a.shape())?)?.softplus()?.mul(
         &a_log
             .exp()?
             .neg()?
-            .reshape(&[1, 1, config.linear_heads])?
+            .reshape([1, 1, config.linear_heads])?
             .broadcast_to(a.shape())?,
     )?;
     let state_shape = [
@@ -206,7 +206,7 @@ pub(super) fn gated_delta_attention(
         config.linear_head_dim,
         config.linear_head_dim,
     ];
-    let mut state = cx.constant(&[], &[0.0])?.broadcast_to(&state_shape)?;
+    let mut state = cx.constant([], [0.0])?.broadcast_to(state_shape)?;
     let mut outputs = Vec::with_capacity(*sequence as usize);
     for position in 0..*sequence {
         let q = query.narrow(1, position, 1)?.squeeze(1)?;
@@ -217,26 +217,26 @@ pub(super) fn gated_delta_attention(
             .narrow(1, position, 1)?
             .squeeze(1)?
             .exp()?
-            .reshape(&[*batch, config.linear_heads, 1, 1])?
-            .broadcast_to(&state_shape)?;
+            .reshape([*batch, config.linear_heads, 1, 1])?
+            .broadcast_to(state_shape)?;
         state = state.mul(&decay)?;
         let predicted = state
-            .mul(&k.unsqueeze(3)?.broadcast_to(&state_shape)?)?
-            .sum(&[2], false)?;
-        let delta = v.sub(&predicted)?.mul(&beta.broadcast_to(&[
+            .mul(&k.unsqueeze(3)?.broadcast_to(state_shape)?)?
+            .sum([2], false)?;
+        let delta = v.sub(&predicted)?.mul(&beta.broadcast_to([
             *batch,
             config.linear_heads,
             config.linear_head_dim,
         ])?)?;
         state = state.add(
             &k.unsqueeze(3)?
-                .broadcast_to(&state_shape)?
-                .mul(&delta.unsqueeze(2)?.broadcast_to(&state_shape)?)?,
+                .broadcast_to(state_shape)?
+                .mul(&delta.unsqueeze(2)?.broadcast_to(state_shape)?)?,
         )?;
         outputs.push(
             state
-                .mul(&q.unsqueeze(3)?.broadcast_to(&state_shape)?)?
-                .sum(&[2], false)?
+                .mul(&q.unsqueeze(3)?.broadcast_to(state_shape)?)?
+                .sum([2], false)?
                 .unsqueeze(1)?,
         );
     }
@@ -244,20 +244,20 @@ pub(super) fn gated_delta_attention(
     let axis = output.shape().len() - 1;
     let norm_scale = output
         .square()?
-        .mean(&[axis], true)?
+        .mean([axis], true)?
         .add_scalar(config.epsilon)?
         .rsqrt()?
         .broadcast_to(output.shape())?;
     let norm_weight = {
         let norm = cx.scope("norm")?;
-        norm.param("weight", &[config.linear_head_dim])?
+        norm.param("weight", [config.linear_head_dim])?
             .broadcast_to(output.shape())?
     };
     let output = output
         .mul(&norm_scale)?
         .mul(&norm_weight)?
         .mul(&z.silu()?)?
-        .reshape(&[*batch, *sequence, width])?;
+        .reshape([*batch, *sequence, width])?;
     projection(
         cx.clone(),
         "out_proj",

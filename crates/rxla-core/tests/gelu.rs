@@ -35,7 +35,7 @@ fn real_gelu_variants_match_independent_references() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let values: Vec<f32> = (-200..=200).map(|i| i as f32 / 20.).collect();
     let graph = Tracer::default();
-    let x = graph.input(&[values.len() as i64]).unwrap();
+    let x = graph.input([values.len() as i64]).unwrap();
     let outputs = graph
         .compile_many(&client, &[x.gelu().unwrap(), x.gelu_tanh().unwrap()])
         .unwrap()
@@ -70,7 +70,7 @@ fn real_gelu_variants_match_independent_references() {
         max_errors[0], max_errors[1]
     );
     let graph = Tracer::default();
-    let x = graph.input(&[]).unwrap();
+    let x = graph.input([]).unwrap();
     assert_eq!(
         graph
             .compile(&client, &x.gelu().unwrap())
@@ -80,7 +80,7 @@ fn real_gelu_variants_match_independent_references() {
         [0.]
     );
     let graph = Tracer::default();
-    let x = graph.input(&[0, 2]).unwrap();
+    let x = graph.input([0, 2]).unwrap();
     assert!(
         graph
             .compile(&client, &x.gelu_tanh().unwrap())

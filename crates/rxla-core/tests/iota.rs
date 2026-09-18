@@ -11,7 +11,7 @@ fn iota_validates_axis_and_coordinate_range() {
     ] {
         assert!(g.iota_i32(&shape, axis).is_err());
     }
-    assert_eq!(g.iota_i32(&[2, 0, 3], 1).unwrap().shape(), [2, 0, 3]);
+    assert_eq!(g.iota_i32([2, 0, 3], 1).unwrap().shape(), [2, 0, 3]);
 }
 
 #[test]
@@ -21,7 +21,7 @@ fn real_iota_coordinates_on_each_axis_and_empty_arrays() {
     for dims in [[2, 3, 4], [2, 0, 4]] {
         for axis in 0..3 {
             let g = Tracer::default();
-            let indices = g.iota_i32(&dims, axis).unwrap();
+            let indices = g.iota_i32(dims, axis).unwrap();
             let exe = g.compile_many(&client, &[indices]).unwrap();
             let actual = exe.execute(&[]).unwrap()[0].to_vec::<i32>().unwrap();
             let inner: i64 = dims[axis + 1..].iter().product();
@@ -44,7 +44,7 @@ fn real_resident_offset_and_iota_generate_position_blocks() {
     let positions = g
         .iota_i32(&[4], 0)
         .unwrap()
-        .wrapping_add(&start.broadcast_to(&[4]).unwrap())
+        .wrapping_add(&start.broadcast_to([4]).unwrap())
         .unwrap();
     let features = positions
         .to_f32()

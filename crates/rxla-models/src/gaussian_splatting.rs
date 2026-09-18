@@ -72,14 +72,14 @@ pub struct GaussianRender {
 }
 
 fn column(input: &Tensor, index: i64) -> Result<Tensor> {
-    Ok(input.narrow(1, index, 1)?.reshape(&[input.shape()[0]])?)
+    Ok(input.narrow(1, index, 1)?.reshape([input.shape()[0]])?)
 }
 
 fn covariance(input: &Tensor, row: i64, column: i64) -> Result<Tensor> {
     Ok(input
         .narrow(1, row, 1)?
         .narrow(2, column, 1)?
-        .reshape(&[input.shape()[0]])?)
+        .reshape([input.shape()[0]])?)
 }
 
 /// Render camera-space 3D Gaussians using only ordinary RXLA/StableHLO ops.
@@ -152,11 +152,11 @@ pub fn render_gaussians(
 
     // Keep rejected Gaussians numerically well-defined. Multiplying an invalid
     // projection by a zero visibility mask would not remove an earlier NaN.
-    let near = z.scalar(camera.near)?.broadcast_to(&[count])?;
-    let far = z.scalar(camera.far)?.broadcast_to(&[count])?;
+    let near = z.scalar(camera.near)?.broadcast_to([count])?;
+    let far = z.scalar(camera.far)?.broadcast_to([count])?;
     let depth_mask = z.gt_mask(&near)?.mul(&z.lt_mask(&far)?)?.detach()?;
     let safe_z = depth_mask.select(&z, &near)?;
-    let inv_z = z.scalar(1.0)?.broadcast_to(&[count])?.div(&safe_z)?;
+    let inv_z = z.scalar(1.0)?.broadcast_to([count])?.div(&safe_z)?;
     let inv_z2 = inv_z.square()?;
     let j00 = inv_z.mul_scalar(camera.focal_x)?;
     let j02 = x.mul(&inv_z2)?.mul_scalar(-camera.focal_x)?;
@@ -206,24 +206,24 @@ pub fn render_gaussians(
         .add_scalar(camera.center_y)?;
     let pixel_x = pixels
         .narrow(2, 0, 1)?
-        .broadcast_to(&[camera.height, camera.width, count])?;
+        .broadcast_to([camera.height, camera.width, count])?;
     let pixel_y = pixels
         .narrow(2, 1, 1)?
-        .broadcast_to(&[camera.height, camera.width, count])?;
-    let dx = pixel_x.sub(&projected_x.reshape(&[1, 1, count])?.broadcast_to(&[
+        .broadcast_to([camera.height, camera.width, count])?;
+    let dx = pixel_x.sub(&projected_x.reshape([1, 1, count])?.broadcast_to([
         camera.height,
         camera.width,
         count,
     ])?)?;
-    let dy = pixel_y.sub(&projected_y.reshape(&[1, 1, count])?.broadcast_to(&[
+    let dy = pixel_y.sub(&projected_y.reshape([1, 1, count])?.broadcast_to([
         camera.height,
         camera.width,
         count,
     ])?)?;
     let broadcast = |value: &Tensor| {
         value
-            .reshape(&[1, 1, count])?
-            .broadcast_to(&[camera.height, camera.width, count])
+            .reshape([1, 1, count])?
+            .broadcast_to([camera.height, camera.width, count])
     };
     let exponent = dx
         .square()?
@@ -254,24 +254,24 @@ pub fn render_gaussians(
         .pad(&[[0, 0], [0, 0], [1, 0]], 1.0)?;
     let transmittance = exclusive.cumprod(2)?;
     let weights = alpha.mul(&transmittance)?;
-    let accumulated = weights.sum(&[2], false)?;
+    let accumulated = weights.sum([2], false)?;
     let color = weights
         .unsqueeze(3)?
-        .broadcast_to(&[camera.height, camera.width, count, 3])?
-        .mul(&colors.reshape(&[1, 1, count, 3])?.broadcast_to(&[
+        .broadcast_to([camera.height, camera.width, count, 3])?
+        .mul(&colors.reshape([1, 1, count, 3])?.broadcast_to([
             camera.height,
             camera.width,
             count,
             3,
         ])?)?
-        .sum(&[2], false)?;
+        .sum([2], false)?;
     let remaining = accumulated
         .mul_scalar(-1.0)?
         .add_scalar(1.0)?
         .unsqueeze(2)?
-        .broadcast_to(&[camera.height, camera.width, 3])?;
+        .broadcast_to([camera.height, camera.width, 3])?;
     let color = color.add(
-        &remaining.mul(&background.reshape(&[1, 1, 3])?.broadcast_to(&[
+        &remaining.mul(&background.reshape([1, 1, 3])?.broadcast_to([
             camera.height,
             camera.width,
             3,
@@ -291,18 +291,18 @@ mod tests {
     fn two_gaussians(tracer: &Tracer) -> Result<GaussianRender> {
         // Deliberately store the rear green Gaussian first. Correct
         // front-to-back sorting yields red=0.5, green=0.25 at the center.
-        let means = tracer.constant(&[2, 3], &[0., 0., 2., 0., 0., 1.])?;
+        let means = tracer.constant([2, 3], [0., 0., 2., 0., 0., 1.])?;
         let covariances = tracer.constant(
-            &[2, 3, 3],
-            &[
+            [2, 3, 3],
+            [
                 0.04, 0., 0., 0., 0.04, 0., 0., 0., 0.04, // rear
                 0.04, 0., 0., 0., 0.04, 0., 0., 0., 0.04, // front
             ],
         )?;
-        let colors = tracer.constant(&[2, 3], &[0., 1., 0., 1., 0., 0.])?;
-        let opacities = tracer.constant(&[2], &[0.5, 0.5])?;
-        let pixels = tracer.constant(&[1, 1, 2], &[0., 0.])?;
-        let background = tracer.constant(&[3], &[0., 0., 1.])?;
+        let colors = tracer.constant([2, 3], [0., 1., 0., 1., 0., 0.])?;
+        let opacities = tracer.constant([2], [0.5, 0.5])?;
+        let pixels = tracer.constant([1, 1, 2], [0., 0.])?;
+        let background = tracer.constant([3], [0., 0., 1.])?;
         render_gaussians(
             &means,
             &covariances,
@@ -331,12 +331,12 @@ mod tests {
     #[test]
     fn renderer_gradients_stay_in_stablehlo() {
         let tracer = Tracer::default();
-        let means = tracer.input(&[1, 3]).unwrap();
-        let covariances = tracer.input(&[1, 3, 3]).unwrap();
-        let colors = tracer.input(&[1, 3]).unwrap();
-        let opacities = tracer.input(&[1]).unwrap();
-        let pixels = tracer.constant(&[1, 1, 2], &[0.2, -0.1]).unwrap();
-        let background = tracer.constant(&[3], &[0., 0., 0.]).unwrap();
+        let means = tracer.input([1, 3]).unwrap();
+        let covariances = tracer.input([1, 3, 3]).unwrap();
+        let colors = tracer.input([1, 3]).unwrap();
+        let opacities = tracer.input([1]).unwrap();
+        let pixels = tracer.constant([1, 1, 2], [0.2, -0.1]).unwrap();
+        let background = tracer.constant([3], [0., 0., 0.]).unwrap();
         let render = render_gaussians(
             &means,
             &covariances,
@@ -347,7 +347,7 @@ mod tests {
             GaussianCamera::new(1, 1, 1., 1.).principal_point(0., 0.),
         )
         .unwrap();
-        let loss = render.color.sum(&[0, 1, 2], false).unwrap();
+        let loss = render.color.sum([0, 1, 2], false).unwrap();
         let gradients = loss
             .grad(&[
                 means.clone(),
@@ -385,12 +385,12 @@ mod tests {
     fn renderer_executes_gradients() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?) }?;
         let tracer = Tracer::default();
-        let means = tracer.input(&[1, 3])?;
-        let covariances = tracer.input(&[1, 3, 3])?;
-        let colors = tracer.input(&[1, 3])?;
-        let opacities = tracer.input(&[1])?;
-        let pixels = tracer.constant(&[1, 1, 2], &[0.2, -0.1])?;
-        let background = tracer.constant(&[3], &[0., 0., 0.])?;
+        let means = tracer.input([1, 3])?;
+        let covariances = tracer.input([1, 3, 3])?;
+        let colors = tracer.input([1, 3])?;
+        let opacities = tracer.input([1])?;
+        let pixels = tracer.constant([1, 1, 2], [0.2, -0.1])?;
+        let background = tracer.constant([3], [0., 0., 0.])?;
         let render = render_gaussians(
             &means,
             &covariances,
@@ -400,7 +400,7 @@ mod tests {
             &background,
             GaussianCamera::new(1, 1, 1., 1.).principal_point(0., 0.),
         )?;
-        let loss = render.color.sum(&[0, 1, 2], false)?;
+        let loss = render.color.sum([0, 1, 2], false)?;
         let gradients = loss.grad(&[
             means.clone(),
             covariances.clone(),

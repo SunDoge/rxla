@@ -10,10 +10,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH")?)? };
     if args[0] == "save" {
         let graph = Tracer::default();
-        let x = graph.input(&[2, 3])?;
-        let w = graph.input(&[3, 2])?;
+        let x = graph.input([2, 3])?;
+        let w = graph.input([3, 2])?;
         let y = x.matmul(&w)?;
-        let sum = y.sum(&[1], false)?;
+        let sum = y.sum([1], false)?;
         let bytes = graph.compile_many(&client, &[y, sum])?.serialize()?;
         // Never overwrite an existing artifact. The operator owns distribution,
         // plugin pinning and protection against untrusted file modification.

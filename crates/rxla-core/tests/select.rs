@@ -3,10 +3,10 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn selection_validates_every_operand() {
     let g = Tracer::default();
-    let mask = g.input(&[2]).unwrap();
-    let value = g.input(&[2]).unwrap();
-    let wrong_shape = g.input(&[]).unwrap();
-    let foreign = Tracer::default().input(&[2]).unwrap();
+    let mask = g.input([2]).unwrap();
+    let value = g.input([2]).unwrap();
+    let wrong_shape = g.input([]).unwrap();
+    let foreign = Tracer::default().input([2]).unwrap();
     for invalid in [wrong_shape, foreign] {
         assert!(mask.select(&invalid, &value).is_err());
         assert!(mask.select(&value, &invalid).is_err());
@@ -19,9 +19,9 @@ fn selection_validates_every_operand() {
 fn real_selection_nonfinite_values_and_dynamic_masks() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let mask = g.input(&[8]).unwrap();
-    let a = g.input(&[8]).unwrap();
-    let b = g.input(&[8]).unwrap();
+    let mask = g.input([8]).unwrap();
+    let a = g.input([8]).unwrap();
+    let b = g.input([8]).unwrap();
     let selected = mask.select(&a, &b).unwrap();
     let finite_only = a.is_finite_mask().unwrap().select(&a, &b).unwrap();
     let exe = g.compile_many(&client, &[selected, finite_only]).unwrap();
@@ -76,8 +76,8 @@ fn real_selection_nonfinite_values_and_dynamic_masks() {
     for dims in [vec![], vec![0, 2]] {
         let g = Tracer::default();
         let mask = g.input(&dims).unwrap();
-        let yes = g.constant(&[], &[3.]).unwrap().broadcast_to(&dims).unwrap();
-        let no = g.constant(&[], &[7.]).unwrap().broadcast_to(&dims).unwrap();
+        let yes = g.constant([], [3.]).unwrap().broadcast_to(&dims).unwrap();
+        let no = g.constant([], [7.]).unwrap().broadcast_to(&dims).unwrap();
         let exe = g
             .compile(&client, &mask.select(&yes, &no).unwrap())
             .unwrap();

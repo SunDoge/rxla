@@ -3,10 +3,10 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn normal_density_requires_explicit_broadcast_and_same_graph() {
     let g = Tracer::default();
-    let x = g.input(&[2, 3]).unwrap();
+    let x = g.input([2, 3]).unwrap();
     for bad in [
-        g.input(&[3]).unwrap(),
-        Tracer::default().input(&[2, 3]).unwrap(),
+        g.input([3]).unwrap(),
+        Tracer::default().input([2, 3]).unwrap(),
     ] {
         assert!(x.normal_log_prob(&bad, &x).is_err());
         assert!(x.normal_log_prob(&x, &bad).is_err());
@@ -18,16 +18,16 @@ fn normal_density_requires_explicit_broadcast_and_same_graph() {
 fn real_detaching_actions_selects_score_instead_of_pathwise_derivative() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let mean = g.input(&[3]).unwrap();
-    let log_std = g.input(&[3]).unwrap();
-    let eps = g.constant(&[3], &[-1.5, 0., 2.]).unwrap();
+    let mean = g.input([3]).unwrap();
+    let log_std = g.input([3]).unwrap();
+    let eps = g.constant([3], [-1.5, 0., 2.]).unwrap();
     let action = mean
         .add(&log_std.exp().unwrap().mul(&eps).unwrap())
         .unwrap();
     let pathwise = action
         .normal_log_prob(&mean, &log_std)
         .unwrap()
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[mean.clone(), log_std.clone()])
         .unwrap();
@@ -36,7 +36,7 @@ fn real_detaching_actions_selects_score_instead_of_pathwise_derivative() {
         .unwrap()
         .normal_log_prob(&mean, &log_std)
         .unwrap()
-        .sum(&[0], false)
+        .sum([0], false)
         .unwrap()
         .grad(&[mean, log_std])
         .unwrap();

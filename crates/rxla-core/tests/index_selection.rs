@@ -3,10 +3,10 @@ use rxla_core::{CacheLimits, Client, Compiler, StateGraph, Tracer};
 #[test]
 fn index_selection_validates_operands() {
     let g = Tracer::default();
-    let mask = g.input(&[2]).unwrap();
-    let value = g.input_i32(&[2]).unwrap();
+    let mask = g.input([2]).unwrap();
+    let value = g.input_i32([2]).unwrap();
     let wrong = g.scalar_i32(1).unwrap();
-    let foreign = Tracer::default().input_i32(&[2]).unwrap();
+    let foreign = Tracer::default().input_i32([2]).unwrap();
     for invalid in [wrong, foreign] {
         assert!(mask.select(&invalid, &value).is_err());
         assert!(mask.select(&value, &invalid).is_err());

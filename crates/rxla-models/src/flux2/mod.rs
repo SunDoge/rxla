@@ -256,7 +256,7 @@ pub fn flux2_euler_step(
         });
     }
     let coefficient = step_size
-        .reshape(&[sample.shape()[0], 1, 1])?
+        .reshape([sample.shape()[0], 1, 1])?
         .broadcast_to(sample.shape())?;
     Ok(sample.add(&prediction.mul(&coefficient)?)?)
 }
@@ -270,11 +270,11 @@ mod tests {
     fn tiny_flux2_traces_with_official_parameter_paths() {
         let config = Flux2Config::tiny();
         let model = Model::new(|cx: Cx| {
-            let image = cx.input(&[1, 3, 8])?;
-            let image_ids = cx.input(&[1, 3, 4])?;
-            let timestep = cx.input(&[1])?;
-            let context = cx.input(&[1, 2, 12])?;
-            let context_ids = cx.input(&[1, 2, 4])?;
+            let image = cx.input([1, 3, 8])?;
+            let image_ids = cx.input([1, 3, 4])?;
+            let timestep = cx.input([1])?;
+            let context = cx.input([1, 2, 12])?;
+            let context_ids = cx.input([1, 2, 4])?;
             flux2(
                 cx,
                 &image,
@@ -320,11 +320,11 @@ mod tests {
     fn klein_4b_schema_has_the_official_parameter_count() {
         let config = Flux2Config::klein_4b();
         let model = Model::new(|cx: Cx| {
-            let image = cx.input(&[1, 1, 128])?;
-            let image_ids = cx.input(&[1, 1, 4])?;
-            let timestep = cx.input(&[1])?;
-            let context = cx.input(&[1, 1, 7680])?;
-            let context_ids = cx.input(&[1, 1, 4])?;
+            let image = cx.input([1, 1, 128])?;
+            let image_ids = cx.input([1, 1, 4])?;
+            let timestep = cx.input([1])?;
+            let context = cx.input([1, 1, 7680])?;
+            let context_ids = cx.input([1, 1, 4])?;
             flux2(
                 cx,
                 &image,
@@ -355,12 +355,12 @@ mod tests {
     fn reusable_euler_step_keeps_one_parameter_tree() {
         let config = Flux2Config::tiny();
         let model = Model::new(|cx: Cx| {
-            let image = cx.input(&[1, 3, 8])?;
-            let image_ids = cx.input(&[1, 3, 4])?;
-            let timestep = cx.input(&[1])?;
-            let step_size = cx.input(&[1])?;
-            let context = cx.input(&[1, 2, 12])?;
-            let context_ids = cx.input(&[1, 2, 4])?;
+            let image = cx.input([1, 3, 8])?;
+            let image_ids = cx.input([1, 3, 4])?;
+            let timestep = cx.input([1])?;
+            let step_size = cx.input([1])?;
+            let context = cx.input([1, 2, 12])?;
+            let context_ids = cx.input([1, 2, 4])?;
             flux2_euler_step(
                 cx,
                 &image,

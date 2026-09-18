@@ -17,14 +17,14 @@ fn reference(a: &[f64], b: &[f64]) -> f64 {
 #[test]
 fn giou_validates_and_broadcasts_without_pairwise_axes() {
     let g = Tracer::default();
-    let a = g.input(&[2, 1, 4]).unwrap();
+    let a = g.input([2, 1, 4]).unwrap();
     assert_eq!(
-        a.box_giou(&g.input(&[3, 4]).unwrap()).unwrap().shape(),
+        a.box_giou(&g.input([3, 4]).unwrap()).unwrap().shape(),
         [2, 3]
     );
-    assert!(a.box_giou(&g.input(&[2, 3]).unwrap()).is_err());
-    assert!(a.box_giou(&g.input(&[3, 2, 4]).unwrap()).is_err());
-    assert!(a.box_giou(&Tracer::default().input(&[4]).unwrap()).is_err());
+    assert!(a.box_giou(&g.input([2, 3]).unwrap()).is_err());
+    assert!(a.box_giou(&g.input([3, 2, 4]).unwrap()).is_err());
+    assert!(a.box_giou(&Tracer::default().input([4]).unwrap()).is_err());
 }
 
 #[test]
@@ -32,8 +32,8 @@ fn giou_validates_and_broadcasts_without_pairwise_axes() {
 fn real_giou_values_and_disjoint_gradients_match_f64() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let a = g.input(&[4]).unwrap();
-    let b = g.input(&[4]).unwrap();
+    let a = g.input([4]).unwrap();
+    let b = g.input([4]).unwrap();
     let y = a.box_giou(&b).unwrap();
     let mut roots = vec![y.clone()];
     roots.extend(y.grad(&[a, b]).unwrap());
@@ -72,8 +72,8 @@ fn real_giou_values_and_disjoint_gradients_match_f64() {
         }
     }
     let g = Tracer::default();
-    let a = g.input(&[0, 4]).unwrap();
-    let b = g.input(&[4]).unwrap();
+    let a = g.input([0, 4]).unwrap();
+    let b = g.input([4]).unwrap();
     let y = a.box_giou(&b).unwrap();
     assert!(
         g.compile(&client, &y)

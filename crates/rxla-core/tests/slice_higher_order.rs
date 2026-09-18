@@ -6,7 +6,7 @@ fn real_strided_slice_polynomial_derivatives_and_empty_selection() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     for empty in [false, true] {
         let g = Tracer::default();
-        let x = g.input(&[3, 4]).unwrap();
+        let x = g.input([3, 4]).unwrap();
         let selected = x
             .slice(&[1, 0], &[if empty { 1 } else { 3 }, 4], &[1, 2])
             .unwrap();
@@ -14,7 +14,7 @@ fn real_strided_slice_polynomial_derivatives_and_empty_selection() {
         let mut roots = Vec::new();
         for _ in 0..4 {
             current = current
-                .sum(&[0, 1], false)
+                .sum([0, 1], false)
                 .unwrap()
                 .grad(std::slice::from_ref(&x))
                 .unwrap()

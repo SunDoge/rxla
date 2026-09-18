@@ -13,8 +13,8 @@ fn iou(a: &[f64], b: &[f64]) -> f64 {
 #[test]
 fn box_shape_validation_and_batch_broadcast() {
     let g = Tracer::default();
-    let a = g.input(&[2, 1, 3, 4]).unwrap();
-    let b = g.input(&[5, 2, 4]).unwrap();
+    let a = g.input([2, 1, 3, 4]).unwrap();
+    let b = g.input([5, 2, 4]).unwrap();
     assert_eq!(a.box_area().unwrap().shape(), [2, 1, 3]);
     assert_eq!(a.pairwise_box_iou(&b).unwrap().shape(), [2, 5, 3, 2]);
     for shape in [vec![], vec![3], vec![2, 5]] {
@@ -23,9 +23,9 @@ fn box_shape_validation_and_batch_broadcast() {
         assert!(a.pairwise_box_iou(&bad).is_err());
         assert!(a.box_iou(&bad).is_err());
     }
-    assert!(g.input(&[4]).unwrap().pairwise_box_iou(&b).is_err());
+    assert!(g.input([4]).unwrap().pairwise_box_iou(&b).is_err());
     assert!(
-        a.pairwise_box_iou(&Tracer::default().input(&[2, 4]).unwrap())
+        a.pairwise_box_iou(&Tracer::default().input([2, 4]).unwrap())
             .is_err()
     );
 }
@@ -33,14 +33,14 @@ fn box_shape_validation_and_batch_broadcast() {
 #[test]
 fn aligned_iou_has_no_quadratic_intermediates() {
     let g = Tracer::default();
-    let a = g.input(&[128, 4]).unwrap();
-    let b = g.input(&[128, 4]).unwrap();
+    let a = g.input([128, 4]).unwrap();
+    let b = g.input([128, 4]).unwrap();
     let y = a.box_iou(&b).unwrap();
     assert_eq!(y.shape(), [128]);
     assert!(!g.stablehlo(&y).unwrap().contains("tensor<128x128"));
-    assert!(a.box_iou(&g.input(&[2, 4]).unwrap()).is_err());
-    assert!(a.box_iou(&Tracer::default().input(&[4]).unwrap()).is_err());
-    assert_eq!(a.box_iou(&g.input(&[4]).unwrap()).unwrap().shape(), [128]);
+    assert!(a.box_iou(&g.input([2, 4]).unwrap()).is_err());
+    assert!(a.box_iou(&Tracer::default().input([4]).unwrap()).is_err());
+    assert_eq!(a.box_iou(&g.input([4]).unwrap()).unwrap().shape(), [128]);
 }
 
 #[test]
@@ -51,8 +51,8 @@ fn real_pairwise_boxes_match_f64_and_smooth_gradients() {
         0., 0., 2., 3., 1., 1., 4., 5., 3., 2., 1., 4., 0., 0., 0., 0.,
     ];
     let g = Tracer::default();
-    let a = g.input(&[4, 4]).unwrap();
-    let b = g.input(&[4, 4]).unwrap();
+    let a = g.input([4, 4]).unwrap();
+    let b = g.input([4, 4]).unwrap();
     let output = a.pairwise_box_iou(&b).unwrap();
     let exe = g
         .compile_many(
@@ -63,8 +63,8 @@ fn real_pairwise_boxes_match_f64_and_smooth_gradients() {
     let actual = exe.run_many(&[&boxes, &boxes]).unwrap();
     assert_eq!(actual[2], [1., 1., 0., 0.]);
     let aligned_graph = Tracer::default();
-    let aligned_a = aligned_graph.input(&[4, 4]).unwrap();
-    let aligned_b = aligned_graph.input(&[4]).unwrap();
+    let aligned_a = aligned_graph.input([4, 4]).unwrap();
+    let aligned_b = aligned_graph.input([4]).unwrap();
     let aligned_y = aligned_a.box_iou(&aligned_b).unwrap();
     let aligned_exe = aligned_graph.compile(&client, &aligned_y).unwrap();
     let aligned_values = aligned_exe.run(&[&boxes, &boxes[..4]]).unwrap();
@@ -72,8 +72,8 @@ fn real_pairwise_boxes_match_f64_and_smooth_gradients() {
         assert_eq!(aligned_values[i], actual[0][i * 4]);
     }
     let batched = Tracer::default();
-    let ba = batched.input(&[2, 1, 4]).unwrap();
-    let bb = batched.input(&[1, 2, 4]).unwrap();
+    let ba = batched.input([2, 1, 4]).unwrap();
+    let bb = batched.input([1, 2, 4]).unwrap();
     let by = ba.pairwise_box_iou(&bb).unwrap();
     assert_eq!(by.shape(), [2, 1, 2]);
     let bexe = batched.compile(&client, &by).unwrap();
@@ -93,11 +93,11 @@ fn real_pairwise_boxes_match_f64_and_smooth_gradients() {
     }
     // Strictly overlapping, unequal edges avoid nondifferentiable boundaries.
     let g = Tracer::default();
-    let a = g.input(&[1, 4]).unwrap();
-    let b = g.input(&[1, 4]).unwrap();
-    let loss = a.pairwise_box_iou(&b).unwrap().sum(&[0, 1], false).unwrap();
+    let a = g.input([1, 4]).unwrap();
+    let b = g.input([1, 4]).unwrap();
+    let loss = a.pairwise_box_iou(&b).unwrap().sum([0, 1], false).unwrap();
     let mut grads = loss.grad(&[a.clone(), b.clone()]).unwrap();
-    let aligned_loss = a.box_iou(&b).unwrap().sum(&[0], false).unwrap();
+    let aligned_loss = a.box_iou(&b).unwrap().sum([0], false).unwrap();
     grads.extend(aligned_loss.grad(&[a, b]).unwrap());
     let exe = g.compile_many(&client, &grads).unwrap();
     let av = [0., 0., 2., 3.];
@@ -117,8 +117,8 @@ fn real_pairwise_boxes_match_f64_and_smooth_gradients() {
     }
     for (n, m) in [(0, 2), (2, 0)] {
         let g = Tracer::default();
-        let a = g.input(&[n, 4]).unwrap();
-        let b = g.input(&[m, 4]).unwrap();
+        let a = g.input([n, 4]).unwrap();
+        let b = g.input([m, 4]).unwrap();
         let y = a.pairwise_box_iou(&b).unwrap();
         assert_eq!(y.shape(), [n, m]);
         let exe = g.compile(&client, &y).unwrap();
@@ -129,8 +129,8 @@ fn real_pairwise_boxes_match_f64_and_smooth_gradients() {
         );
     }
     let g = Tracer::default();
-    let a = g.input(&[0, 4]).unwrap();
-    let b = g.input(&[4]).unwrap();
+    let a = g.input([0, 4]).unwrap();
+    let b = g.input([4]).unwrap();
     let y = a.box_iou(&b).unwrap();
     assert_eq!(y.shape(), [0]);
     assert!(

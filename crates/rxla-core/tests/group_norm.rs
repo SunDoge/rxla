@@ -3,7 +3,7 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn validates_group_norm_contract() {
     let graph = Tracer::default();
-    let x = graph.input(&[2, 4, 3]).unwrap();
+    let x = graph.input([2, 4, 3]).unwrap();
     for groups in [-1, 0, 3, 5] {
         assert!(x.group_norm(groups, None, None, 1e-3).is_err());
     }
@@ -20,15 +20,15 @@ fn validates_group_norm_contract() {
         );
     }
     for affine in [
-        graph.input(&[1, 4]).unwrap(),
-        Tracer::default().input(&[4]).unwrap(),
+        graph.input([1, 4]).unwrap(),
+        Tracer::default().input([4]).unwrap(),
     ] {
         assert!(x.group_norm(2, Some(&affine), None, 1e-3).is_err());
         assert!(x.group_norm(2, None, Some(&affine), 1e-3).is_err());
     }
     assert_eq!(
         graph
-            .input(&[0, 4, 3])
+            .input([0, 4, 3])
             .unwrap()
             .group_norm(2, None, None, 1e-3)
             .unwrap()
@@ -97,8 +97,8 @@ fn real_group_norm_values_affine_gradients_and_hessian_vector() {
         for groups in [1, 2, 4] {
             let graph = Tracer::default();
             let x = graph.input(&shape).unwrap();
-            let gamma = graph.input(&[4]).unwrap();
-            let beta = graph.input(&[4]).unwrap();
+            let gamma = graph.input([4]).unwrap();
+            let beta = graph.input([4]).unwrap();
             let y = x
                 .group_norm(groups, Some(&gamma), Some(&beta), 0.001)
                 .unwrap();

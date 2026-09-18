@@ -4,14 +4,14 @@ use rxla_core::{Client, Tracer, random::categorical_from_bits};
 fn topk_sampling_validates_candidate_shape() {
     use rxla_core::random::topk_categorical_from_bits;
     let g = Tracer::default();
-    let x = g.input(&[2, 5]).unwrap();
-    let bits = g.input_i32(&[2, 2]).unwrap();
+    let x = g.input([2, 5]).unwrap();
+    let bits = g.input_i32([2, 2]).unwrap();
     for (k, axis) in [(0, 1), (6, 1), (2, 2)] {
         assert!(topk_categorical_from_bits(&x, &bits, k, axis).is_err());
     }
-    assert!(topk_categorical_from_bits(&x, &g.input_i32(&[2, 5]).unwrap(), 2, 1).is_err());
+    assert!(topk_categorical_from_bits(&x, &g.input_i32([2, 5]).unwrap(), 2, 1).is_err());
     assert!(
-        topk_categorical_from_bits(&x, &Tracer::default().input_i32(&[2, 2]).unwrap(), 2, 1)
+        topk_categorical_from_bits(&x, &Tracer::default().input_i32([2, 2]).unwrap(), 2, 1)
             .is_err()
     );
 }
@@ -44,8 +44,8 @@ fn real_topk_sampling_validates_discarded_logits_and_matches_f64() {
                 [k as i64, 6]
             };
             let g = Tracer::default();
-            let x = g.input(&shape).unwrap();
-            let bits = g.input_i32(&bits_shape).unwrap();
+            let x = g.input(shape).unwrap();
+            let bits = g.input_i32(bits_shape).unwrap();
             let sample = topk_categorical_from_bits(&x, &bits, k, axis).unwrap();
             let exe = g
                 .compile_many(&client, &[sample.indices, sample.valid])
@@ -110,7 +110,7 @@ fn real_topk_sequence_only_reserves_candidates_and_rejects_invalid_rows() {
     assert!(sequence.topk_categorical(&x, 0, 1).is_err());
     assert!(
         sequence
-            .topk_categorical(&Tracer::default().input(&[2, 4]).unwrap(), 2, 1)
+            .topk_categorical(&Tracer::default().input([2, 4]).unwrap(), 2, 1)
             .is_err()
     );
     let first = sequence.topk_categorical(&x, 2, 1).unwrap();
@@ -119,7 +119,7 @@ fn real_topk_sequence_only_reserves_candidates_and_rejects_invalid_rows() {
         .valid
         .mul(&second.valid)
         .unwrap()
-        .min(&[0], false)
+        .min([0], false)
         .unwrap();
     let accepted = sequence.commit_if(&mut g, &valid).unwrap();
     let program = g
@@ -185,14 +185,14 @@ fn real_sequence_rejection_resume_and_wrap_are_atomic() {
     assert!(sequence.categorical(&logits, 2).is_err());
     assert!(
         sequence
-            .categorical(&Tracer::default().input(&[2, 3]).unwrap(), 1)
+            .categorical(&Tracer::default().input([2, 3]).unwrap(), 1)
             .is_err()
     );
     let first = sequence.categorical(&logits, 1).unwrap();
     let second = sequence.categorical(&logits, 1).unwrap();
     let condition = first
         .valid
-        .min(&[0], false)
+        .min([0], false)
         .unwrap()
         .mul(&requested)
         .unwrap();
@@ -291,9 +291,9 @@ fn real_threefry_categorical_frequency_smoke() {
     let zero = g.scalar_i32(0).unwrap();
     let draw = rxla_core::random::threefry2x32_blocks([&zero; 2], [&zero; 2], &[8192, 3]).unwrap();
     let logits = g
-        .constant(&[3], &[0.1_f32.ln(), 0.3_f32.ln(), 0.6_f32.ln()])
+        .constant([3], [0.1_f32.ln(), 0.3_f32.ln(), 0.6_f32.ln()])
         .unwrap()
-        .broadcast_to(&[8192, 3])
+        .broadcast_to([8192, 3])
         .unwrap();
     let sample = categorical_from_bits(&logits, &draw.bits[0], 1).unwrap();
     let exe = g
@@ -316,13 +316,13 @@ fn real_threefry_categorical_frequency_smoke() {
 #[test]
 fn validates_shapes_graphs_and_axis() {
     let g = Tracer::default();
-    let x = g.input(&[2, 3]).unwrap();
-    let bits = g.input_i32(&[2, 3]).unwrap();
+    let x = g.input([2, 3]).unwrap();
+    let bits = g.input_i32([2, 3]).unwrap();
     assert!(categorical_from_bits(&x, &bits, 2).is_err());
-    assert!(categorical_from_bits(&x, &g.input_i32(&[3]).unwrap(), 1).is_err());
-    assert!(categorical_from_bits(&x, &Tracer::default().input_i32(&[2, 3]).unwrap(), 1).is_err());
-    let empty = g.input(&[2, 0]).unwrap();
-    assert!(categorical_from_bits(&empty, &g.input_i32(&[2, 0]).unwrap(), 1).is_err());
+    assert!(categorical_from_bits(&x, &g.input_i32([3]).unwrap(), 1).is_err());
+    assert!(categorical_from_bits(&x, &Tracer::default().input_i32([2, 3]).unwrap(), 1).is_err());
+    let empty = g.input([2, 0]).unwrap();
+    assert!(categorical_from_bits(&empty, &g.input_i32([2, 0]).unwrap(), 1).is_err());
     let draw = categorical_from_bits(&x, &bits, 0).unwrap();
     assert_eq!(draw.indices.shape(), &[3]);
     assert_eq!(draw.valid.shape(), &[3]);

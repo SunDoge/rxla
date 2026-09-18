@@ -3,14 +3,14 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn index_tensor_validation() {
     let g = Tracer::default();
-    assert!(g.input_i32(&[-1]).is_err());
-    assert!(g.constant_i32(&[2], &[1]).is_err());
-    let x = g.input(&[4, 3]).unwrap();
-    let ids = g.input_i32(&[2, 5]).unwrap();
+    assert!(g.input_i32([-1]).is_err());
+    assert!(g.constant_i32([2], [1]).is_err());
+    let x = g.input([4, 3]).unwrap();
+    let ids = g.input_i32([2, 5]).unwrap();
     assert_eq!(ids.shape(), [2, 5]);
     assert_eq!(x.take(&ids, 0).unwrap().shape(), [2, 5, 3]);
     assert!(x.take(&ids, 2).is_err());
-    assert!(g.input(&[0, 3]).unwrap().take(&ids, 0).is_err());
+    assert!(g.input([0, 3]).unwrap().take(&ids, 0).is_err());
     assert!(
         x.take(&Tracer::default().input_i32_scalar().unwrap(), 0)
             .is_err()
@@ -69,9 +69,9 @@ fn real_gather_shapes_constants_and_clamping() {
 fn real_batched_embedding_projection() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let table = g.input(&[4, 3]).unwrap();
-    let ids = g.input_i32(&[2, 2]).unwrap();
-    let weights = g.constant(&[3, 2], &[1., -1., 0.5, 0., 0., 1.]).unwrap();
+    let table = g.input([4, 3]).unwrap();
+    let ids = g.input_i32([2, 2]).unwrap();
+    let weights = g.constant([3, 2], [1., -1., 0.5, 0., 0., 1.]).unwrap();
     let output = table
         .take(&ids, 0)
         .unwrap()

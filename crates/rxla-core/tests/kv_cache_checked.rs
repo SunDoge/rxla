@@ -16,7 +16,7 @@ fn real_checked_chunk_updates_preserve_pair_on_invalid_positions() {
         .unwrap();
     let grad = update
         .keys
-        .sum(&[0, 1], false)
+        .sum([0, 1], false)
         .unwrap()
         .grad(&[k])
         .unwrap()

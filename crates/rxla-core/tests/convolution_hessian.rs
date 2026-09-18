@@ -5,8 +5,8 @@ use rxla_core::{Client, Conv2dOptions, Tracer};
 fn real_convolution_mixed_derivatives_through_fourth_order() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[1, 1, 1, 1]).unwrap();
-    let w = g.input(&[1, 1, 1, 1]).unwrap();
+    let x = g.input([1, 1, 1, 1]).unwrap();
+    let w = g.input([1, 1, 1, 1]).unwrap();
     let mut current = x
         .conv2d(&w, Default::default())
         .unwrap()
@@ -17,7 +17,7 @@ fn real_convolution_mixed_derivatives_through_fourth_order() {
     let mut roots = Vec::new();
     for input in [&x, &x, &w, &w, &w] {
         current = current
-            .sum(&[0, 1, 2, 3], false)
+            .sum([0, 1, 2, 3], false)
             .unwrap()
             .grad(std::slice::from_ref(input))
             .unwrap()
@@ -44,8 +44,8 @@ fn real_convolution_mixed_derivatives_through_fourth_order() {
 fn real_grouped_convolution_joint_hessian_vector_matches_analytic_reference() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input(&[1, 2, 2, 2]).unwrap();
-    let w = g.input(&[1, 1, 1, 4]).unwrap();
+    let x = g.input([1, 2, 2, 2]).unwrap();
+    let w = g.input([1, 1, 1, 4]).unwrap();
     let vx = g.input(x.shape()).unwrap();
     let vw = g.input(w.shape()).unwrap();
     let y = x
@@ -60,7 +60,7 @@ fn real_grouped_convolution_joint_hessian_vector_matches_analytic_reference() {
     let loss = y
         .square()
         .unwrap()
-        .sum(&[0, 1, 2, 3], false)
+        .sum([0, 1, 2, 3], false)
         .unwrap()
         .mul_scalar(0.5)
         .unwrap();
@@ -68,15 +68,9 @@ fn real_grouped_convolution_joint_hessian_vector_matches_analytic_reference() {
     let directional = first[0]
         .mul(&vx)
         .unwrap()
-        .sum(&[0, 1, 2, 3], false)
+        .sum([0, 1, 2, 3], false)
         .unwrap()
-        .add(
-            &first[1]
-                .mul(&vw)
-                .unwrap()
-                .sum(&[0, 1, 2, 3], false)
-                .unwrap(),
-        )
+        .add(&first[1].mul(&vw).unwrap().sum([0, 1, 2, 3], false).unwrap())
         .unwrap();
     let second = directional.grad(&[x, w]).unwrap();
     let exe = g

@@ -3,8 +3,8 @@ use rxla_core::{Client, Tracer};
 #[test]
 fn integer_and_float_slice_validation_agree() {
     let g = Tracer::default();
-    let i = g.input_i32(&[2, 3]).unwrap();
-    let f = g.input(&[2, 3]).unwrap();
+    let i = g.input_i32([2, 3]).unwrap();
+    let f = g.input([2, 3]).unwrap();
     for (starts, limits, strides) in [
         (vec![0], vec![2, 3], vec![1, 1]),
         (vec![0, 0], vec![2], vec![1, 1]),
@@ -29,7 +29,7 @@ fn integer_and_float_slice_validation_agree() {
         assert!(f.narrow(axis, start, length).is_err());
     }
     assert_eq!(i.narrow(1, 3, 0).unwrap().shape(), [2, 0]);
-    let huge = g.input_i32(&[i64::MAX]).unwrap();
+    let huge = g.input_i32([i64::MAX]).unwrap();
     assert_eq!(
         huge.slice(&[0], &[i64::MAX], &[i64::MAX]).unwrap().shape(),
         [1]
@@ -41,7 +41,7 @@ fn integer_and_float_slice_validation_agree() {
 fn real_i32_slices_preserve_full_words_scalar_and_empty_shapes() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
     let g = Tracer::default();
-    let x = g.input_i32(&[2, 3, 4]).unwrap();
+    let x = g.input_i32([2, 3, 4]).unwrap();
     let mut outputs = vec![x.slice(&[0, 1, 0], &[2, 3, 4], &[1, 1, 2]).unwrap()];
     for axis in 0..3 {
         outputs.push(x.narrow(axis, 1, 1).unwrap());
