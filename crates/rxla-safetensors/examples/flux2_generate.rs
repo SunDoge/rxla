@@ -1,6 +1,6 @@
 use clap::Parser;
 use image::{Rgb, RgbImage};
-use rxla_core::{Buffer, CacheLimits, Client, Compiler};
+use rxla_core::{Buffer, CacheLimits, Client, Compiler, DType};
 use rxla_models::{
     flux2::{Flux2Config, Flux2EulerScheduler, flux2_euler_step},
     flux2_autoencoder_decoder,
@@ -28,6 +28,9 @@ struct Args {
     height: i64,
     #[arg(long, default_value_t = 256)]
     width: i64,
+    /// Complete denoising passes discarded before the measured generation.
+    #[arg(long, default_value_t = 0)]
+    warmup: usize,
 }
 
 fn upload(client: &Client, checkpoint: &mut SafeTensors, name: &str) -> Result<Buffer> {
@@ -53,7 +56,7 @@ fn run(args: Args) -> Result<()> {
         return Err("conditioning context must have shape [1, sequence, 7680]".into());
     }
     let context_tokens = i64::try_from(context_shape[1])?;
-    let mut sample = upload(&client, &mut conditioning, "image")?;
+    let initial_sample = upload(&client, &mut conditioning, "image")?;
     let image_ids = upload(&client, &mut conditioning, "image_ids")?;
     let context = upload(&client, &mut conditioning, "context")?;
     let context_ids = upload(&client, &mut conditioning, "context_ids")?;
@@ -86,7 +89,9 @@ fn run(args: Args) -> Result<()> {
     transformer_checkpoint.validate_parameter_schema(denoise.schema())?;
     let transformer_weights =
         transformer_checkpoint.load_parameter_schema(&client, denoise.schema())?;
-    let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+    let mut compiler = Compiler::new(client.clone(), CacheLimits::default())
+        .with_compute_dtype(DType::BF16)
+        .with_cudnn_attention(true);
     let compile_started = std::time::Instant::now();
     let denoise = denoise
         .compile(&mut compiler)?
@@ -94,20 +99,35 @@ fn run(args: Args) -> Result<()> {
     let denoise_compile_ms = compile_started.elapsed().as_secs_f64() * 1e3;
 
     let schedule = Flux2EulerScheduler::klein_4b(image_tokens as usize)?;
-    let denoise_started = std::time::Instant::now();
-    for index in 0..4 {
-        let step = schedule.step(index)?;
-        let timestep = client.buffer(&[1], &[step.timestep])?;
-        let step_size = client.buffer(&[1], &[step.next_timestep - step.timestep])?;
-        sample = denoise.run((
-            &sample,
-            &image_ids,
-            &timestep,
-            &step_size,
-            &context,
-            &context_ids,
-        ))?;
+    let timestep_buffers = (0..4)
+        .map(|index| {
+            let step = schedule.step(index)?;
+            Ok((
+                client.buffer(&[1], &[step.timestep])?,
+                client.buffer(&[1], &[step.next_timestep - step.timestep])?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let evaluate = || -> Result<Buffer> {
+        let mut sample = initial_sample.clone();
+        for (timestep, step_size) in &timestep_buffers {
+            sample = denoise.run((
+                &sample,
+                &image_ids,
+                timestep,
+                step_size,
+                &context,
+                &context_ids,
+            ))?;
+        }
+        Ok(sample)
+    };
+    for _ in 0..args.warmup {
+        evaluate()?.to_vec::<f32>()?;
     }
+    let denoise_started = std::time::Instant::now();
+    let sample = evaluate()?;
+    sample.to_vec::<f32>()?;
     let denoise_ms = denoise_started.elapsed().as_secs_f64() * 1e3;
 
     let decoder = Model::new(|cx: Cx, tokens| {
@@ -141,10 +161,11 @@ fn run(args: Args) -> Result<()> {
     }
     output.save(&args.output)?;
     println!(
-        "backend={} size={}x{} denoise_compile_ms={denoise_compile_ms:.3} denoise_ms={denoise_ms:.3} vae_compile_ms={vae_compile_ms:.3} decode_ms={decode_ms:.3} output={}",
+        "backend={} size={}x{} warmup={} denoise_compile_ms={denoise_compile_ms:.3} denoise_ms={denoise_ms:.3} vae_compile_ms={vae_compile_ms:.3} decode_ms={decode_ms:.3} output={}",
         client.info()?.platform,
         args.width,
         args.height,
+        args.warmup,
         args.output.display(),
     );
     Ok(())

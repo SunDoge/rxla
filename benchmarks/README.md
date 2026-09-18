@@ -216,13 +216,13 @@ cargo run -p rxla-safetensors --features model --example flux2_bench -- \
 
 On September 18, 2026, the official 7.75 GB BF16 checkpoint matched all 149
 schema paths directly and ran on an RTX 5080 through JAX's CUDA 13 PJRT plugin.
-With XLA's 11.67 GiB allocator pool, loading took `65.05 s`, compilation took
-`42.32 s`, and one synchronized transformer evaluation averaged `388.28 ms`
-(`388.16 ms` median). Four distilled denoising evaluations therefore account
-for about `1.55 s` before text encoding and VAE decoding. Inputs were zeroed,
-so this proves checkpoint compatibility and executable memory fit, not image
-quality. The compiler emitted extensive register-spill warnings; BF16-native
-compute and attention/kernel work remain performance targets.
+An initial F32-compute run at 1,024 image tokens and 512 context tokens took
+`42.32 s` to compile and averaged `388.28 ms` per synchronized transformer
+evaluation. Lowering the same IR to BF16 and recognizing attention as cuDNN
+FMHA reduced compilation to `13.00 s` and execution to `94.76 ms` (`94.92 ms`
+median), a `4.10x` execution speedup. Checkpoint loading remains a separate
+roughly 65--69 second cold-start cost. The benchmark uses zero inputs, so it
+measures the executable shape rather than image quality.
 
 The accompanying FLUX.2 VAE adapter reuses RXLA's Diffusers-compatible decoder
 after applying the checkpoint's inverse BatchNorm and 2×2 latent-patch
@@ -263,9 +263,36 @@ cargo run -p rxla-safetensors --features model --example flux2_generate -- \
   --height 256 --width 256
 ```
 
-The first September 18, 2026 end-to-end RTX 5080 run produced a coherent fox
-in snow matching the prompt. Transformer compilation took `32.66 s`; four
-denoising steps took `829.84 ms` total; VAE compilation took `8.15 s`; and VAE
-decode plus host synchronization took `43.71 ms`. Checkpoint upload and the
-separate Qwen3 prompt-encoding process are excluded. This is the first image
-quality integration gate, not a tuned serving result.
+The first F32-compute RTX 5080 run produced a coherent fox in snow matching the
+prompt. Transformer compilation took `32.66 s`; four denoising steps took
+`829.84 ms`; VAE compilation took `8.15 s`; and VAE decode plus host
+synchronization took `43.71 ms`.
+
+The runner now keeps its public F32 inputs/outputs while lowering internal
+transformer and VAE computation to BF16; eligible self-attention is emitted as
+cuDNN FMHA. A warm 256x256 run reduced the four denoising steps to `186.92 ms`
+and VAE decoding to `16.35 ms`. At 512x512 it took `378.62 ms` for denoising and
+`39.08 ms` for decoding. Both generated images remained coherent.
+
+For an apples-to-apples PyTorch comparison, run the official BFL implementation
+against the same checkpoint and conditioning file:
+
+```sh
+uv run python benchmarks/flux2_torch.py \
+  /path/to/black-forest-labs/flux2 \
+  /path/to/flux-2-klein-4b.safetensors \
+  /tmp/flux2-prompt.safetensors --warmup 1 --iterations 3
+```
+
+Synchronized four-step denoising results were:
+
+| Resolution | RXLA/PJRT/XLA | official PyTorch | RXLA difference |
+| --- | ---: | ---: | ---: |
+| 256x256 | 186.92 ms | 218.98 ms | 14.6% faster |
+| 512x512 | 378.62 ms | 449.88 ms | 15.8% faster |
+
+PyTorch reported roughly 7.4--7.5 GiB peak allocated tensor memory. RXLA uses
+XLA's 11.67 GiB BFC allocator pool, so those figures are not directly
+comparable. Timings exclude checkpoint loading, compilation, Qwen3 prompt
+encoding and VAE decoding; they are a single-machine snapshot rather than a
+general performance claim.

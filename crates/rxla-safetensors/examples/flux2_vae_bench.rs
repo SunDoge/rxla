@@ -1,5 +1,5 @@
 use clap::Parser;
-use rxla_core::{Buffer, CacheLimits, Client, Compiler};
+use rxla_core::{Buffer, CacheLimits, Client, Compiler, DType};
 use rxla_models::flux2_autoencoder_decoder;
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
@@ -43,7 +43,9 @@ fn run(args: Args) -> Result<()> {
     let client = unsafe { Client::load(plugin) }?;
     let weights = checkpoint.load_parameter_schema(&client, model.schema())?;
     let compile_started = std::time::Instant::now();
-    let compiled = model.compile(&mut Compiler::new(client.clone(), CacheLimits::default()))?;
+    let compiled = model.compile(
+        &mut Compiler::new(client.clone(), CacheLimits::default()).with_compute_dtype(DType::BF16),
+    )?;
     let compile_ms = compile_started.elapsed().as_secs_f64() * 1e3;
     let runner = compiled.bind_parameters(weights.bindings())?;
     let input = client.buffer(&[1, tokens, 128], &vec![0.0_f32; (tokens * 128) as usize])?;
