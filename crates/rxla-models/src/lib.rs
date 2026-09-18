@@ -1,7 +1,7 @@
 //! Functional Stable Diffusion building blocks using scoped parameter effects.
 
 use rxla_core::{Conv2dOptions, DType, Tensor};
-use rxla_nn::{Cx, Layer, LayerNorm, Linear, LoraLinear, TensorApply};
+use rxla_nn::{Cx, Initializer, Layer, LayerNorm, Linear, LoraLinear, TensorApply};
 use snafu::Snafu;
 
 /// Machine-readable model definition and input validation failures.

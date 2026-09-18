@@ -19,3 +19,5 @@ pub use model_sgd::{
 };
 mod pipeline;
 pub use pipeline::{BoundedPipeline, PipelineError, PipelineResult};
+mod rl;
+pub use rl::{RlError, RlResult, clipped_policy_gradient_loss, policy_gradient_loss};

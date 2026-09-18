@@ -11,6 +11,14 @@ layer are intentionally excluded. Prefill currently constructs the gated-delta
 recurrence at trace time for a static sequence length; persistent decode state
 and dynamic-length batching remain future work.
 
+For low-memory policy fine-tuning, `Qwen3_5Config::lm_head_lora(rank, alpha)`
+adds F32 LoRA matrices to the tied W8 language-model head without renaming or
+expanding the quantized base parameters. `rxla-train` provides token-shaped
+policy-gradient and PPO-clipped objectives, and `select_lora` isolates these
+adapter parameters for Adam. Tiny-model schema, lowering, gradient construction,
+and PJRT compilation are covered; a real 0.8B reward-driven training run is not
+yet recorded.
+
 ## Quantized checkpoint
 
 Two-dimensional weights use RXLA's symmetric per-output-row, per-128-element

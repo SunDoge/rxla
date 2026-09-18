@@ -29,6 +29,7 @@ pub struct Qwen3_5Config {
     rotary_dim: i64,
     epsilon: f32,
     quant_group_size: i64,
+    lm_head_lora: Option<(i64, f32)>,
 }
 
 impl Qwen3_5Config {
@@ -50,6 +51,7 @@ impl Qwen3_5Config {
             rotary_dim: 4,
             epsilon: 1e-6,
             quant_group_size: 8,
+            lm_head_lora: None,
         }
     }
 
@@ -80,11 +82,18 @@ impl Qwen3_5Config {
             rotary_dim: 64,
             epsilon: 1e-6,
             quant_group_size: 128,
+            lm_head_lora: None,
         }
     }
 
     pub fn quant_group_size(mut self, value: i64) -> Self {
         self.quant_group_size = value;
+        self
+    }
+
+    /// Add a trainable F32 low-rank update to the tied quantized LM head.
+    pub fn lm_head_lora(mut self, rank: i64, alpha: f32) -> Self {
+        self.lm_head_lora = Some((rank, alpha));
         self
     }
 
@@ -109,7 +118,10 @@ impl Qwen3_5Config {
             && self.rope_theta.is_finite()
             && self.rope_theta > 0.0
             && self.epsilon.is_finite()
-            && self.epsilon > 0.0;
+            && self.epsilon > 0.0
+            && self
+                .lm_head_lora
+                .is_none_or(|(rank, alpha)| rank > 0 && alpha.is_finite());
         if !valid {
             return Err(Error::InvalidModel {
                 kind: ModelDefinitionError::InvalidQwenConfiguration,
@@ -153,12 +165,33 @@ fn tied_lm_head(cx: Cx, hidden: &Tensor, config: &Qwen3_5Config) -> Result<Tenso
         .param("scale", [config.vocabulary, groups])?
         .unsqueeze(2)?
         .broadcast_to(weight.shape())?;
-    Ok(hidden.linear(
+    let base = hidden.linear(
         &weight
             .mul(&scale)?
             .reshape([config.vocabulary, config.hidden_size])?,
         None,
-    )?)
+    )?;
+    let Some((rank, alpha)) = config.lm_head_lora else {
+        return Ok(base);
+    };
+    let adapter = cx.with_parameter_storage_dtype(DType::F32)?;
+    let down = hidden.linear(
+        &adapter.scope("lora_A")?.param_initialized(
+            "weight",
+            [rank, config.hidden_size],
+            Initializer::kaiming_uniform(),
+        )?,
+        None,
+    )?;
+    let update = down.linear(
+        &adapter.scope("lora_B")?.param_initialized(
+            "weight",
+            [config.vocabulary, rank],
+            Initializer::zeros(),
+        )?,
+        None,
+    )?;
+    Ok(base.add(&update.mul_scalar(alpha / rank as f32)?)?)
 }
 
 /// Full-sequence text-only inference for Qwen3.5 with weight-only W8 storage.
@@ -244,6 +277,7 @@ mod tests {
     use super::*;
     use rxla_core::{CacheLimits, Client, Compiler};
     use rxla_nn::Model;
+    use rxla_train::select_lora;
 
     #[test]
     fn tiny_quantized_qwen_builds_both_mixer_types_and_lowers() {
@@ -267,6 +301,46 @@ mod tests {
         );
         assert_eq!(
             schema
+                .get("model.language_model.embed_tokens.weight")
+                .unwrap()
+                .dtype(),
+            DType::U8
+        );
+        applied.prepare().unwrap();
+    }
+
+    #[test]
+    fn tiny_qwen_lm_head_lora_is_the_only_trainable_selection() {
+        let config = Qwen3_5Config::tiny().lm_head_lora(4, 8.0);
+        let applied = Model::new(|cx: Cx| {
+            let ids = cx.input_dtype([1, 3], DType::I32)?;
+            qwen3_5(cx, &ids, &config)
+        })
+        .trace()
+        .unwrap();
+        let selection = select_lora(applied.schema());
+        let selected = selection
+            .parameters()
+            .map(|(_, parameter)| (parameter.path(), parameter.dtype(), parameter.shape()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected,
+            [
+                (
+                    "model.language_model.embed_tokens.lora_A.weight",
+                    DType::F32,
+                    &[4, 32][..],
+                ),
+                (
+                    "model.language_model.embed_tokens.lora_B.weight",
+                    DType::F32,
+                    &[128, 4][..],
+                ),
+            ]
+        );
+        assert_eq!(
+            applied
+                .schema()
                 .get("model.language_model.embed_tokens.weight")
                 .unwrap()
                 .dtype(),
