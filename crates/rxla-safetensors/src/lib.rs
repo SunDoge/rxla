@@ -13,7 +13,7 @@ use memmap2::{Mmap, MmapOptions};
 #[cfg(feature = "model")]
 pub use model::SchemaBuffers;
 #[cfg(all(feature = "model", feature = "export"))]
-pub use model::save_parameter_selection_new;
+pub use model::{save_model_new, save_parameter_selection_new};
 #[cfg(feature = "model")]
 use rxla_pjrt::DType;
 use rxla_pjrt::{Buffer, Client};

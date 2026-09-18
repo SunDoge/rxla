@@ -5,7 +5,7 @@ use image::{RgbImage, imageops::FilterType};
 use rxla_core::{Buffer, CacheLimits, Client, Compiler, Tensor};
 use rxla_models::{YoloAssignments, YoloConfig, YoloLossConfig, yolo, yolox_loss};
 use rxla_nn::{Cx, Model, ModelInput};
-use rxla_safetensors::SafeTensors;
+use rxla_safetensors::{SafeTensors, save_model_new};
 use rxla_train::{
     AdamOptions, DecodedYoloBatch, DetectionTarget, SimOtaConfig, YoloHead, apply_model_adam,
 };
@@ -34,6 +34,9 @@ struct Args {
     size: i64,
     #[arg(long, default_value_t = 1e-5)]
     learning_rate: f32,
+    /// Write inference-ready trained parameters and BatchNorm state here.
+    #[arg(long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -223,6 +226,15 @@ fn main() -> Result<()> {
             args.steps
         )
         .into());
+    }
+    if let Some(output) = &args.output {
+        let metadata = BTreeMap::from([
+            ("format".to_owned(), "rxla-yolox-v1".to_owned()),
+            ("steps".to_owned(), completed.to_string()),
+        ])
+        .into_iter()
+        .collect();
+        save_model_new(output, &training, &training_session, Some(&metadata))?;
     }
     println!("completed={completed} train_compile_ms={train_compile_ms:.1}");
     Ok(())

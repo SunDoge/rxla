@@ -328,3 +328,35 @@ pub fn save_parameter_selection_new(
         .map_err(|source| Error::Model { source })?;
     super::save_buffers_new(path, &buffers, metadata)
 }
+
+/// Atomically save every resident parameter and model-declared persistent state.
+///
+/// Transform-owned state appended after tracing, such as optimizer moments and
+/// step counters, is deliberately excluded. The resulting file can therefore
+/// be loaded directly by [`SafeTensors::load_model_schema`] for inference.
+#[cfg(feature = "export")]
+pub fn save_model_new(
+    path: impl AsRef<std::path::Path>,
+    model: &rxla_nn::AppliedModel,
+    session: &rxla_core::Session,
+    metadata: Option<&std::collections::HashMap<String, String>>,
+) -> Result<()> {
+    let parameters = model
+        .resident_parameter_buffers(session)
+        .map_err(|source| Error::Model { source })?;
+    let states = model
+        .state_buffers(session)
+        .map_err(|source| Error::Model { source })?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let mut buffers = Vec::with_capacity(parameters.len() + model.schema().states().len());
+    buffers.extend(parameters);
+    for spec in model.schema().states() {
+        let buffer = states
+            .get(spec.path())
+            .copied()
+            .ok_or_else(|| invalid(format!("missing model state {:?}", spec.path())))?;
+        buffers.push((spec.path(), buffer));
+    }
+    super::save_buffers_new(path, &buffers, metadata)
+}
