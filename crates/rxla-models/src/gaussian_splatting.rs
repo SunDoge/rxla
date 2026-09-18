@@ -7,6 +7,9 @@
 use crate::{Error, ModelDefinitionError, Result};
 use rxla_core::Tensor;
 
+mod tiled;
+pub use tiled::{TiledGaussianConfig, TiledGaussianRender, render_gaussians_tiled};
+
 /// Pinhole camera and rasterization constants.
 #[derive(Clone, Copy, Debug)]
 pub struct GaussianCamera {

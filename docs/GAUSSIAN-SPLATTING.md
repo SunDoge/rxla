@@ -63,9 +63,22 @@ its PJRT completion event; PNG download is outside the timed region.
   covariance construction, densification/pruning, antialiasing, and distributed
   rendering are future work.
 
-The intended next architectural step is to retain this implementation as the
-portable reference and introduce tile/binning transformations or a specialized
-CUDA custom call behind the same public renderer contract.
+The dense implementation remains the portable numerical reference. RXLA now
+also provides `render_gaussians_tiled`, a pure StableHLO tiled renderer modeled
+after the MIT-licensed [jax-gs](https://github.com/ghif/jax-gs) architecture:
+
+1. project means and covariances and derive a conservative screen radius;
+2. construct a static bounded Gaussian/tile interaction array;
+3. stably sort by depth and then by tile (equivalent to a lexicographic key);
+4. find tile boundaries with logarithmic static-shape `searchsorted_i32`;
+5. gather a fixed contributor budget per tile and alpha-composite all tile
+   pixels with an exclusive cumulative product.
+
+It has no custom call and continuous gradients remain in StableHLO. Its result
+also exposes `tile_counts`, `truncated_interactions`, and
+`span_overflow_gaussians`; static-budget overflow is observable rather than a
+silent quality failure. A specialized CUDA custom call can later share this
+public contract.
 
 ## Real-scene experiment
 
@@ -80,20 +93,21 @@ centers inside camera 0. CUDA successfully rendered subsets from 256 through
 100,000 Gaussians. A synchronized 100,000-Gaussian render at 24x16 took about
 2.34 ms after a 2.61 s compile on the local RTX 5080.
 
-The resulting full-scene image is not a quality result. Dense `[H,W,G]`
-compositing cannot retain the scene at useful resolution and does not construct
-the exact per-tile contributor stream used by production 3DGS. This experiment
-therefore establishes real checkpoint parsing and XLA execution while also
-rejecting the dense algorithm as the production path. The next renderer should
-use the pure-JAX `jax-gs` structure: projected radii, static Gaussian/tile
-interactions, packed tile/depth sorting, tile boundaries, and fixed-size scan
-compositing. A CUDA custom-call implementation can later share that public
-contract.
+The dense full-scene image is not a quality result: `[H,W,G]` compositing cannot
+retain the scene at useful resolution. The tiled path subsequently rendered
+131,417 selected real Gaussians at 96x64 on the RTX 5080. With an 8x8 maximum
+tile span and 4,096 contributors per tile it compiled in about 1.51 s and ran
+in about 12.75 ms. Diagnostics reported a maximum of 35,396 contributors in one
+tile and 89,495 interactions beyond the configured per-tile budget, with no
+span overflow. The visible truncation is therefore explained and reproducible;
+the next requirement is chunked scan/early termination rather than a larger
+fully materialized tile tensor.
 
 ```bash
 PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so \
 cargo run --release -p rxla-models --example gaussian_splatting_real -- \
   --splat /path/to/scene.splat --cameras /path/to/cameras.json \
-  --camera 0 --width 160 --gaussians 4096 \
+  --camera 0 --width 160 --gaussians 0 --tiled \
+  --max-tile-span 8 --max-per-tile 4096 \
   --output gaussian-splatting-real.png
 ```

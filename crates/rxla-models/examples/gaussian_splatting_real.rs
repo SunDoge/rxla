@@ -1,7 +1,9 @@
 use clap::Parser;
 use image::{Rgb, RgbImage};
 use rxla_core::{CacheLimits, Client, Compiler, Tracer};
-use rxla_models::gaussian_splatting::{GaussianCamera, render_gaussians};
+use rxla_models::gaussian_splatting::{
+    GaussianCamera, TiledGaussianConfig, render_gaussians, render_gaussians_tiled,
+};
 use serde::Deserialize;
 use std::{cmp::Ordering, fs, path::PathBuf, time::Instant};
 
@@ -17,6 +19,12 @@ struct Args {
     width: u32,
     #[arg(long, default_value_t = 512)]
     gaussians: usize,
+    #[arg(long)]
+    tiled: bool,
+    #[arg(long, default_value_t = 8)]
+    max_tile_span: i64,
+    #[arg(long, default_value_t = 2048)]
+    max_per_tile: i64,
     #[arg(long, default_value_t = 20)]
     iterations: usize,
     #[arg(long, default_value = "gaussian-splatting-real.png")]
@@ -135,8 +143,8 @@ fn world_covariance(splat: &Splat) -> [[f32; 3]; 3] {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    if args.width == 0 || args.gaussians == 0 || args.iterations == 0 {
-        return Err("width, gaussians and iterations must be positive".into());
+    if args.width == 0 || args.iterations == 0 {
+        return Err("width and iterations must be positive".into());
     }
     let cameras: Vec<CameraFile> = serde_json::from_slice(&fs::read(&args.cameras)?)?;
     let camera = cameras
@@ -184,7 +192,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect::<Vec<_>>();
     visible.sort_unstable_by(|lhs, rhs| rhs.0.partial_cmp(&lhs.0).unwrap_or(Ordering::Equal));
-    visible.truncate(args.gaussians);
+    if args.gaussians != 0 {
+        visible.truncate(args.gaussians);
+    }
     if visible.is_empty() {
         return Err("selected camera has no visible Gaussians".into());
     }
@@ -221,18 +231,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opacities = tracer.constant(&[count], &opacities)?;
     let pixels = tracer.constant(&[i64::from(height), i64::from(args.width), 2], &pixels)?;
     let background = tracer.constant(&[3], &[0., 0., 0.])?;
-    let render = render_gaussians(
-        &means,
-        &covariances,
-        &colors,
-        &opacities,
-        &pixels,
-        &background,
-        GaussianCamera::new(i64::from(args.width), i64::from(height), focal_x, focal_y),
-    )?;
+    let camera_config =
+        GaussianCamera::new(i64::from(args.width), i64::from(height), focal_x, focal_y);
+    let (color, alpha, diagnostics) = if args.tiled {
+        let render = render_gaussians_tiled(
+            &means,
+            &covariances,
+            &colors,
+            &opacities,
+            &background,
+            camera_config,
+            TiledGaussianConfig {
+                tile_size: 16,
+                max_tile_span: args.max_tile_span,
+                max_per_tile: args.max_per_tile,
+            },
+        )?;
+        (
+            render.color,
+            render.alpha,
+            Some((
+                render.tile_counts,
+                render.truncated_interactions,
+                render.span_overflow_gaussians,
+            )),
+        )
+    } else {
+        let render = render_gaussians(
+            &means,
+            &covariances,
+            &colors,
+            &opacities,
+            &pixels,
+            &background,
+            camera_config,
+        )?;
+        (render.color, render.alpha, None)
+    };
     let mut compiler = Compiler::new(client, CacheLimits::default());
     let compile_start = Instant::now();
-    let executable = compiler.compile_many(&tracer, &[render.color, render.alpha])?;
+    let mut requested = vec![color, alpha];
+    if let Some((tile_counts, truncated, span_overflow)) = diagnostics {
+        requested.extend([tile_counts, truncated, span_overflow]);
+    }
+    let executable = compiler.compile_many(&tracer, &requested)?;
     let compile_time = compile_start.elapsed();
     executable.submit(&[])?.wait()?;
     let start = Instant::now();
@@ -249,8 +291,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         *pixel = Rgb(color.map(|value| (value.clamp(0., 1.) * 255.).round() as u8));
     }
     image.save(&args.output)?;
+    if args.tiled {
+        let tile_counts = outputs[2].to_vec::<f32>()?;
+        println!(
+            "tile budget: max contributors {:.0}, truncated interactions {:.0}, span-overflow Gaussians {:.0}",
+            tile_counts.into_iter().fold(0.0, f32::max),
+            outputs[3].to_vec::<f32>()?[0],
+            outputs[4].to_vec::<f32>()?[0]
+        );
+    }
     println!(
-        "real 3DGS {} camera {} ({}): {}x{}, {}/{} visible-selected Gaussians, compile {:.3}s, mean {:.3}ms, output {}",
+        "real 3DGS ({}) {} camera {} ({}): {}x{}, {}/{} visible-selected Gaussians, compile {:.3}s, mean {:.3}ms, output {}",
+        if args.tiled { "tiled" } else { "dense" },
         args.splat.display(),
         args.camera,
         camera.img_name,
