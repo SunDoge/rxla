@@ -21,3 +21,7 @@ mod pipeline;
 pub use pipeline::{BoundedPipeline, PipelineError, PipelineResult};
 mod rl;
 pub use rl::{RlError, RlResult, clipped_policy_gradient_loss, policy_gradient_loss};
+mod yolo;
+pub use yolo::{
+    DetectionTarget, SimOtaAssignments, SimOtaConfig, SimOtaError, SimOtaInput, SimOtaResult,
+};

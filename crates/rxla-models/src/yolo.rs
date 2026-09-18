@@ -453,53 +453,84 @@ pub enum YoloDecodeError {
     Nms { source: vision::NmsError },
 }
 
-/// Decode raw YOLOX heads into input-pixel coordinates, then class-aware NMS.
-pub fn decode_yolo(
-    outputs: [(&[f32], [usize; 4], usize); 3],
+/// Postprocessing policy for raw YOLOX heads.
+#[derive(Clone, Copy, Debug, Setters)]
+#[setters(generate = false)]
+pub struct YoloDecodeConfig {
+    #[setters(generate)]
     confidence: f32,
+    #[setters(generate)]
     iou_threshold: f32,
+    #[setters(generate)]
     max_detections: usize,
-) -> std::result::Result<Vec<Detection>, YoloDecodeError> {
-    ensure!(
-        confidence.is_finite() && (0. ..=1.).contains(&confidence),
-        ConfidenceSnafu
-    );
-    let mut detections = Vec::new();
-    for (values, [batch, height, width, channels], stride) in outputs {
+}
+
+impl Default for YoloDecodeConfig {
+    fn default() -> Self {
+        Self {
+            confidence: 0.25,
+            iou_threshold: 0.45,
+            max_detections: 300,
+        }
+    }
+}
+
+impl YoloDecodeConfig {
+    /// Decode raw YOLOX heads into input-pixel coordinates, then class-aware NMS.
+    pub fn decode(
+        self,
+        outputs: [(&[f32], [usize; 4], usize); 3],
+    ) -> std::result::Result<Vec<Detection>, YoloDecodeError> {
         ensure!(
-            batch == 1
-                && channels >= 6
-                && stride > 0
-                && values.len() == batch * height * width * channels,
-            ShapeSnafu
+            self.confidence.is_finite() && (0. ..=1.).contains(&self.confidence),
+            ConfidenceSnafu
         );
-        for y in 0..height {
-            for x in 0..width {
-                let row = &values[(y * width + x) * channels..][..channels];
-                let (cx, cy) = (
-                    (row[0] + x as f32) * stride as f32,
-                    (row[1] + y as f32) * stride as f32,
-                );
-                let (w, h) = (row[2].exp() * stride as f32, row[3].exp() * stride as f32);
-                let objectness = sigmoid(row[4]);
-                for (class, &logit) in row[5..].iter().enumerate() {
-                    let score = objectness * sigmoid(logit);
-                    if score >= confidence {
-                        detections.push(Detection {
-                            xyxy: [cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5],
-                            score,
-                            class: class as i32,
-                        });
+        let mut detections = Vec::new();
+        for (values, [batch, height, width, channels], stride) in outputs {
+            ensure!(
+                batch == 1
+                    && channels >= 6
+                    && stride > 0
+                    && values.len() == batch * height * width * channels,
+                ShapeSnafu
+            );
+            for y in 0..height {
+                for x in 0..width {
+                    let row = &values[(y * width + x) * channels..][..channels];
+                    let (cx, cy) = (
+                        (row[0] + x as f32) * stride as f32,
+                        (row[1] + y as f32) * stride as f32,
+                    );
+                    let (w, h) = (row[2].exp() * stride as f32, row[3].exp() * stride as f32);
+                    let objectness = sigmoid(row[4]);
+                    for (class, &logit) in row[5..].iter().enumerate() {
+                        let score = objectness * sigmoid(logit);
+                        if score >= self.confidence {
+                            detections.push(Detection {
+                                xyxy: [cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5],
+                                score,
+                                class: class as i32,
+                            });
+                        }
                     }
                 }
             }
         }
+        let boxes = detections.iter().map(|v| v.xyxy).collect::<Vec<_>>();
+        let scores = detections.iter().map(|v| v.score).collect::<Vec<_>>();
+        let classes = detections.iter().map(|v| v.class).collect::<Vec<_>>();
+        let kept = vision::nms_by_class(
+            &boxes,
+            &scores,
+            &classes,
+            self.iou_threshold,
+            self.max_detections,
+        )?;
+        Ok(kept
+            .into_iter()
+            .map(|index| detections[index].clone())
+            .collect())
     }
-    let boxes = detections.iter().map(|v| v.xyxy).collect::<Vec<_>>();
-    let scores = detections.iter().map(|v| v.score).collect::<Vec<_>>();
-    let classes = detections.iter().map(|v| v.class).collect::<Vec<_>>();
-    let kept = vision::nms_by_class(&boxes, &scores, &classes, iou_threshold, max_detections)?;
-    Ok(kept.into_iter().map(|i| detections[i].clone()).collect())
 }
 
 fn sigmoid(value: f32) -> f32 {
@@ -511,8 +542,31 @@ fn sigmoid(value: f32) -> f32 {
     }
 }
 
-/// YOLOX loss components. SimOTA-backed construction is implemented in the
-/// training crate rather than substituting an incompatible dense assignment.
+/// Dense results of YOLOX's nondifferentiable SimOTA assignment.
+pub struct YoloAssignments {
+    /// Matched boxes as `[batch, anchors, 4]` center-x/center-y/width/height.
+    pub boxes: Tensor,
+    /// Foreground mask as `[batch, anchors, 1]` zeros and ones.
+    pub objectness: Tensor,
+    /// Matched one-hot classes weighted by IoU as `[batch, anchors, classes]`.
+    pub classes: Tensor,
+}
+
+/// Weights for the differentiable half of the YOLOX objective.
+#[derive(Clone, Copy, Debug, Setters)]
+#[setters(generate = false)]
+pub struct YoloLossConfig {
+    #[setters(generate)]
+    box_weight: f32,
+}
+
+impl Default for YoloLossConfig {
+    fn default() -> Self {
+        Self { box_weight: 5.0 }
+    }
+}
+
+/// YOLOX loss components before an optimizer transform is attached.
 pub struct YoloLoss {
     pub total: Tensor,
     pub boxes: Tensor,
@@ -520,9 +574,140 @@ pub struct YoloLoss {
     pub classes: Tensor,
 }
 
+/// Build the YOLOX IoU, objectness and classification objective in RXLA IR.
+///
+/// SimOTA assignment is deliberately separate because it is nondifferentiable.
+/// Forward, these losses, reverse mode, and the optimizer remain one compiled
+/// program once its dense assignment tensors are supplied.
+pub fn yolox_loss(
+    outputs: &[Tensor; 3],
+    assignments: &YoloAssignments,
+    config: YoloLossConfig,
+) -> Result<YoloLoss> {
+    let [batch, _, _, channels] =
+        <[i64; 4]>::try_from(outputs[0].shape()).map_err(|_| Error::InvalidModel {
+            kind: ModelDefinitionError::InvalidYoloAssignments,
+        })?;
+    let classes = channels - 5;
+    let valid_heads = outputs.iter().all(|output| {
+        matches!(output.shape(), [b, h, w, c]
+            if *b == batch && *h > 0 && *w > 0 && *c == channels)
+            && output.dtype() == DType::F32
+    });
+    let anchors: i64 = outputs
+        .iter()
+        .map(|output| output.shape()[1] * output.shape()[2])
+        .sum();
+    if !valid_heads
+        || classes <= 0
+        || assignments.boxes.shape() != [batch, anchors, 4]
+        || assignments.objectness.shape() != [batch, anchors, 1]
+        || assignments.classes.shape() != [batch, anchors, classes]
+        || assignments.boxes.dtype() != DType::F32
+        || assignments.objectness.dtype() != DType::F32
+        || assignments.classes.dtype() != DType::F32
+    {
+        return Err(Error::InvalidModel {
+            kind: ModelDefinitionError::InvalidYoloAssignments,
+        });
+    }
+
+    let mut decoded = Vec::with_capacity(3);
+    let mut objectness_logits = Vec::with_capacity(3);
+    let mut class_logits = Vec::with_capacity(3);
+    for (output, stride) in outputs.iter().zip([8, 16, 32]) {
+        let [_, height, width, _] = <[i64; 4]>::try_from(output.shape()).unwrap();
+        let x = output.iota_i32(&[1, height, width, 1], 2)?.to_f32()?;
+        let y = output.iota_i32(&[1, height, width, 1], 1)?.to_f32()?;
+        let grid = Tensor::concatenate(&[x, y], 3)?.broadcast_to([batch, height, width, 2])?;
+        let xy = output
+            .narrow(3, 0, 2)?
+            .add(&grid)?
+            .mul_scalar(stride as f32)?;
+        let wh = output.narrow(3, 2, 2)?.exp()?.mul_scalar(stride as f32)?;
+        decoded.push(Tensor::concatenate(&[xy, wh], 3)?.reshape([batch, height * width, 4])?);
+        objectness_logits.push(
+            output
+                .narrow(3, 4, 1)?
+                .reshape([batch, height * width, 1])?,
+        );
+        class_logits.push(output.narrow(3, 5, classes)?.reshape([
+            batch,
+            height * width,
+            classes,
+        ])?);
+    }
+    let decoded = Tensor::concatenate(&decoded, 1)?;
+    let objectness_logits = Tensor::concatenate(&objectness_logits, 1)?;
+    let class_logits = Tensor::concatenate(&class_logits, 1)?;
+    let foreground = &assignments.objectness;
+    let normalizer = foreground
+        .sum([0, 1, 2], false)?
+        .maximum(&foreground.scalar(1.0)?)?;
+
+    let iou = aligned_cxcywh_iou(&decoded, &assignments.boxes)?;
+    let boxes = iou
+        .square()?
+        .neg()?
+        .add_scalar(1.0)?
+        .mul(&foreground.reshape([batch, anchors])?)?
+        .sum([0, 1], false)?
+        .div(&normalizer)?;
+    let objectness = objectness_logits
+        .binary_cross_entropy_with_logits(foreground)?
+        .sum([0, 1, 2], false)?
+        .div(&normalizer)?;
+    let classes_loss = class_logits
+        .binary_cross_entropy_with_logits(&assignments.classes)?
+        .mul(&foreground.broadcast_to([batch, anchors, classes])?)?
+        .sum([0, 1, 2], false)?
+        .div(&normalizer)?;
+    let total = boxes
+        .mul_scalar(config.box_weight)?
+        .add(&objectness)?
+        .add(&classes_loss)?;
+    Ok(YoloLoss {
+        total,
+        boxes,
+        objectness,
+        classes: classes_loss,
+    })
+}
+
+fn aligned_cxcywh_iou(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    let lhs_xy = lhs.narrow(2, 0, 2)?;
+    let lhs_half = lhs.narrow(2, 2, 2)?.mul_scalar(0.5)?;
+    let rhs_xy = rhs.narrow(2, 0, 2)?;
+    let rhs_half = rhs.narrow(2, 2, 2)?.mul_scalar(0.5)?;
+    let intersection_min = lhs_xy.sub(&lhs_half)?.maximum(&rhs_xy.sub(&rhs_half)?)?;
+    let intersection_max = lhs_xy.add(&lhs_half)?.minimum(&rhs_xy.add(&rhs_half)?)?;
+    let intersection_wh = intersection_max
+        .sub(&intersection_min)?
+        .maximum(&lhs.scalar(0.0)?.broadcast_to(intersection_max.shape())?)?;
+    let intersection = pair_product(&intersection_wh)?;
+    let lhs_area = pair_product(&lhs.narrow(2, 2, 2)?)?;
+    let rhs_area = pair_product(&rhs.narrow(2, 2, 2)?)?;
+    Ok(intersection.div(
+        &lhs_area
+            .add(&rhs_area)?
+            .sub(&intersection)?
+            .add_scalar(1e-8)?,
+    )?)
+}
+
+fn pair_product(input: &Tensor) -> Result<Tensor> {
+    let shape = [input.shape()[0], input.shape()[1]];
+    input
+        .narrow(2, 0, 1)?
+        .mul(&input.narrow(2, 1, 1)?)?
+        .reshape(shape)
+        .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rxla_core::Tracer;
     use rxla_nn::{Model, ModelInput};
 
     #[test]
@@ -564,19 +749,43 @@ mod tests {
             row[5 + class] = 8.;
         }
         let empty = vec![-20.; 7];
-        let detections = decode_yolo(
-            [
+        let detections = YoloDecodeConfig::default()
+            .confidence(0.5)
+            .iou_threshold(0.5)
+            .max_detections(10)
+            .decode([
                 (&small, [1, 2, 2, 7], 8),
                 (&empty, [1, 1, 1, 7], 16),
                 (&empty, [1, 1, 1, 7], 32),
-            ],
-            0.5,
-            0.5,
-            10,
-        )
-        .unwrap();
+            ])
+            .unwrap();
         assert_eq!(detections.len(), 3);
         assert_eq!(detections[0].xyxy, [-4., -4., 4., 4.]);
         assert_eq!(detections.iter().filter(|v| v.class == 1).count(), 1);
+    }
+
+    #[test]
+    fn loss_is_scalar_and_differentiable_for_all_heads() {
+        let graph = Tracer::default();
+        let outputs = [
+            graph.input([1, 2, 2, 7]).unwrap(),
+            graph.input([1, 1, 1, 7]).unwrap(),
+            graph.input([1, 1, 1, 7]).unwrap(),
+        ];
+        let assignments = YoloAssignments {
+            boxes: graph.input([1, 6, 4]).unwrap(),
+            objectness: graph.input([1, 6, 1]).unwrap(),
+            classes: graph.input([1, 6, 2]).unwrap(),
+        };
+        let loss = yolox_loss(&outputs, &assignments, YoloLossConfig::default()).unwrap();
+        assert!(loss.total.shape().is_empty());
+        assert!(loss.boxes.shape().is_empty());
+        assert!(loss.objectness.shape().is_empty());
+        assert!(loss.classes.shape().is_empty());
+        let gradients = loss.total.grad(&outputs).unwrap();
+        assert_eq!(gradients.len(), 3);
+        for (gradient, output) in gradients.iter().zip(&outputs) {
+            assert_eq!(gradient.shape(), output.shape());
+        }
     }
 }

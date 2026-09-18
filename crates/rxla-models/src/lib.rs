@@ -84,6 +84,8 @@ pub enum ModelDefinitionError {
     InvalidYoloConfiguration,
     #[snafu(display("YOLO expects a nonempty NHWC F32 image"))]
     InvalidYoloInput,
+    #[snafu(display("YOLO assignments do not match the prediction heads"))]
+    InvalidYoloAssignments,
     #[snafu(display("invalid SAM 2 Hiera configuration"))]
     InvalidSam2HieraConfiguration,
     #[snafu(display("SAM 2 Hiera expects a nonempty NHWC F32 image"))]
@@ -130,7 +132,10 @@ pub mod gaussian_splatting;
 pub mod pp_ocr_v6;
 pub mod sam2;
 mod yolo;
-pub use yolo::{Detection, YoloConfig, YoloDecodeError, YoloLoss, decode_yolo, yolo};
+pub use yolo::{
+    Detection, YoloAssignments, YoloConfig, YoloDecodeConfig, YoloDecodeError, YoloLoss,
+    YoloLossConfig, yolo, yolox_loss,
+};
 
 /// Learned two-layer projection for a sinusoidal timestep embedding.
 /// The input width is inferred at the point of use.
