@@ -1,0 +1,11 @@
+[package]
+name = "rxla-tfrecord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "TFRecord integration for RXLA datasets, logs, and storage backends"
+
+[dependencies]
+tfrecord-lite = { workspace = true }
