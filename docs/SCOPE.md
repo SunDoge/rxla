@@ -80,6 +80,10 @@ promise bitwise equivalence or choose the fastest algorithm on every device.
 - [CUDA development gate](../scripts/check-cuda.sh): selected crates/rxla-core/gradient,
   random/state and training tests, explicit growth-mode clients and workers.
   [Native setup and limitations](CUDA-validation.md). It is not the full CPU suite.
+- [Pure-XLA Gaussian splatting](GAUSSIAN-SPLATTING.md): a dense differentiable
+  reference renderer executes forward compositing and parameter gradients on
+  CUDA, with CPU forward coverage. It validates ordinary StableHLO lowering,
+  not a production tiled 3DGS rasterizer.
 - [Heterogeneous gate](../scripts/check-xla-heterogeneous.sh): opt-in dual-plugin
   CPU/CUDA staged transfers and bounded execution, plus host-copy tests on each
   backend. Requires both trusted plugins and existing CUDA dependencies; it is

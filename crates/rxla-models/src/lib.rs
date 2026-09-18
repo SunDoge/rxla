@@ -92,6 +92,8 @@ pub enum ModelDefinitionError {
     InvalidFlux2Schedule,
     #[snafu(display("FLUX.2 scheduler step is out of range"))]
     Flux2StepOutOfRange,
+    #[snafu(display("invalid Gaussian splatting input or camera configuration"))]
+    InvalidGaussianSplattingInput,
 }
 
 #[derive(Debug, Snafu)]
@@ -120,6 +122,7 @@ pub use taesd::taesd_decoder;
 mod qwen3_5;
 pub use qwen3_5::{Qwen3_5Config, qwen3_5};
 pub mod flux2;
+pub mod gaussian_splatting;
 pub mod pp_ocr_v6;
 pub mod sam2;
 
