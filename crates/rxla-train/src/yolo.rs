@@ -16,6 +16,117 @@ pub enum SimOtaError {
     Configuration,
 }
 
+/// One raw NHWC YOLOX output head.
+#[derive(Clone, Copy, Debug, Setters)]
+#[setters(generate = false)]
+pub struct YoloHead<'a> {
+    values: &'a [f32],
+    shape: [usize; 4],
+    #[setters(generate)]
+    stride: usize,
+}
+
+impl<'a> YoloHead<'a> {
+    pub fn new(values: &'a [f32], shape: [usize; 4]) -> Self {
+        Self {
+            values,
+            shape,
+            stride: 0,
+        }
+    }
+}
+
+/// Owned decoded predictions and anchor metadata ready for SimOTA.
+pub struct DecodedYoloBatch {
+    boxes: Vec<[f32; 4]>,
+    objectness_logits: Vec<f32>,
+    class_logits: Vec<f32>,
+    anchor_centers: Vec<[f32; 2]>,
+    anchor_strides: Vec<f32>,
+    batch: usize,
+    anchors: usize,
+    classes: usize,
+}
+
+impl DecodedYoloBatch {
+    pub fn from_heads(heads: [YoloHead<'_>; 3]) -> SimOtaResult<Self> {
+        let batch = heads[0].shape[0];
+        let channels = heads[0].shape[3];
+        ensure!(batch > 0 && channels >= 6, PredictionsSnafu);
+        let classes = channels - 5;
+        let anchors = heads.iter().map(|head| head.shape[1] * head.shape[2]).sum();
+        ensure!(
+            heads.iter().all(|head| {
+                head.shape[0] == batch
+                    && head.shape[3] == channels
+                    && head.stride > 0
+                    && head.values.len() == head.shape.iter().product()
+            }),
+            PredictionsSnafu
+        );
+        let mut boxes = vec![[0.0; 4]; batch * anchors];
+        let mut objectness_logits = vec![0.0; batch * anchors];
+        let mut class_logits = vec![0.0; batch * anchors * classes];
+        let mut anchor_centers = Vec::with_capacity(anchors);
+        let mut anchor_strides = Vec::with_capacity(anchors);
+        let mut anchor_offset = 0;
+        for head in heads {
+            let [_, height, width, _] = head.shape;
+            for y in 0..height {
+                for x in 0..width {
+                    anchor_centers.push([
+                        (x as f32 + 0.5) * head.stride as f32,
+                        (y as f32 + 0.5) * head.stride as f32,
+                    ]);
+                    anchor_strides.push(head.stride as f32);
+                }
+            }
+            let head_anchors = height * width;
+            for image in 0..batch {
+                for anchor in 0..head_anchors {
+                    let source = (image * head_anchors + anchor) * channels;
+                    let x = anchor % width;
+                    let y = anchor / width;
+                    let destination = image * anchors + anchor_offset + anchor;
+                    boxes[destination] = [
+                        (head.values[source] + x as f32) * head.stride as f32,
+                        (head.values[source + 1] + y as f32) * head.stride as f32,
+                        head.values[source + 2].exp() * head.stride as f32,
+                        head.values[source + 3].exp() * head.stride as f32,
+                    ];
+                    objectness_logits[destination] = head.values[source + 4];
+                    class_logits[destination * classes..(destination + 1) * classes]
+                        .copy_from_slice(&head.values[source + 5..source + channels]);
+                }
+            }
+            anchor_offset += head_anchors;
+        }
+        Ok(Self {
+            boxes,
+            objectness_logits,
+            class_logits,
+            anchor_centers,
+            anchor_strides,
+            batch,
+            anchors,
+            classes,
+        })
+    }
+
+    pub fn input(&self) -> SimOtaInput<'_> {
+        SimOtaInput {
+            boxes: &self.boxes,
+            objectness_logits: &self.objectness_logits,
+            class_logits: &self.class_logits,
+            anchor_centers: &self.anchor_centers,
+            anchor_strides: &self.anchor_strides,
+            batch: self.batch,
+            anchors: self.anchors,
+            classes: self.classes,
+        }
+    }
+}
+
 /// One ground-truth detection in input-pixel coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DetectionTarget {
@@ -335,5 +446,25 @@ mod tests {
         let assigned = SimOtaConfig::default().assign(&input, &[]).unwrap();
         assert_eq!(assigned.foreground, 0);
         assert_eq!(assigned.objectness, [0.0]);
+    }
+
+    #[test]
+    fn decodes_three_heads_in_batch_major_anchor_order() {
+        let first = [0.0, 0.0, 0.0, 0.0, 3.0, 4.0];
+        let second = [1.0, 2.0, 0.0, 0.0, 5.0, 6.0];
+        let third = [-1.0, -2.0, 0.0, 0.0, 7.0, 8.0];
+        let decoded = DecodedYoloBatch::from_heads([
+            YoloHead::new(&first, [1, 1, 1, 6]).stride(8),
+            YoloHead::new(&second, [1, 1, 1, 6]).stride(16),
+            YoloHead::new(&third, [1, 1, 1, 6]).stride(32),
+        ])
+        .unwrap();
+        let input = decoded.input();
+        assert_eq!(input.anchors, 3);
+        assert_eq!(input.boxes[0], [0.0, 0.0, 8.0, 8.0]);
+        assert_eq!(input.boxes[1], [16.0, 32.0, 16.0, 16.0]);
+        assert_eq!(input.boxes[2], [-32.0, -64.0, 32.0, 32.0]);
+        assert_eq!(input.anchor_centers, [[4.0, 4.0], [8.0, 8.0], [16.0, 16.0]]);
+        assert_eq!(input.class_logits, [4.0, 6.0, 8.0]);
     }
 }

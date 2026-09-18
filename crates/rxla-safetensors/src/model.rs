@@ -1,7 +1,7 @@
 //! SafeTensors loading for parameter-effect model schemas.
 
 use super::*;
-use rxla_nn::{CompiledModelSessionBuilder, ModelSchema, ParameterSelection};
+use rxla_nn::{CompiledModelSessionBuilder, ModelSchema, ModelSessionBuilder, ParameterSelection};
 use std::collections::HashMap;
 
 /// Weight buffers keyed by the stable paths in a parameter-effect schema.
@@ -40,6 +40,16 @@ impl SchemaBuffers {
         self,
         builder: CompiledModelSessionBuilder<'model>,
     ) -> rxla_nn::Result<CompiledModelSessionBuilder<'model>> {
+        let SchemaBuffers { parameters, states } = self;
+        builder.parameters(parameters)?.states(states)
+    }
+
+    /// Initialize a raw state-program session used by graph transformations
+    /// such as optimizers with custom visible outputs.
+    pub fn initialize_raw<'model>(
+        self,
+        builder: ModelSessionBuilder<'model>,
+    ) -> rxla_nn::Result<ModelSessionBuilder<'model>> {
         let SchemaBuffers { parameters, states } = self;
         builder.parameters(parameters)?.states(states)
     }
