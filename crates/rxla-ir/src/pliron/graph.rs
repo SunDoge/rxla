@@ -90,9 +90,30 @@ impl IrGraph {
             if !reachable.insert(value) {
                 continue;
             }
-            let operation_ptr = value.defining_op().ok_or(IrError::InvalidValue {
-                operation: "walking source IR reachability",
-            })?;
+            let Some(operation_ptr) = value.defining_op() else {
+                // A structured-region argument is defined by the enclosing
+                // operation's corresponding loop-carried operand.
+                let block = value.defining_block().ok_or(IrError::InvalidValue {
+                    operation: "walking source IR block argument reachability",
+                })?;
+                let index = value
+                    .try_find_index(&self.ctx)
+                    .map_err(|_| IrError::InvalidValue {
+                        operation: "locating source IR block argument",
+                    })?;
+                let parent = block.deref(&self.ctx).get_parent_op(&self.ctx).ok_or(
+                    IrError::InvalidValue {
+                        operation: "finding structured region parent",
+                    },
+                )?;
+                if index >= parent.deref(&self.ctx).get_num_operands() {
+                    return Err(IrError::InvalidValue {
+                        operation: "mapping structured region argument to parent operand",
+                    });
+                }
+                worklist.push(parent.deref(&self.ctx).get_operand(index));
+                continue;
+            };
             let operation = operation_ptr.deref(&self.ctx);
             let op = Operation::get_op_dyn(operation_ptr, &self.ctx);
             if op.as_ref().is::<WithGradientOp>() || op.as_ref().is::<WithElementwiseDerivativeOp>()

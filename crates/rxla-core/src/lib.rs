@@ -249,6 +249,24 @@ pub enum Error {
         else_shape: Vec<i64>,
         else_dtype: DType,
     },
+    #[snafu(display("while loop requires at least one loop-carried tensor"))]
+    EmptyWhileCarry,
+    #[snafu(display("while loop condition must be a scalar I32 tensor"))]
+    InvalidWhileCondition,
+    #[snafu(display("while loop tensors must belong to one trace"))]
+    WhileTraceMismatch,
+    #[snafu(display("while loop body returned {actual} values, expected {expected}"))]
+    WhileResultCount { expected: usize, actual: usize },
+    #[snafu(display(
+        "while loop carry {index} changed from {initial_shape:?} {initial_dtype:?} to {next_shape:?} {next_dtype:?}"
+    ))]
+    WhileResultMismatch {
+        index: usize,
+        initial_shape: Vec<i64>,
+        initial_dtype: DType,
+        next_shape: Vec<i64>,
+        next_dtype: DType,
+    },
     #[snafu(display("custom call target must not be empty"))]
     EmptyCustomCallTarget,
     #[snafu(display("a tensor custom call requires at least one tensor operand"))]
@@ -378,6 +396,27 @@ impl Graph {
                 else_values,
                 types,
             )?;
+        Ok(ids
+            .into_iter()
+            .zip(types)
+            .map(|(id, ty)| Tensor::symbolic_typed(self.clone(), id, ty))
+            .collect())
+    }
+
+    fn while_loop(
+        &self,
+        initial: &[rxla_ir::SsaId],
+        condition_marker: usize,
+        condition: rxla_ir::SsaId,
+        body_marker: usize,
+        body: &[rxla_ir::SsaId],
+        types: &[TensorType],
+    ) -> Result<Vec<Tensor>> {
+        let ids = self
+            .0
+            .lock()
+            .map_err(|_| Error::GraphLockPoisoned)?
+            .append_while(initial, condition_marker, condition, body_marker, body)?;
         Ok(ids
             .into_iter()
             .zip(types)

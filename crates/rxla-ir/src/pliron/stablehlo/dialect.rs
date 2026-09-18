@@ -130,6 +130,10 @@ pub(super) struct ExportOp;
 #[pliron_op(name = "stablehlo.if", format, interfaces = [OneOpdInterface], verifier = "succ")]
 pub(super) struct StableIfOp;
 
+/// Structured target loop with variadic loop-carried values.
+#[pliron_op(name = "stablehlo.while", format, verifier = "succ")]
+pub(super) struct StableWhileOp;
+
 #[pliron_op(
     name = "stablehlo.custom_call",
     format,

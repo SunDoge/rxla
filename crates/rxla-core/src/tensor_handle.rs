@@ -675,6 +675,66 @@ impl Deref for Tensor {
 }
 
 impl Tensor {
+    /// Build a structured StableHLO loop. The closures are traced once against
+    /// the initial carry; execution iterates entirely inside the compiled
+    /// program. Every body result must preserve its carry's shape and dtype.
+    pub fn while_loop<Condition, Body>(
+        initial: &[Tensor],
+        condition: Condition,
+        body: Body,
+    ) -> Result<Vec<Tensor>>
+    where
+        Condition: FnOnce(&[Tensor]) -> Result<Tensor>,
+        Body: FnOnce(&[Tensor]) -> Result<Vec<Tensor>>,
+    {
+        let Some(first) = initial.first() else {
+            return Err(Error::EmptyWhileCarry);
+        };
+        if initial.iter().any(|value| !first.same_trace(value)) {
+            return Err(Error::WhileTraceMismatch);
+        }
+        let graph = first.graph().clone();
+        let condition_marker = graph.region_marker()?;
+        let predicate = condition(initial)?;
+        if predicate.dtype() != DType::I32 || !predicate.shape().is_empty() {
+            return Err(Error::InvalidWhileCondition);
+        }
+        if !first.same_trace(&predicate) {
+            return Err(Error::WhileTraceMismatch);
+        }
+        let body_marker = graph.region_marker()?;
+        let next = body(initial)?;
+        if next.len() != initial.len() {
+            return Err(Error::WhileResultCount {
+                expected: initial.len(),
+                actual: next.len(),
+            });
+        }
+        if next.iter().any(|value| !first.same_trace(value)) {
+            return Err(Error::WhileTraceMismatch);
+        }
+        for (index, (initial, next)) in initial.iter().zip(&next).enumerate() {
+            if initial.shape() != next.shape() || initial.dtype() != next.dtype() {
+                return Err(Error::WhileResultMismatch {
+                    index,
+                    initial_shape: initial.shape().to_vec(),
+                    initial_dtype: initial.dtype(),
+                    next_shape: next.shape().to_vec(),
+                    next_dtype: next.dtype(),
+                });
+            }
+        }
+        let types = initial.iter().map(Tensor::ty).collect::<Vec<_>>();
+        graph.while_loop(
+            &initial.iter().map(Tensor::node_id).collect::<Vec<_>>(),
+            condition_marker,
+            predicate.node_id(),
+            body_marker,
+            &next.iter().map(Tensor::node_id).collect::<Vec<_>>(),
+            &types,
+        )
+    }
+
     /// Build a lazy structured conditional. Only the selected branch executes;
     /// branch operations are represented as StableHLO regions rather than as
     /// eagerly computed operands of a `select`.

@@ -101,6 +101,7 @@ fn emit_structured_if(
         next_value,
         next_auxiliary,
         body,
+        RegionBinding::Captured,
     )?;
     writeln!(body, "    }} else {{").unwrap();
     emit_yield_region(
@@ -110,6 +111,7 @@ fn emit_structured_if(
         next_value,
         next_auxiliary,
         body,
+        RegionBinding::Captured,
     )?;
     writeln!(body, "    }}").unwrap();
     for (result, name) in results.into_iter().zip(result_names) {
@@ -118,9 +120,95 @@ fn emit_structured_if(
     Ok(())
 }
 
+fn emit_structured_while(
+    ctx: &Context,
+    operation_ptr: Ptr<Operation>,
+    operands: &[String],
+    names: &mut HashMap<Value, String>,
+    next_value: &mut usize,
+    next_auxiliary: &mut usize,
+    body: &mut String,
+) -> Result<()> {
+    let operation = operation_ptr.deref(ctx);
+    let results = operation.results().collect::<Vec<_>>();
+    let result_types = results
+        .iter()
+        .map(|result| stablehlo_type(&value_type(ctx, *result)))
+        .collect::<Result<Vec<_>>>()?;
+    let base = format!("%v{next_value}");
+    *next_value += 1;
+    let assignment = if results.len() == 1 {
+        base.clone()
+    } else {
+        format!("{base}:{}", results.len())
+    };
+    let iter_names = (0..operands.len())
+        .map(|index| format!("%iter{next_value}_{index}"))
+        .collect::<Vec<_>>();
+    let bindings = iter_names
+        .iter()
+        .zip(operands)
+        .map(|(argument, initial)| format!("{argument} = {initial}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    writeln!(
+        body,
+        "    {assignment} = stablehlo.while({bindings}) : {}",
+        result_types.join(", ")
+    )
+    .unwrap();
+    writeln!(body, "    cond {{").unwrap();
+    emit_yield_region(
+        ctx,
+        operation.get_region(0),
+        names,
+        next_value,
+        next_auxiliary,
+        body,
+        RegionBinding::Loop {
+            names: &iter_names,
+            predicate: true,
+        },
+    )?;
+    writeln!(body, "    }} do {{").unwrap();
+    emit_yield_region(
+        ctx,
+        operation.get_region(1),
+        names,
+        next_value,
+        next_auxiliary,
+        body,
+        RegionBinding::Loop {
+            names: &iter_names,
+            predicate: false,
+        },
+    )?;
+    writeln!(body, "    }}").unwrap();
+    for (index, result) in results.into_iter().enumerate() {
+        names.insert(
+            result,
+            if operation.get_num_results() == 1 {
+                base.clone()
+            } else {
+                format!("{base}#{index}")
+            },
+        );
+    }
+    Ok(())
+}
+
 /// Emit one single-block structured region. Values captured from the parent are
 /// resolved from `names`; locally defined SSA values are added as operations are
 /// serialized before the `stablehlo.return` terminator.
+#[derive(Clone, Copy)]
+enum RegionBinding<'a> {
+    Captured,
+    Loop {
+        names: &'a [String],
+        predicate: bool,
+    },
+}
+
 fn emit_yield_region(
     ctx: &Context,
     region: Ptr<Region>,
@@ -128,6 +216,7 @@ fn emit_yield_region(
     next_value: &mut usize,
     next_auxiliary: &mut usize,
     body: &mut String,
+    binding: RegionBinding<'_>,
 ) -> Result<()> {
     let blocks = region.deref(ctx).iter(ctx).collect::<Vec<_>>();
     let [block] = blocks.as_slice() else {
@@ -136,6 +225,22 @@ fn emit_yield_region(
             message: "conditional region must have exactly one block".into(),
         });
     };
+    if let RegionBinding::Loop {
+        names: argument_names,
+        ..
+    } = binding
+    {
+        let arguments = block.deref(ctx).arguments().collect::<Vec<_>>();
+        if arguments.len() != argument_names.len() {
+            return Err(IrError::Verification {
+                stage: "emitting StableHLO structured region",
+                message: "region argument names must match block argument arity".into(),
+            });
+        }
+        for (argument, name) in arguments.into_iter().zip(argument_names) {
+            names.insert(argument, name.clone());
+        }
+    }
     let operations = block.deref(ctx).iter(ctx).collect::<Vec<_>>();
     let Some(&terminator) = operations.last() else {
         return Err(IrError::UnsupportedOperation {
@@ -156,6 +261,18 @@ fn emit_yield_region(
             .collect::<Result<Vec<_>>>()?;
         if Operation::is_op::<StableIfOp>(*operation_ptr, ctx) {
             emit_structured_if(
+                ctx,
+                *operation_ptr,
+                &operands,
+                names,
+                next_value,
+                next_auxiliary,
+                body,
+            )?;
+            continue;
+        }
+        if Operation::is_op::<StableWhileOp>(*operation_ptr, ctx) {
+            emit_structured_while(
                 ctx,
                 *operation_ptr,
                 &operands,
@@ -208,13 +325,34 @@ fn emit_yield_region(
         .operands()
         .map(|value| stablehlo_type(&value_type(ctx, value)))
         .collect::<Result<Vec<_>>>()?;
-    writeln!(
-        body,
-        "      stablehlo.return {} : {}",
-        values.join(", "),
-        types.join(", ")
-    )
-    .unwrap();
+    if matches!(
+        binding,
+        RegionBinding::Loop {
+            predicate: true,
+            ..
+        }
+    ) && value_type(ctx, operation.get_operand(0)).dtype == DType::I32
+    {
+        let zero = format!("%aux{next_auxiliary}");
+        *next_auxiliary += 1;
+        let converted = format!("%aux{next_auxiliary}");
+        *next_auxiliary += 1;
+        writeln!(
+            body,
+            "      {zero} = stablehlo.constant dense<0> : tensor<i32>"
+        )
+        .unwrap();
+        writeln!(body, "      {converted} = stablehlo.compare NE, {}, {zero}, SIGNED : (tensor<i32>, tensor<i32>) -> tensor<i1>", values[0]).unwrap();
+        writeln!(body, "      stablehlo.return {converted} : tensor<i1>").unwrap();
+    } else {
+        writeln!(
+            body,
+            "      stablehlo.return {} : {}",
+            values.join(", "),
+            types.join(", ")
+        )
+        .unwrap();
+    }
     Ok(())
 }
 
@@ -322,6 +460,18 @@ pub(super) fn emit_module(
             })?;
         if op.as_ref().is::<StableIfOp>() {
             emit_structured_if(
+                ctx,
+                operation_ptr,
+                &operands,
+                &mut names,
+                &mut next_value,
+                &mut next_auxiliary,
+                &mut body,
+            )?;
+            continue;
+        }
+        if op.as_ref().is::<StableWhileOp>() {
+            emit_structured_while(
                 ctx,
                 operation_ptr,
                 &operands,

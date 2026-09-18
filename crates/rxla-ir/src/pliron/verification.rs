@@ -152,6 +152,84 @@ impl Verify for IfOp {
     }
 }
 
+impl Verify for WhileOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let operation = self.get_operation().deref(ctx);
+        let carry_count = operation.get_num_operands();
+        if carry_count == 0 || operation.get_num_results() != carry_count {
+            return pliron::verify_err_noloc!(
+                "rxla.while requires a nonempty carry with equal operand and result arity"
+            );
+        }
+        if operation.num_regions() != 2 {
+            return pliron::verify_err_noloc!("rxla.while requires condition and body regions");
+        }
+        for index in 0..carry_count {
+            if value_type(operation.get_operand(index), ctx)?
+                != value_type(operation.get_result(index), ctx)?
+            {
+                return pliron::verify_err_noloc!(
+                    "rxla.while operand and result carry types must match"
+                );
+            }
+        }
+        for region_index in 0..2 {
+            let region = operation.get_region(region_index);
+            let blocks = region.deref(ctx).iter(ctx).collect::<Vec<_>>();
+            let [block] = blocks.as_slice() else {
+                return pliron::verify_err_noloc!(
+                    "rxla.while regions must contain exactly one block"
+                );
+            };
+            let arguments = block.deref(ctx).arguments().collect::<Vec<_>>();
+            if arguments.len() != carry_count {
+                return pliron::verify_err_noloc!(
+                    "rxla.while region arguments must match the carry arity"
+                );
+            }
+            for (index, argument) in arguments.into_iter().enumerate() {
+                if value_type(argument, ctx)? != value_type(operation.get_operand(index), ctx)? {
+                    return pliron::verify_err_noloc!(
+                        "rxla.while region argument types must match the carry types"
+                    );
+                }
+            }
+            let Some(yield_op) = block.deref(ctx).get_tail() else {
+                return pliron::verify_err_noloc!("rxla.while regions must end with rxla.yield");
+            };
+            if !Operation::is_op::<YieldOp>(yield_op, ctx) {
+                return pliron::verify_err_noloc!("rxla.while regions must end with rxla.yield");
+            }
+            let yielded = yield_op.deref(ctx);
+            let expected = if region_index == 0 { 1 } else { carry_count };
+            if yielded.get_num_operands() != expected {
+                return pliron::verify_err_noloc!(
+                    "rxla.while condition must yield one predicate and body must yield the carry"
+                );
+            }
+            if region_index == 0 {
+                let predicate = value_type(yielded.get_operand(0), ctx)?;
+                if predicate.dtype != DType::I32 || !predicate.dims.is_empty() {
+                    return pliron::verify_err_noloc!(
+                        "rxla.while condition must yield a scalar I32 predicate"
+                    );
+                }
+            } else {
+                for index in 0..carry_count {
+                    if value_type(yielded.get_operand(index), ctx)?
+                        != value_type(operation.get_operand(index), ctx)?
+                    {
+                        return pliron::verify_err_noloc!(
+                            "rxla.while body yield types must match the carry types"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Verify for CustomCallOp {
     fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
         let Some(target) = self.get_attr_custom_call_target(ctx) else {

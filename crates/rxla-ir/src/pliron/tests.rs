@@ -324,6 +324,67 @@ fn nested_conditional(graph: &mut IrGraph) -> Value {
     graph.push_results(outer)[0]
 }
 
+fn structured_while(graph: &mut IrGraph) -> Vec<Value> {
+    let counter = graph.parameter_number(0, &[], DType::I32);
+    let tensor = graph.parameter_number(1, &[2], DType::F32);
+    let carry_types = vec![counter.get_type(&graph.ctx), tensor.get_type(&graph.ctx)];
+    let loop_op = <WhileOp as PlironOp>::from_operation(Operation::new(
+        &mut graph.ctx,
+        WhileOp::get_concrete_op_info(),
+        carry_types.clone(),
+        vec![counter, tensor],
+        vec![],
+        2,
+    ));
+
+    let condition = BasicBlock::new(&mut graph.ctx, None, carry_types.clone());
+    condition.insert_at_back(
+        loop_op.get_operation().deref(&graph.ctx).get_region(0),
+        &graph.ctx,
+    );
+    let condition_predicate = condition.deref(&graph.ctx).get_argument(0);
+    let condition_yield = <YieldOp as PlironOp>::from_operation(Operation::new(
+        &mut graph.ctx,
+        YieldOp::get_concrete_op_info(),
+        vec![],
+        vec![condition_predicate],
+        vec![],
+        0,
+    ));
+    condition_yield
+        .get_operation()
+        .insert_at_back(condition, &graph.ctx);
+
+    let body = BasicBlock::new(&mut graph.ctx, None, carry_types);
+    body.insert_at_back(
+        loop_op.get_operation().deref(&graph.ctx).get_region(1),
+        &graph.ctx,
+    );
+    let scalar_i32 = graph.tensor_type(&[], DType::I32);
+    let zero = <ConstantOp as PlironOp>::from_operation(Operation::new(
+        &mut graph.ctx,
+        ConstantOp::get_concrete_op_info(),
+        vec![scalar_i32],
+        vec![],
+        vec![],
+        0,
+    ));
+    zero.set_attr_value(&graph.ctx, BytesAttr::new(0_i32.to_le_bytes().to_vec()));
+    zero.get_operation().insert_at_back(body, &graph.ctx);
+    let zero_value = zero.get_result(&graph.ctx);
+    let body_tensor = body.deref(&graph.ctx).get_argument(1);
+    let body_yield = <YieldOp as PlironOp>::from_operation(Operation::new(
+        &mut graph.ctx,
+        YieldOp::get_concrete_op_info(),
+        vec![],
+        vec![zero_value, body_tensor],
+        vec![],
+        0,
+    ));
+    body_yield.get_operation().insert_at_back(body, &graph.ctx);
+    graph.push_results(loop_op)
+}
+
 #[test]
 fn structured_conditionals_verify_with_explicit_branch_dependencies() {
     let mut graph = IrGraph::default();
@@ -334,6 +395,19 @@ fn structured_conditionals_verify_with_explicit_branch_dependencies() {
     assert!(stablehlo.contains("stablehlo.if"));
     assert!(stablehlo.contains("stablehlo.return %arg1 : tensor<2xf32>"));
     assert!(stablehlo.contains("stablehlo.return %arg2 : tensor<2xf32>"));
+}
+
+#[test]
+fn structured_while_preserves_typed_loop_carries() {
+    let mut graph = IrGraph::default();
+    let outputs = structured_while(&mut graph);
+    graph.verify("structured while").unwrap();
+    let stablehlo = graph.export_stablehlo(&outputs, false).unwrap();
+    assert!(stablehlo.contains("stablehlo.while("));
+    assert!(stablehlo.contains("cond {"));
+    assert!(stablehlo.contains("} do {"));
+    assert!(stablehlo.contains("stablehlo.return %aux"));
+    assert!(stablehlo.contains("stablehlo.return %v"));
 }
 
 #[test]

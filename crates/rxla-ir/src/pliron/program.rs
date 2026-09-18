@@ -178,6 +178,120 @@ impl ProgramIr {
             .collect())
     }
 
+    /// Build a structured loop from two root operation ranges. The frontend
+    /// traces both regions against the initial carry values; this method moves
+    /// those operations into regions and rewrites initial-carry uses to the
+    /// corresponding block arguments.
+    pub fn append_while(
+        &mut self,
+        initial: &[SsaId],
+        condition_marker: usize,
+        condition_value: SsaId,
+        body_marker: usize,
+        body_values: &[SsaId],
+    ) -> Result<Vec<SsaId>> {
+        if initial.is_empty() || body_values.len() != initial.len() {
+            return Err(IrError::InvalidValue {
+                operation: "building while loop carry",
+            });
+        }
+        let end = self.values.len();
+        if condition_marker > body_marker || body_marker > end {
+            return Err(IrError::InvalidValue {
+                operation: "building while loop regions",
+            });
+        }
+        let initial_values = initial
+            .iter()
+            .map(|&id| self.value(id))
+            .collect::<Result<Vec<_>>>()?;
+        let carry_types = initial_values
+            .iter()
+            .map(|value| value.get_type(&self.graph.ctx))
+            .collect::<Vec<_>>();
+        let condition_value = self.value(condition_value)?;
+        let body_values = body_values
+            .iter()
+            .map(|&id| self.value(id))
+            .collect::<Result<Vec<_>>>()?;
+        for (initial, next) in initial_values.iter().zip(&body_values) {
+            if initial.get_type(&self.graph.ctx) != next.get_type(&self.graph.ctx) {
+                return Err(IrError::InvalidValue {
+                    operation: "building while loop with changing carry types",
+                });
+            }
+        }
+        let loop_op = <WhileOp as PlironOp>::from_operation(Operation::new(
+            &mut self.graph.ctx,
+            WhileOp::get_concrete_op_info(),
+            carry_types.clone(),
+            initial_values.clone(),
+            vec![],
+            2,
+        ));
+        for (region_index, (start, finish, yielded)) in [
+            (condition_marker, body_marker, vec![condition_value]),
+            (body_marker, end, body_values),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = self.graph.module.get_body(&self.graph.ctx, 0);
+            let block = BasicBlock::new(&mut self.graph.ctx, None, carry_types.clone());
+            block.insert_at_back(
+                loop_op
+                    .get_operation()
+                    .deref(&self.graph.ctx)
+                    .get_region(region_index),
+                &self.graph.ctx,
+            );
+            let arguments = block.deref(&self.graph.ctx).arguments().collect::<Vec<_>>();
+            let remap = initial_values
+                .iter()
+                .copied()
+                .zip(arguments.iter().copied())
+                .collect::<HashMap<_, _>>();
+            let mut operations = Vec::new();
+            for index in start..finish {
+                let value = self.value(SsaId::from_index(index))?;
+                let Some(operation) = value.defining_op() else {
+                    continue;
+                };
+                if operation.deref(&self.graph.ctx).get_parent_block() == Some(root)
+                    && operations.last().copied() != Some(operation)
+                {
+                    operations.push(operation);
+                }
+            }
+            for operation in operations {
+                remap_operation_operands(operation, &self.graph.ctx, &remap);
+                operation.unlink(&self.graph.ctx);
+                operation.insert_at_back(block, &self.graph.ctx);
+            }
+            let yielded = yielded
+                .into_iter()
+                .map(|value| remap.get(&value).copied().unwrap_or(value))
+                .collect();
+            let yield_op = <YieldOp as PlironOp>::from_operation(Operation::new(
+                &mut self.graph.ctx,
+                YieldOp::get_concrete_op_info(),
+                vec![],
+                yielded,
+                vec![],
+                0,
+            ));
+            yield_op
+                .get_operation()
+                .insert_at_back(block, &self.graph.ctx);
+        }
+        Ok(self
+            .graph
+            .push_results(loop_op)
+            .into_iter()
+            .map(|value| self.values.push(value))
+            .collect())
+    }
+
     #[doc(hidden)]
     pub fn len(&self) -> usize {
         self.values.len()
@@ -420,5 +534,27 @@ impl ProgramIr {
             .attributes
             .get::<ShardingAttr>(&sharding_attr_key())
             .map(|attribute| attribute.sharding()))
+    }
+}
+
+fn remap_operation_operands(
+    operation: pliron::context::Ptr<Operation>,
+    ctx: &Context,
+    remap: &HashMap<Value, Value>,
+) {
+    let operands = operation.deref(ctx).operands().collect::<Vec<_>>();
+    for (index, operand) in operands.into_iter().enumerate() {
+        if let Some(&replacement) = remap.get(&operand) {
+            Operation::replace_operand(operation, ctx, index, replacement);
+        }
+    }
+    let regions = operation.deref(ctx).regions().collect::<Vec<_>>();
+    for region in regions {
+        for block in region.deref(ctx).iter(ctx) {
+            let nested = block.deref(ctx).iter(ctx).collect::<Vec<_>>();
+            for operation in nested {
+                remap_operation_operands(operation, ctx, remap);
+            }
+        }
     }
 }

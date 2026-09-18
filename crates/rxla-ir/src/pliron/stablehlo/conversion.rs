@@ -76,6 +76,25 @@ impl DialectConversion for RxlaToStableHlo {
             rewriter.replace_operation(ctx, op, target.get_operation());
             return Ok(());
         }
+        if source.as_ref().is::<WhileOp>() {
+            let target = <StableWhileOp as PlironOp>::from_operation(Operation::new(
+                ctx,
+                StableWhileOp::get_concrete_op_info(),
+                result_types,
+                operands,
+                vec![],
+                2,
+            ));
+            let mut mapping = IrMapping::new();
+            for region_index in 0..2 {
+                let source_region = op.deref(ctx).get_region(region_index);
+                let target_region = target.get_operation().deref(ctx).get_region(region_index);
+                clone_region_into(source_region, target_region, ctx, rewriter, &mut mapping);
+            }
+            rewriter.insert_operation(ctx, target.get_operation());
+            rewriter.replace_operation(ctx, op, target.get_operation());
+            return Ok(());
+        }
         if let Some(source) = source.as_ref().downcast_ref::<CustomCallOp>() {
             let target = <StableCustomCallOp as PlironOp>::from_operation(Operation::new(
                 ctx,
@@ -705,6 +724,7 @@ pub(super) fn supports_source_operation(op: &dyn PlironOp) -> bool {
         || op.is::<StateReadOp>()
         || op.is::<StateWriteOp>()
         || op.is::<IfOp>()
+        || op.is::<WhileOp>()
         || op.is::<YieldOp>()
         || op.is::<CustomCallOp>()
         || op.is::<ConstantOp>()

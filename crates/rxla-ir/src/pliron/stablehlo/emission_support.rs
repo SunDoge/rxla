@@ -121,9 +121,29 @@ pub(super) fn reachable_values(ctx: &Context, outputs: &[Value]) -> Result<HashS
         if !reachable.insert(value) {
             continue;
         }
-        let operation = value.defining_op().ok_or(IrError::InvalidValue {
-            operation: "walking lowered IR reachability",
-        })?;
+        let Some(operation) = value.defining_op() else {
+            let block = value.defining_block().ok_or(IrError::InvalidValue {
+                operation: "walking lowered IR block argument reachability",
+            })?;
+            let index = value
+                .try_find_index(ctx)
+                .map_err(|_| IrError::InvalidValue {
+                    operation: "locating lowered IR block argument",
+                })?;
+            let parent = block
+                .deref(ctx)
+                .get_parent_op(ctx)
+                .ok_or(IrError::InvalidValue {
+                    operation: "finding lowered structured region parent",
+                })?;
+            if index >= parent.deref(ctx).get_num_operands() {
+                return Err(IrError::InvalidValue {
+                    operation: "mapping lowered region argument to parent operand",
+                });
+            }
+            worklist.push(parent.deref(ctx).get_operand(index));
+            continue;
+        };
         let operation = operation.deref(ctx);
         worklist.extend(operation.operands());
         for region_index in 0..operation.num_regions() {

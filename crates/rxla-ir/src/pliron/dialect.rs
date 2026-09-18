@@ -284,7 +284,13 @@ pub(super) struct GetDimensionSizeOp;
 )]
 pub(super) struct IfOp;
 
-/// Terminates an `rxla.if` branch with its yielded values.
+/// Structured loop whose operands and results are the loop-carried values.
+/// Both regions contain one block with one argument per carried value. The
+/// condition yields one scalar I32 predicate; the body yields the next carry.
+#[pliron_op(name = "rxla.while", format)]
+pub(super) struct WhileOp;
+
+/// Terminates a structured RXLA region with its yielded values.
 #[pliron_op(
     name = "rxla.yield",
     format,
