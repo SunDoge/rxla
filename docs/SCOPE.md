@@ -116,6 +116,11 @@ real-dataset CUDA run; see [its scoped results](IMAGENETTE-TRAINING.md). These
 examples are architecture and integration evidence, not canonical accuracy
 recipes or distributed-training benchmarks.
 
+The [CartPole policy-gradient experiment](CARTPOLE-RL.md) closes a small real
+RL loop with host vector environments and RXLA policy inference, autodiff and
+resident Adam state. It demonstrates learning, not PPO, an environment API,
+distributed rollout, or production LLM reinforcement learning.
+
 The opt-in [heterogeneous example](../crates/rxla-core/examples/heterogeneous.rs) also runs
 CPU -> CUDA -> CPU subgraphs in one process, with explicit synchronous host
 staging and three pipeline compilations reused over 17 requests each at retained-task
