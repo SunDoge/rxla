@@ -1,7 +1,7 @@
 //! Functional Stable Diffusion building blocks using scoped parameter effects.
 
 use rxla_core::{Conv2dOptions, DType, Tensor};
-use rxla_nn::{Cx, LayerNorm, Linear, TensorApply};
+use rxla_nn::{Cx, Layer, LayerNorm, Linear, LoraLinear, TensorApply};
 use snafu::Snafu;
 
 /// Machine-readable model definition and input validation failures.
@@ -232,6 +232,7 @@ pub struct SpatialTransformerOptions {
     head_dim: i64,
     layers: usize,
     groups: i64,
+    lora: Option<(i64, f32)>,
 }
 
 impl SpatialTransformerOptions {
@@ -240,6 +241,7 @@ impl SpatialTransformerOptions {
             head_dim,
             layers: 1,
             groups: 32,
+            lora: None,
         }
     }
 
@@ -252,9 +254,38 @@ impl SpatialTransformerOptions {
         self.groups = groups;
         self
     }
+
+    /// Add LoRA matrices to every q/k/v/output attention projection while
+    /// preserving the Diffusers-compatible base-weight paths.
+    pub fn lora(mut self, rank: i64, alpha: f32) -> Self {
+        self.lora = Some((rank, alpha));
+        self
+    }
 }
 
-fn cross_attention(cx: Cx, query: &Tensor, context: &Tensor, head_dim: i64) -> Result<Tensor> {
+fn attention_linear(
+    cx: Cx,
+    input: &Tensor,
+    width: i64,
+    bias: bool,
+    lora: Option<(i64, f32)>,
+) -> Result<Tensor> {
+    match lora {
+        Some((rank, alpha)) => Ok(LoraLinear::new(width, rank)
+            .alpha(alpha)
+            .bias(bias)
+            .apply_in(&cx, input)?),
+        None => Ok(Linear::new(width).bias(bias).apply_in(&cx, input)?),
+    }
+}
+
+fn cross_attention(
+    cx: Cx,
+    query: &Tensor,
+    context: &Tensor,
+    head_dim: i64,
+    lora: Option<(i64, f32)>,
+) -> Result<Tensor> {
     if query.shape().len() != 3
         || context.shape().len() != 3
         || query.shape()[0] != context.shape()[0]
@@ -273,36 +304,20 @@ fn cross_attention(cx: Cx, query: &Tensor, context: &Tensor, head_dim: i64) -> R
     }
     let heads = width / head_dim;
     let context_length = context.shape()[1];
-    let q = cx
-        .scope("to_q")?
-        .linear(*width)
-        .bias(false)
-        .apply(query)?
+    let q = attention_linear(cx.scope("to_q")?, query, *width, false, lora)?
         .reshape([*batch, *query_length, heads, head_dim])?
         .transpose([0, 2, 1, 3])?;
-    let k = cx
-        .scope("to_k")?
-        .linear(*width)
-        .bias(false)
-        .apply(context)?
+    let k = attention_linear(cx.scope("to_k")?, context, *width, false, lora)?
         .reshape([*batch, context_length, heads, head_dim])?
         .transpose([0, 2, 1, 3])?;
-    let v = cx
-        .scope("to_v")?
-        .linear(*width)
-        .bias(false)
-        .apply(context)?
+    let v = attention_linear(cx.scope("to_v")?, context, *width, false, lora)?
         .reshape([*batch, context_length, heads, head_dim])?
         .transpose([0, 2, 1, 3])?;
     let hidden = q
         .scaled_dot_product_attention(&k, &v, None, None)?
         .transpose([0, 2, 1, 3])?
         .reshape([*batch, *query_length, *width])?;
-    Ok(cx
-        .scope("to_out")?
-        .scope("0")?
-        .linear(*width)
-        .apply(&hidden)?)
+    attention_linear(cx.scope("to_out")?.scope("0")?, &hidden, *width, true, lora)
 }
 
 fn feed_forward(cx: Cx, input: &Tensor) -> Result<Tensor> {
@@ -326,17 +341,23 @@ fn feed_forward(cx: Cx, input: &Tensor) -> Result<Tensor> {
     Ok(gated.apply(&cx.scope("net")?.named_layer("2", Linear::new(width))?)?)
 }
 
-fn transformer_block(cx: Cx, input: &Tensor, context: &Tensor, head_dim: i64) -> Result<Tensor> {
+fn transformer_block(
+    cx: Cx,
+    input: &Tensor,
+    context: &Tensor,
+    head_dim: i64,
+    lora: Option<(i64, f32)>,
+) -> Result<Tensor> {
     let normalized = input.apply(&cx.named_layer("norm1", LayerNorm::new(1))?)?;
     let attention = {
         let scope = cx.scope("attn1")?;
-        cross_attention(scope, &normalized, &normalized, head_dim)?
+        cross_attention(scope, &normalized, &normalized, head_dim, lora)?
     };
     let hidden = input.add(&attention)?;
     let normalized = hidden.apply(&cx.named_layer("norm2", LayerNorm::new(1))?)?;
     let attention = {
         let scope = cx.scope("attn2")?;
-        cross_attention(scope, &normalized, context, head_dim)?
+        cross_attention(scope, &normalized, context, head_dim, lora)?
     };
     let hidden = hidden.add(&attention)?;
     let normalized = hidden.apply(&cx.named_layer("norm3", LayerNorm::new(1))?)?;
@@ -375,7 +396,7 @@ pub fn spatial_transformer(
         .reshape([*batch, height * width, *channels])?;
     for layer in 0..options.layers {
         let scope = cx.scope_path(["transformer_blocks".to_owned(), layer.to_string()])?;
-        hidden = transformer_block(scope, &hidden, context, options.head_dim)?;
+        hidden = transformer_block(scope, &hidden, context, options.head_dim, options.lora)?;
     }
     let hidden = hidden.reshape([*batch, *height, *width, *channels])?;
     Ok(cx

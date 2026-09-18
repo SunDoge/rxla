@@ -21,6 +21,10 @@ name = "stable_diffusion"
 required-features = ["model"]
 
 [[example]]
+name = "stable_diffusion_lora_train"
+required-features = ["model", "export"]
+
+[[example]]
 name = "qwen3_5_bench"
 required-features = ["model"]
 

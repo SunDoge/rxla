@@ -15,6 +15,7 @@ pub struct UnetConfig {
     attention_heads: i64,
     norm_groups: i64,
     norm_epsilon: f32,
+    attention_lora: Option<(i64, f32)>,
 }
 
 impl UnetConfig {
@@ -30,6 +31,7 @@ impl UnetConfig {
             attention_heads: 4,
             norm_groups: 32,
             norm_epsilon: 1e-5,
+            attention_lora: None,
         }
     }
 
@@ -45,7 +47,14 @@ impl UnetConfig {
             attention_heads: 8,
             norm_groups: 32,
             norm_epsilon: 1e-5,
+            attention_lora: None,
         }
+    }
+
+    /// Inject LoRA into all self- and cross-attention q/k/v/output projections.
+    pub fn attention_lora(mut self, rank: i64, alpha: f32) -> Self {
+        self.attention_lora = Some((rank, alpha));
+        self
     }
 
     fn validate(&self) -> Result<()> {
@@ -61,6 +70,9 @@ impl UnetConfig {
             || self.norm_groups <= 0
             || !self.norm_epsilon.is_finite()
             || self.norm_epsilon <= 0.0
+            || self
+                .attention_lora
+                .is_some_and(|(rank, alpha)| rank <= 0 || !alpha.is_finite())
             || self.block_channels.iter().any(|&channels| {
                 channels <= 0
                     || channels % self.norm_groups != 0
@@ -140,13 +152,13 @@ pub fn unet(
             }
             if config.down_cross_attention[stage] {
                 let scope = indexed_scope(&block, "attentions", layer)?;
-                value = spatial_transformer(
-                    scope,
-                    &value,
-                    context,
+                let mut options =
                     SpatialTransformerOptions::new(out_channels / config.attention_heads)
-                        .groups(config.norm_groups),
-                )?;
+                        .groups(config.norm_groups);
+                if let Some((rank, alpha)) = config.attention_lora {
+                    options = options.lora(rank, alpha);
+                }
+                value = spatial_transformer(scope, &value, context, options)?;
             }
             residuals.push(value.clone());
         }
@@ -177,13 +189,13 @@ pub fn unet(
         };
         let attended = {
             let scope = indexed_scope(&mid, "attentions", 0)?;
-            spatial_transformer(
-                scope,
-                &first,
-                context,
+            let mut options =
                 SpatialTransformerOptions::new(first.shape()[3] / config.attention_heads)
-                    .groups(config.norm_groups),
-            )?
+                    .groups(config.norm_groups);
+            if let Some((rank, alpha)) = config.attention_lora {
+                options = options.lora(rank, alpha);
+            }
+            spatial_transformer(scope, &first, context, options)?
         };
         let scope = indexed_scope(&mid, "resnets", 1)?;
         resnet2d(
@@ -219,13 +231,13 @@ pub fn unet(
             }
             if config.up_cross_attention[up_stage] {
                 let scope = indexed_scope(&block, "attentions", layer)?;
-                value = spatial_transformer(
-                    scope,
-                    &value,
-                    context,
+                let mut options =
                     SpatialTransformerOptions::new(out_channels / config.attention_heads)
-                        .groups(config.norm_groups),
-                )?;
+                        .groups(config.norm_groups);
+                if let Some((rank, alpha)) = config.attention_lora {
+                    options = options.lora(rank, alpha);
+                }
+                value = spatial_transformer(scope, &value, context, options)?;
             }
         }
         if up_stage + 1 < config.block_channels.len() {
@@ -260,6 +272,7 @@ pub fn unet(
 mod tests {
     use super::*;
     use rxla_nn::Model;
+    use rxla_train::select_lora;
 
     fn tiny(cx: Cx) -> Result<Tensor> {
         let sample = cx.input([1, 8, 8, 4])?;
@@ -285,5 +298,43 @@ mod tests {
             assert!(schema.get(path).is_some(), "missing {path}");
         }
         model.prepare().unwrap();
+    }
+
+    #[test]
+    fn tiny_unet_injects_attention_lora_without_renaming_base_weights() {
+        let model = Model::new(|cx: Cx| {
+            let sample = cx.input([1, 8, 8, 4])?;
+            let timestep = cx.input([1, 32])?;
+            let context = cx.input([1, 5, 32])?;
+            unet(
+                cx,
+                &sample,
+                &timestep,
+                &context,
+                &UnetConfig::tiny().attention_lora(2, 2.0),
+            )
+        })
+        .trace()
+        .unwrap();
+        let schema = model.schema();
+        let base = "mid_block.attentions.0.transformer_blocks.0.attn2.to_k.weight";
+        assert!(schema.get(base).is_some());
+        assert!(
+            schema
+                .get("mid_block.attentions.0.transformer_blocks.0.attn2.to_k.lora_A.weight")
+                .is_some()
+        );
+        assert!(
+            schema
+                .get("mid_block.attentions.0.transformer_blocks.0.attn2.to_k.lora_B.weight")
+                .is_some()
+        );
+        let adapter = select_lora(schema);
+        assert!(!adapter.is_empty());
+        assert!(
+            adapter
+                .parameters()
+                .all(|(_, parameter)| parameter.path().contains(".lora_"))
+        );
     }
 }

@@ -81,3 +81,51 @@ and verifies the restored result on both the ZML CPU PJRT plugin and JAX CUDA
 PJRT. Current scope is F32 affine LoRA. Convolution adapters, adapter merging,
 quantized-base training and external Diffusers/PEFT key conversion remain
 separate extensions.
+
+## Stable Diffusion attention LoRA
+
+`UnetConfig::attention_lora(rank, alpha)` inserts adapters into every
+cross-attention query, key, value and output projection without renaming the
+base Diffusers parameter paths. The same UNet definition is therefore used for
+ordinary inference and adapter training.
+
+Prepare one real image/prompt noise-prediction batch with the Diffusers VAE,
+CLIP text encoder and scheduler:
+
+```console
+uv run python benchmarks/prepare_sd_lora.py \
+  /path/to/stable-diffusion-v1-5 \
+  image.jpg \
+  /tmp/sd-lora-batch.safetensors \
+  --prompt "a photo of a church" \
+  --image-size 128
+```
+
+Then compile the RXLA UNet forward pass, autodiff and Adam update into one
+stateful GPU program. Only the LoRA tensors are resident and trainable; the
+original checkpoint is loaded as immutable parameter bindings:
+
+```console
+cargo run -p rxla-safetensors --features model,export \
+  --example stable_diffusion_lora_train --offline -- \
+  .venv/lib/python3.14/site-packages/jax_plugins/xla_cuda13/xla_cuda_plugin.so \
+  /path/to/stable-diffusion-v1-5 \
+  /tmp/sd-lora-batch.safetensors \
+  /tmp/sd-lora.safetensors \
+  --preset sd-v1 --rank 1 --alpha 1 \
+  --learning-rate 0.0001 --steps 2
+```
+
+The September 18, 2026 smoke test on an RTX 5080 trained all 256 SD 1.5
+attention adapter tensors and exported an 814 KiB SafeTensors file. Loss on the
+fixed real-image batch changed from `0.25562716` to `0.25503471` in two steps.
+The full F32 compile was close to the 16 GiB device limit: XLA estimated
+13.41 GiB after memory scheduling. A 100-step tiny Stable Diffusion run changed
+loss from `1.09543443` to `1.06830454` and exported 96 adapter tensors in a
+36 KiB file.
+
+This is deliberately an end-to-end correctness and architecture test, not a
+claim about useful image adaptation from one sample. Dataset loading,
+multi-example batching, BF16 compute, rematerialization, gradient accumulation,
+validation image generation and PEFT/Diffusers key conversion are the next
+pieces needed for a production trainer.

@@ -17,6 +17,7 @@ rxla-core = { path = "../rxla-core", version = "=0.1.0-alpha.1", default-feature
 snafu = { workspace = true }
 
 [dev-dependencies]
+rxla-train = { path = "../rxla-train" }
 clap = { workspace = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
