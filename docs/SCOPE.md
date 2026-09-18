@@ -40,8 +40,9 @@ input bindings. Every runtime dtype uses `Tensor`; the former `Index` and
 preserve dtype, unsupported arithmetic is rejected, and autodiff remains F32-only.
 Tensor and Storage are now Arc-backed and `Send + Sync`; prepared snapshots remain
 the preferred serialization and worker-handoff boundary.
-CPU/CUDA managed-input and Tensor-first lazy evaluation paths pass. Device views,
-device DLPack import/export and donation remain pending.
+CPU/CUDA managed-input and Tensor-first lazy evaluation paths pass. Compact
+CUDA/CUDA-managed DLPack allocations can be imported as zero-copy PJRT device
+views; DLPack export, non-compact device views, and donation remain pending.
 
 The development gate has an explicit `--quick` host-only mode for default-feature
 library checks/tests/Clippy. Native unit tests stay ignored and plugin paths are

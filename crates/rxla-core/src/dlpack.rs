@@ -3,7 +3,7 @@
 //! Import retains the producer's managed tensor and therefore invokes its
 //! deleter exactly once when the last rxla storage owner is dropped.
 
-use crate::{DType, Storage, Tensor};
+use crate::{Client, DType, Storage, Tensor};
 use dlpark::{Managed, ManagedTensorBase, ffi, legacy, versioned};
 use snafu::{ResultExt, Snafu, ensure};
 use std::ptr::NonNull;
@@ -14,8 +14,17 @@ use std::ptr::NonNull;
 pub enum ImportError {
     #[snafu(display("invalid DLPack tensor: {source}"))]
     InvalidDescriptor { source: dlpark::tensor::Error },
-    #[snafu(display("DLPack device {device_type:?} is not CPU host memory"))]
+    #[snafu(display("unsupported DLPack device {device_type:?}"))]
     UnsupportedDevice { device_type: ffi::DLDeviceType },
+    #[snafu(display(
+        "DLPack device {device_type:?} is incompatible with PJRT platform {platform:?}"
+    ))]
+    DevicePlatformMismatch {
+        device_type: ffi::DLDeviceType,
+        platform: String,
+    },
+    #[snafu(display("invalid DLPack device id {device_id}"))]
+    InvalidDeviceId { device_id: i32 },
     #[snafu(display("unsupported DLPack dtype {dtype:?}"))]
     UnsupportedDType { dtype: ffi::DLDataType },
     #[snafu(display("DLPack tensors with lanes other than one are unsupported"))]
@@ -26,6 +35,10 @@ pub enum ImportError {
     InvalidData { source: dlpark::tensor::Error },
     #[snafu(display("DLPack tensor cannot be represented by rxla host storage: {source}"))]
     InvalidTensor { source: crate::TensorBuildError },
+    #[snafu(display("DLPack device import failed: {source}"))]
+    DeviceImport { source: rxla_pjrt::Error },
+    #[snafu(display("DLPack PJRT tensor construction failed: {source}"))]
+    DeviceTensor { source: crate::Error },
 }
 
 type Result<T> = std::result::Result<T, ImportError>;
@@ -36,11 +49,19 @@ struct Owner<M: ManagedTensorBase> {
     len: usize,
 }
 
+struct DeviceOwner<M: ManagedTensorBase> {
+    _managed: Managed<M>,
+}
+
 // SAFETY: import consumes the managed tensor, validates CPU storage, and RXLA
 // exposes the allocation only through immutable byte views. The DLPack deleter
 // owns the transferred allocation and may run after the handle moves threads.
 unsafe impl<M: ManagedTensorBase> Send for Owner<M> {}
 unsafe impl<M: ManagedTensorBase> Sync for Owner<M> {}
+// SAFETY: ownership has been consumed from the producer. PJRT invokes the
+// callback after all device use, and the DLPack deleter is permitted to run on
+// that callback thread.
+unsafe impl<M: ManagedTensorBase> Send for DeviceOwner<M> {}
 
 impl<M: ManagedTensorBase> AsRef<[u8]> for Owner<M> {
     fn as_ref(&self) -> &[u8] {
@@ -62,14 +83,21 @@ fn dtype_from_dlpack(dtype: ffi::DLDataType) -> Result<DType> {
     }
 }
 
-fn import<M>(managed: Managed<M>) -> Result<Tensor>
+fn is_host_accessible(device_type: ffi::DLDeviceType) -> bool {
+    matches!(
+        device_type,
+        ffi::DLDeviceType::CPU | ffi::DLDeviceType::CUDAHOST | ffi::DLDeviceType::ROCMHOST
+    )
+}
+
+fn import_host<M>(managed: Managed<M>) -> Result<Tensor>
 where
     M: ManagedTensorBase + 'static,
 {
     let (dtype, shape, len, data) = {
         let view = managed.validate().context(InvalidDescriptorSnafu)?;
         ensure!(
-            view.device().device_type == ffi::DLDeviceType::CPU,
+            is_host_accessible(view.device().device_type),
             UnsupportedDeviceSnafu {
                 device_type: view.device().device_type,
             }
@@ -101,11 +129,84 @@ where
         .context(InvalidTensorSnafu)
 }
 
+/// Import CPU, pinned-host, CUDA, or CUDA-managed DLPack storage.
+///
+/// CPU-accessible allocations retain their producer directly as host storage.
+/// CUDA allocations become zero-copy PJRT buffer views on the matching local
+/// hardware id. `producer_stream` is the native CUDA stream containing work
+/// needed to materialize the buffer; pass `None` only when it is already ready.
+pub fn import_on_device<M>(
+    managed: Managed<M>,
+    client: &Client,
+    producer_stream: Option<isize>,
+) -> Result<Tensor>
+where
+    M: ManagedTensorBase + 'static,
+{
+    let device_type = managed
+        .validate()
+        .context(InvalidDescriptorSnafu)?
+        .device()
+        .device_type;
+    if is_host_accessible(device_type) {
+        return import_host(managed);
+    }
+    ensure!(
+        matches!(
+            device_type,
+            ffi::DLDeviceType::CUDA | ffi::DLDeviceType::CUDAMANAGED
+        ),
+        UnsupportedDeviceSnafu { device_type }
+    );
+    let info = client.info().context(DeviceImportSnafu)?;
+    ensure!(
+        info.platform.to_ascii_lowercase().contains("cuda"),
+        DevicePlatformMismatchSnafu {
+            device_type,
+            platform: info.platform,
+        }
+    );
+    let (dtype, shape, device_id, pointer) = {
+        let view = managed.validate().context(InvalidDescriptorSnafu)?;
+        let dtype = dtype_from_dlpack(view.dtype())?;
+        ensure!(
+            view.is_compact().context(InvalidDescriptorSnafu)?,
+            NonCompactSnafu
+        );
+        let device_id = view.device().device_id;
+        ensure!(device_id >= 0, InvalidDeviceIdSnafu { device_id });
+        // SAFETY: a conforming consumed DLPack tensor provides a device pointer
+        // valid through its managed deleter; PJRT receives that owner below.
+        let pointer = unsafe { view.offset_bytes_ptr() }.context(InvalidDataSnafu)?;
+        (
+            dtype,
+            view.shape().to_vec(),
+            device_id,
+            pointer.cast_mut().cast(),
+        )
+    };
+    let device_index = client
+        .addressable_device_index(device_id)
+        .context(DeviceImportSnafu)?;
+    let buffer = unsafe {
+        client.view_of_device_buffer(
+            device_index,
+            &shape,
+            dtype,
+            pointer,
+            DeviceOwner { _managed: managed },
+            producer_stream,
+        )
+    }
+    .context(DeviceImportSnafu)?;
+    Tensor::from_pjrt_buffer(buffer).context(DeviceTensorSnafu)
+}
+
 impl TryFrom<versioned::Dlpack> for Tensor {
     type Error = ImportError;
 
     fn try_from(value: versioned::Dlpack) -> Result<Self> {
-        import(value)
+        import_host(value)
     }
 }
 
@@ -113,14 +214,19 @@ impl TryFrom<legacy::Dlpack> for Tensor {
     type Error = ImportError;
 
     fn try_from(value: legacy::Dlpack) -> Result<Self> {
-        import(value)
+        import_host(value)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dlpark::{DlpackFlags, allocation::fixed, ffi::DLManagedTensorVersioned};
+    use dlpark::{
+        DlpackFlags,
+        allocation::fixed,
+        ffi::{DLDataType, DLDevice, DLManagedTensorVersioned},
+        metadata::{Copied, Fixed},
+    };
     use image::{ImageBuffer, Rgb};
 
     #[test]
@@ -146,5 +252,37 @@ mod tests {
             tensor.host_view().unwrap().element(&[0, 1, 1]).unwrap(),
             [255]
         );
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CUDA_PLUGIN_PATH"]
+    fn cuda_dlpack_import_is_a_zero_copy_pjrt_view()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let client = unsafe { Client::load(std::env::var("PJRT_CUDA_PLUGIN_PATH")?) }?;
+        let source = client.buffer(&[4], &[1.0_f32, 2.0, 3.0, 4.0])?;
+        // SAFETY: `source` is retained as the DLPack manager context and the
+        // descriptor is consumed by `import_on_device` before that owner moves.
+        let pointer = unsafe { source.opaque_device_pointer()? };
+        let prepared =
+            Fixed::new(Copied([4_i64]), Copied([1_i64])).prepare::<DLManagedTensorVersioned>()?;
+        let mut initialized = prepared.initialize(Box::new(source));
+        initialized
+            .set_data(pointer.as_ptr())
+            .set_dtype(DLDataType::F32)
+            .set_device(DLDevice::cuda(0));
+        initialized.set_flags(DlpackFlags::READ_ONLY)?;
+        // SAFETY: all descriptor fields are initialized and the boxed PJRT
+        // buffer keeps the CUDA allocation alive until DLPack deletion.
+        let managed: versioned::Dlpack = unsafe { initialized.finish() };
+
+        let tensor = import_on_device(managed, &client, None)?;
+        assert_eq!(tensor.shape(), [4]);
+        assert_eq!(tensor.dtype(), DType::F32);
+        let imported = tensor.to_buffer(&client)?;
+        // SAFETY: both pointers are compared only while `imported` retains the
+        // external allocation; neither pointer is dereferenced here.
+        assert_eq!(unsafe { imported.opaque_device_pointer()? }, pointer);
+        assert_eq!(imported.to_vec::<f32>()?, [1., 2., 3., 4.]);
+        Ok(())
     }
 }

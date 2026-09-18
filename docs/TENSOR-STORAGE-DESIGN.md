@@ -138,13 +138,15 @@ its deleter is retained by `Storage` and invoked exactly once after the final
 owner is dropped, including validation failures. DLPack 0.9 import builds on
 that ownership model through an RAII `Managed` owner. Compact CPU tensors,
 including dlpark's zero-copy `ImageBuffer` producer, preserve the original data
-pointer and producer deleter. Non-compact and device DLPack imports remain
-rejected until their allocation spans and PJRT external-buffer contracts can be
-represented without pretending a device pointer is host memory.
+pointer and producer deleter. Compact CUDA/CUDA-managed tensors become PJRT
+external-buffer views on their matching local hardware id; the PJRT deletion
+callback owns the DLPack handle, and callers may provide the native producer
+stream. Other device kinds and non-compact layouts remain rejected rather than
+pretending a device pointer is host memory.
 
-Still pending: layout-aware native views,
-external device import, donation, and typed host-storage upload optimization.
-No DLPack or intrusive pointer implementation is included.
+Still pending: general layout-aware native views, DLPack export, donation, and
+typed host-storage upload optimization. No intrusive pointer implementation is
+included.
 
 ## References and what was adopted
 

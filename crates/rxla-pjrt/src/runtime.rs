@@ -711,9 +711,43 @@ pub struct Client(Arc<ClientInner>);
 // borrowed from the client and remain valid until the last Arc destroys it.
 unsafe impl Send for ClientInner {}
 unsafe impl Sync for ClientInner {}
+
+unsafe extern "C" fn drop_external_device_owner<O: Send + 'static>(
+    _device_buffer_ptr: *mut std::ffi::c_void,
+    user_arg: *mut std::ffi::c_void,
+) {
+    if !user_arg.is_null() {
+        drop(unsafe { Box::from_raw(user_arg.cast::<O>()) });
+    }
+}
+
 impl Client {
     pub fn addressable_device_count(&self) -> usize {
         self.0.addressable_devices.len()
+    }
+
+    /// Resolve a backend-local hardware ordinal (for example a DLPack CUDA
+    /// device id) to this client's addressable-device index.
+    pub fn addressable_device_index(&self, local_hardware_id: i32) -> Result<usize> {
+        for (index, &device) in self.0.addressable_devices.iter().enumerate() {
+            let mut args = args!(
+                PJRT_Device_LocalHardwareId_Args,
+                PJRT_Device_LocalHardwareId_Args_STRUCT_SIZE
+            );
+            args.device = device;
+            self.0.plugin.check(unsafe {
+                function!(self.0.plugin.api(), PJRT_Device_LocalHardwareId)(&mut args)
+            })?;
+            if args.local_hardware_id == local_hardware_id {
+                return Ok(index);
+            }
+        }
+        InvalidArgumentSnafu {
+            message: format!(
+                "local hardware device {local_hardware_id} is not addressable by this client"
+            ),
+        }
+        .fail()
     }
 
     pub fn supports_collectives_extension(&self) -> bool {
@@ -891,6 +925,84 @@ impl Client {
             .position(|&device| device == self.0.device)
             .expect("selected device belongs to addressable devices");
         self.buffer_on_device(device_index, dims, data)
+    }
+
+    /// Create a PJRT view over an externally owned device allocation.
+    ///
+    /// PJRT receives `owner` and drops it through the on-delete callback only
+    /// after the returned buffer no longer uses the allocation. No data copy is
+    /// performed. A null stream means the producer has already made the data
+    /// ready; otherwise it is the backend-native producer stream handle.
+    ///
+    /// # Safety
+    ///
+    /// `device_buffer_ptr` must address a compact row-major allocation of
+    /// `dtype` and `dims` on `device_index`. The allocation and any metadata
+    /// captured by `owner` must remain valid until `owner` is dropped. `stream`
+    /// must be a valid stream for the selected backend when non-null.
+    pub unsafe fn view_of_device_buffer<O: Send + 'static>(
+        &self,
+        device_index: usize,
+        dims: &[i64],
+        dtype: DType,
+        device_buffer_ptr: *mut std::ffi::c_void,
+        owner: O,
+        stream: Option<isize>,
+    ) -> Result<Buffer> {
+        let device =
+            *self
+                .0
+                .addressable_devices
+                .get(device_index)
+                .context(InvalidArgumentSnafu {
+                    message: "addressable device index out of range",
+                })?;
+        let elements = dims.iter().try_fold(1usize, |count, &dimension| {
+            usize::try_from(dimension)
+                .ok()
+                .and_then(|dimension| count.checked_mul(dimension))
+        });
+        ensure!(
+            elements.is_some(),
+            InvalidArgumentSnafu {
+                message: "invalid or overflowing shape",
+            }
+        );
+        ensure!(
+            elements == Some(0) || !device_buffer_ptr.is_null(),
+            InvalidArgumentSnafu {
+                message: "non-empty external device buffer has a null pointer",
+            }
+        );
+        let create = function!(self.0.plugin.api(), PJRT_Client_CreateViewOfDeviceBuffer);
+        let owner = Box::into_raw(Box::new(owner));
+        let mut args = args!(
+            PJRT_Client_CreateViewOfDeviceBuffer_Args,
+            PJRT_Client_CreateViewOfDeviceBuffer_Args_STRUCT_SIZE
+        );
+        args.client = self.0.raw;
+        args.device_buffer_ptr = device_buffer_ptr;
+        args.dims = dims.as_ptr();
+        args.num_dims = dims.len();
+        args.element_type = dtype.as_raw();
+        args.device = device;
+        args.on_delete_callback = Some(drop_external_device_owner::<O>);
+        args.on_delete_callback_arg = owner.cast();
+        args.stream = stream.unwrap_or_default();
+        if let Err(error) = self.0.plugin.check(unsafe { create(&mut args) }) {
+            drop(unsafe { Box::from_raw(owner) });
+            return Err(error);
+        }
+        let inner = match BufferInner::new(self.0.clone(), args.buffer) {
+            Ok(inner) => inner,
+            Err(error) => {
+                drop(unsafe { Box::from_raw(owner) });
+                return Err(error);
+            }
+        };
+        Ok(Buffer {
+            inner: Arc::new(inner),
+        })
     }
 
     /// Register owned host memory for DMA and start an asynchronous upload.
@@ -1288,6 +1400,30 @@ struct BufferInner {
 unsafe impl Send for BufferInner {}
 unsafe impl Sync for BufferInner {}
 impl Buffer {
+    /// Return the backend's opaque device-memory pointer for interoperability.
+    ///
+    /// # Safety
+    ///
+    /// The pointer is valid only while this buffer and backend allocation
+    /// remain alive. Callers must obey backend stream synchronization, must not
+    /// free the allocation, and must not assume host accessibility.
+    pub unsafe fn opaque_device_pointer(&self) -> Result<NonNull<std::ffi::c_void>> {
+        let mut args = args!(
+            PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args,
+            PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args_STRUCT_SIZE
+        );
+        args.buffer = self.inner.raw.as_ptr();
+        self.inner.client.plugin.check(unsafe {
+            function!(
+                self.inner.client.plugin.api(),
+                PJRT_Buffer_OpaqueDeviceMemoryDataPointer
+            )(&mut args)
+        })?;
+        NonNull::new(args.device_memory_ptr).context(InvalidPluginDataSnafu {
+            message: "PJRT returned a null opaque device pointer",
+        })
+    }
+
     /// Whether two handles retain the same native PJRT allocation.
     pub fn shares_allocation_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)

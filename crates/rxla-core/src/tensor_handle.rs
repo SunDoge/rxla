@@ -1019,7 +1019,7 @@ impl Tensor {
         Self::from_pjrt_buffer(buffer)
     }
 
-    fn from_pjrt_buffer(buffer: Buffer) -> Result<Self> {
+    pub(crate) fn from_pjrt_buffer(buffer: Buffer) -> Result<Self> {
         let shape = buffer.dimensions()?;
         let dtype = buffer.dtype()?;
         let layout = buffer.memory_layout()?;
