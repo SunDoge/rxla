@@ -1,0 +1,107 @@
+{
+  "environment": {
+    "python": "3.14.6",
+    "lance": "11.0.0",
+    "pyarrow": "25.0.1",
+    "platform": "Linux-6.12.107+deb13-amd64-x86_64-with-glibc2.41"
+  },
+  "source": "/data/datasets/imagenette2",
+  "output": "/data/datasets/imagenette2.lance",
+  "samples": 13394,
+  "source_bytes": 1568676055,
+  "lance_bytes": 1569758399,
+  "warm_cache": true,
+  "measurements": [
+    {
+      "name": "directory_sequential",
+      "samples": 13394,
+      "bytes": 1568676055,
+      "seconds_median": 0.22586908505763859,
+      "seconds_all": [
+        0.22622897196561098,
+        0.22586908505763859,
+        0.21892629109788686
+      ],
+      "samples_per_second": 59299.83732205778,
+      "mib_per_second": 6623.332555817537
+    },
+    {
+      "name": "lance_sequential",
+      "samples": 13394,
+      "bytes": 1568676055,
+      "seconds_median": 0.9097206380683929,
+      "seconds_all": [
+        0.9097206380683929,
+        1.0243273290107027,
+        0.7836671839468181
+      ],
+      "samples_per_second": 14723.20121091178,
+      "mib_per_second": 1644.4675451042237
+    },
+    {
+      "name": "directory_random",
+      "samples": 2048,
+      "bytes": 233712591,
+      "seconds_median": 0.03717830800451338,
+      "seconds_all": [
+        0.0372782910708338,
+        0.03717830800451338,
+        0.03515139000955969
+      ],
+      "samples_per_second": 55085.88502067862,
+      "mib_per_second": 5995.046773790797
+    },
+    {
+      "name": "lance_random",
+      "samples": 2048,
+      "bytes": 233712591,
+      "seconds_median": 0.13679174007847905,
+      "seconds_all": [
+        0.13106831698678434,
+        0.15460007905494422,
+        0.13679174007847905
+      ],
+      "samples_per_second": 14971.66421616567,
+      "mib_per_second": 1629.3797807498195
+    },
+    {
+      "name": "directory_random_decode",
+      "samples": 2048,
+      "bytes": 233712591,
+      "seconds_median": 1.8258950029266998,
+      "seconds_all": [
+        1.8258950029266998,
+        1.7946060450049117,
+        1.839949995977804
+      ],
+      "samples_per_second": 1121.641713634843,
+      "mib_per_second": 122.06928388554563
+    },
+    {
+      "name": "lance_random_decode",
+      "samples": 2048,
+      "bytes": 233712591,
+      "seconds_median": 1.9839142749551684,
+      "seconds_all": [
+        1.91663862997666,
+        2.0649093579268083,
+        1.9839142749551684
+      ],
+      "samples_per_second": 1032.3026684438166,
+      "mib_per_second": 112.3464346575636
+    },
+    {
+      "name": "lance_metadata_filter",
+      "samples": 8336,
+      "bytes": 8336,
+      "seconds_median": 0.00581994594540447,
+      "seconds_all": [
+        0.006439789081923664,
+        0.00581994594540447,
+        0.005158578045666218
+      ],
+      "samples_per_second": 1432315.7084615622,
+      "mib_per_second": 1.365962704145014
+    }
+  ]
+}

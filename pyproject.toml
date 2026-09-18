@@ -19,6 +19,7 @@ dependencies = [
     "einops>=0.8,<0.9",
     "accelerate>=1.13,<2",
     "kernels>=0.12,<0.13",
+    "pylance>=11.0.0",
 ]
 
 [tool.uv]
