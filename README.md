@@ -172,6 +172,7 @@ crates.io publishing.
 - [Tensor image augmentation experiment](docs/IMAGE-AUGMENTATION-BENCHMARK.md)
 - [Imagenette Lance dataset benchmark](docs/LANCE-DATASET-BENCHMARK.md)
 - [COCO 2017 Lance dataset benchmark](docs/COCO-LANCE-BENCHMARK.md)
+- [Fory Standard Row in TFRecord benchmark](docs/FORY-TFRECORD-BENCHMARK.md)
 - [Distributed PJRT and NCCL](docs/PJRT-DISTRIBUTED.md)
 - [MLX layout review](docs/MLX-LAYOUT-REVIEW.md)
 - [Deployment notes](docs/DEPLOYMENT.md)

@@ -20,6 +20,8 @@ dependencies = [
     "accelerate>=1.13,<2",
     "kernels>=0.12,<0.13",
     "pylance>=11.0.0",
+    "pyfory[format]>=1.7,<1.8",
+    "tfrecord-slow[crc32c]>=0.6,<0.7",
 ]
 
 [tool.uv]

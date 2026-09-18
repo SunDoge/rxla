@@ -1,0 +1,66 @@
+{
+  "input": "/data/datasets/coco2017-fory-4096.tfrecord",
+  "samples": 4096,
+  "record_bytes": 669167152,
+  "image_bytes": 668083232,
+  "boxes": 29964,
+  "rayon_threads": 24,
+  "borrowed_images": true,
+  "measurements": [
+    {
+      "name": "tfrecord_read_crc",
+      "seconds_median": 0.155023162,
+      "seconds_all": [
+        0.390818979,
+        0.155023162,
+        0.154723942
+      ],
+      "samples_per_second": 26421.85817368375,
+      "mib_per_second": 4116.594694701926
+    },
+    {
+      "name": "fory_borrowed_access",
+      "seconds_median": 0.001137784,
+      "seconds_all": [
+        0.001137784,
+        0.000377024,
+        0.001609867
+      ],
+      "samples_per_second": 3599980.3126076655,
+      "mib_per_second": 560886.3600165911
+    },
+    {
+      "name": "rayon_jpeg_decode",
+      "seconds_median": 0.381590207,
+      "seconds_all": [
+        0.372414777,
+        0.387187813,
+        0.381590207
+      ],
+      "samples_per_second": 10734.02808788539,
+      "mib_per_second": 1669.6807409946925
+    },
+    {
+      "name": "tfrecord_read_and_rayon_decode",
+      "seconds_median": 0.710008579,
+      "seconds_all": [
+        0.788059312,
+        0.710008579,
+        0.709769689
+      ],
+      "samples_per_second": 5768.944377783356,
+      "mib_per_second": 897.3607339751286
+    },
+    {
+      "name": "streaming_tfrecord_and_parallel_decode",
+      "seconds_median": 0.416673627,
+      "seconds_all": [
+        0.435904128,
+        0.416673627,
+        0.411582293
+      ],
+      "samples_per_second": 9830.23578787721,
+      "mib_per_second": 1529.0956237556118
+    }
+  ]
+}
