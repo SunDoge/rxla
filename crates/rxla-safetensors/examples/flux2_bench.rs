@@ -71,6 +71,7 @@ fn run(args: Args) -> Result<()> {
     let load_started = std::time::Instant::now();
     let weights = checkpoint.load_parameter_schema(&client, model.schema())?;
     let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
+    let load_stats = checkpoint.stats();
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default())
         .with_compute_dtype(DType::BF16)
         .with_cudnn_attention(true);
@@ -110,10 +111,13 @@ fn run(args: Args) -> Result<()> {
     durations.sort_by(f64::total_cmp);
     let mean_ms = durations.iter().sum::<f64>() / durations.len() as f64;
     println!(
-        "backend={} image_tokens={} context_tokens={} load_ms={load_ms:.3} compile_ms={compile_ms:.3} warmup={} iterations={} mean_ms={mean_ms:.3} p50_ms={:.3} checksum={:.9}",
+        "backend={} image_tokens={} context_tokens={} load_ms={load_ms:.3} read_ms={:.3} decode_ms={:.3} upload_ms={:.3} compile_ms={compile_ms:.3} warmup={} iterations={} mean_ms={mean_ms:.3} p50_ms={:.3} checksum={:.9}",
         client.info()?.platform,
         args.image_tokens,
         args.context_tokens,
+        load_stats.read_time.as_secs_f64() * 1e3,
+        load_stats.decode_time.as_secs_f64() * 1e3,
+        load_stats.upload_time.as_secs_f64() * 1e3,
         args.warmup,
         args.iterations,
         durations[(durations.len() - 1) / 2],

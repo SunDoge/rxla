@@ -9,6 +9,7 @@ pub use export::{save_buffers_new, write_buffers, write_buffers_with_metadata};
 #[cfg(feature = "model")]
 mod model;
 use half::{bf16, f16};
+use memmap2::{Mmap, MmapOptions};
 #[cfg(feature = "model")]
 pub use model::SchemaBuffers;
 #[cfg(feature = "model")]
@@ -71,10 +72,12 @@ pub struct HostU8 {
 }
 
 /// Cumulative host wall times for successfully completed operations. Header
-/// parsing is excluded. Reading includes seek/allocation; decoding includes typed
-/// output allocation. Upload timing starts after decoding and includes the
-/// synchronous PJRT upload call, not device-kernel profiling. Repeated reads and
-/// uploads count again; failed operations do not increment their stage counters.
+/// parsing is excluded. Reading includes seek/allocation for streamed sources;
+/// mapped page faults occur inside upload timing because PJRT consumes the mapped
+/// bytes directly. Decoding includes typed output allocation. Upload timing
+/// includes the synchronous PJRT upload call, not device-kernel profiling.
+/// Repeated reads and uploads count again; failed operations do not increment
+/// their stage counters.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LoadStats {
     pub reads: u64,
@@ -86,17 +89,27 @@ pub struct LoadStats {
     pub upload_time: Duration,
 }
 
-/// Single safetensors file/seekable source. No mmap or full-checkpoint allocation.
+/// Single safetensors file/seekable source. [`SafeTensors::open`] memory-maps
+/// regular files so native BF16 payloads can be uploaded without a host copy;
+/// [`SafeTensors::new`] retains bounded, per-tensor reads for arbitrary sources.
 /// Keep the source unchanged while using it for a consistent weight snapshot.
 pub struct SafeTensors<R = File> {
     reader: R,
+    mapping: Option<Mmap>,
     metadata: Metadata,
     data_start: u64,
     stats: LoadStats,
 }
 impl SafeTensors<File> {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::new(File::open(path).map_err(io)?)
+        let file = File::open(path).map_err(io)?;
+        let mut checkpoint = Self::new(file)?;
+        checkpoint.mapping = Some(unsafe {
+            // The read-only mapping is retained by `checkpoint`, and callers
+            // are required to keep the checkpoint file unchanged while open.
+            MmapOptions::new().map(&checkpoint.reader).map_err(io)?
+        });
+        Ok(checkpoint)
     }
 }
 impl<R: Read + Seek> SafeTensors<R> {
@@ -126,6 +139,7 @@ impl<R: Read + Seek> SafeTensors<R> {
         }
         Ok(Self {
             reader,
+            mapping: None,
             metadata,
             data_start,
             stats: LoadStats::default(),
@@ -164,6 +178,54 @@ impl<R: Read + Seek> SafeTensors<R> {
     }
     pub fn stats(&self) -> LoadStats {
         self.stats
+    }
+
+    fn mapped_bf16(&self, name: &str) -> Result<Option<(Vec<i64>, &[bf16])>> {
+        let Some(mapping) = &self.mapping else {
+            return Ok(None);
+        };
+        if cfg!(target_endian = "big") {
+            return Ok(None);
+        }
+        let info = self
+            .metadata
+            .info(name)
+            .ok_or_else(|| invalid(format!("missing tensor {name:?}")))?;
+        if info.dtype != Dtype::BF16 {
+            return Err(invalid(format!(
+                "tensor {name:?}: expected BF16, got {:?}",
+                info.dtype
+            )));
+        }
+        let shape = info
+            .shape
+            .iter()
+            .map(|&d| i64::try_from(d).map_err(|_| invalid("dimension exceeds i64")))
+            .collect::<Result<Vec<_>>>()?;
+        let (start, end) = info.data_offsets;
+        let offset = usize::try_from(self.data_start)
+            .ok()
+            .and_then(|base| base.checked_add(start))
+            .ok_or_else(|| invalid("tensor offset overflow"))?;
+        let mapped_end = offset
+            .checked_add(end - start)
+            .ok_or_else(|| invalid("tensor offset overflow"))?;
+        let bytes = mapping
+            .get(offset..mapped_end)
+            .ok_or_else(|| invalid("tensor payload exceeds mapped file"))?;
+        if !bytes.as_ptr().cast::<bf16>().is_aligned() {
+            return Ok(None);
+        }
+        let values = unsafe {
+            // `bf16` is a transparent 16-bit value, all bit patterns are valid,
+            // the slice is aligned above, and metadata validation bounded it to
+            // the live read-only mapping retained by `self`.
+            std::slice::from_raw_parts(
+                bytes.as_ptr().cast::<bf16>(),
+                bytes.len() / std::mem::size_of::<bf16>(),
+            )
+        };
+        Ok(Some((shape, values)))
     }
 
     /// Decode little-endian F32/F16/BF16 into owned F32 host values. This does not
@@ -328,18 +390,27 @@ impl<R: Read + Seek> SafeTensors<R> {
             .ok_or_else(|| invalid("tensor offset overflow"))?;
         let read_start = Instant::now();
         self.reader.seek(SeekFrom::Start(offset)).map_err(io)?;
-        let mut bytes = vec![0; end - start];
-        self.reader.read_exact(&mut bytes).map_err(io)?;
+        let elements = (end - start) / std::mem::size_of::<bf16>();
+        let mut values = vec![bf16::ZERO; elements];
+        let bytes = unsafe {
+            // `bf16` is a transparent 16-bit value and every bit pattern is
+            // valid. The initialized allocation remains owned by `values`;
+            // this byte view only allows `Read::read_exact` to overwrite it.
+            std::slice::from_raw_parts_mut(values.as_mut_ptr().cast::<u8>(), end - start)
+        };
+        self.reader.read_exact(bytes).map_err(io)?;
         let read_time = read_start.elapsed();
         let decode_start = Instant::now();
-        let values = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|&bytes| bf16::from_bits(u16::from_le_bytes(bytes)))
-            .collect();
+        if cfg!(target_endian = "big") {
+            for value in &mut values {
+                *value = bf16::from_bits(value.to_bits().swap_bytes());
+            }
+        }
         self.stats.reads = self.stats.reads.saturating_add(1);
-        self.stats.payload_bytes = self.stats.payload_bytes.saturating_add(bytes.len() as u64);
+        self.stats.payload_bytes = self
+            .stats
+            .payload_bytes
+            .saturating_add((end - start) as u64);
         self.stats.read_time = self.stats.read_time.saturating_add(read_time);
         self.stats.decode_time = self
             .stats
@@ -351,6 +422,26 @@ impl<R: Read + Seek> SafeTensors<R> {
     /// Upload BF16 without expanding to F32; uploaded byte statistics count two
     /// bytes per element. Does not mutate sessions or infer model key mappings.
     pub fn upload_bf16(&mut self, client: &Client, name: &str) -> Result<Buffer> {
+        if let Some((shape, values)) = self.mapped_bf16(name)? {
+            let payload_bytes = values.len().saturating_mul(std::mem::size_of::<bf16>());
+            let upload_start = Instant::now();
+            let buffer = client
+                .buffer(&shape, values)
+                .map_err(|source| Error::Runtime { source })?;
+            let upload_time = upload_start.elapsed();
+            self.stats.reads = self.stats.reads.saturating_add(1);
+            self.stats.payload_bytes = self
+                .stats
+                .payload_bytes
+                .saturating_add(payload_bytes as u64);
+            self.stats.uploads = self.stats.uploads.saturating_add(1);
+            self.stats.uploaded_bytes = self
+                .stats
+                .uploaded_bytes
+                .saturating_add(payload_bytes as u64);
+            self.stats.upload_time = self.stats.upload_time.saturating_add(upload_time);
+            return Ok(buffer);
+        }
         let tensor = self.read_bf16(name)?;
         let upload_start = Instant::now();
         let buffer = client

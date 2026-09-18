@@ -221,8 +221,10 @@ An initial F32-compute run at 1,024 image tokens and 512 context tokens took
 evaluation. Lowering the same IR to BF16 and recognizing attention as cuDNN
 FMHA reduced compilation to `13.00 s` and execution to `94.76 ms` (`94.92 ms`
 median), a `4.10x` execution speedup. Checkpoint loading remains a separate
-roughly 65--69 second cold-start cost. The benchmark uses zero inputs, so it
-measures the executable shape rather than image quality.
+cost. The original loader expanded BF16 through F32 and took `68.68 s`; native
+BF16 loading reduced that to `13.34 s`, and direct PJRT upload from a read-only
+safetensors mmap reduced it again to `1.10 s`. The benchmark uses zero inputs,
+so it measures the executable shape rather than image quality.
 
 The accompanying FLUX.2 VAE adapter reuses RXLA's Diffusers-compatible decoder
 after applying the checkpoint's inverse BatchNorm and 2×2 latent-patch

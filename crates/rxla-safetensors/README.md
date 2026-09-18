@@ -20,11 +20,12 @@ let weight = weights.upload_f32(&client, "model.norm.weight")?;
 ```
 
 The reader loads and validates a bounded header (100 MB maximum) using upstream
-safetensors metadata validation, checks the exact file length, then seeks to each
-requested tensor. It does not mmap or read the whole checkpoint. `read_f32`
-allocates the selected raw payload plus its F32 conversion; `upload_f32` drops the
-temporary host data after the synchronous upload. This is not zero-copy or a
-bounded-chunk streaming upload. Keep the file unchanged for a consistent snapshot.
+safetensors metadata validation and checks the exact file length. `open` uses a
+read-only mmap: native, aligned BF16 payloads are borrowed directly by the
+synchronous PJRT upload without an intermediate host allocation. Converted
+dtypes and `new(Read + Seek)` sources still use bounded per-tensor reads.
+`read_f32` allocates the selected raw payload plus its F32 conversion. Keep the
+file unchanged for a consistent mapped snapshot.
 
 Supported source formats: little-endian F32, F16, BF16. Shapes and axis order are
 retained. Scalars, zero-element tensors and IEEE non-finite values are supported;

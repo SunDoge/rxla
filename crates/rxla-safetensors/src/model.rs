@@ -80,10 +80,17 @@ impl<R: Read + Seek> SafeTensors<R> {
             .iter()
             .zip(sources)
             .map(|(spec, source)| {
+                let source_dtype = self
+                    .info(&source)
+                    .ok_or_else(|| invalid(format!("missing tensor {source:?}")))?
+                    .dtype;
                 let buffer = match spec.dtype() {
                     DType::U8 => self.upload_u8(client, &source)?,
                     DType::F32 => self.upload_f32(client, &source)?,
                     DType::F16 => self.upload_f16(client, &source)?,
+                    DType::BF16 if source_dtype == Dtype::BF16 => {
+                        self.upload_bf16(client, &source)?
+                    }
                     DType::BF16 => self.upload_bf16_converted(client, &source)?,
                     dtype => return Err(invalid(format!("unsupported parameter dtype {dtype:?}"))),
                 };
