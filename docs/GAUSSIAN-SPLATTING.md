@@ -112,6 +112,24 @@ improvement. A single-chunk path remains statically expanded so the existing
 continuous autodiff reference stays available while loop differentiation is
 implemented.
 
+### Standard PLY visual validation
+
+The renderer was also checked against the implementation and camera convention
+in the local `jax-gs` checkout using a
+[public standard 3DGS PLY](https://huggingface.co/datasets/YuCrazing1/gaussian_splatting_data/blob/main/point_cloud.ply)
+with 109,278 Gaussians. Unlike the earlier Bonsai `.splat` experiment, this produced a clear,
+recognizable yellow construction-machine render rather than a partial silhouette.
+For this first interoperability check, the PLY's log scales, opacity logits,
+quaternions, and degree-zero SH colors were decoded using the same formulas as
+`jax-gs`; both renderers used the same generated orbit camera.
+
+On the RTX 5080, RXLA rendered 94,578 visible Gaussians at 256x256, compiling in
+1.753 s and averaging 70.780 ms over three synchronized executions. The tile
+diagnostics reported 6,355 contributors in the busiest tile and 16,253
+interactions beyond the 4,096-per-tile compositing budget. This is now a useful
+visual regression scene, while the reported overflow remains a concrete reason
+not to treat the current image as the final quality ceiling.
+
 ```bash
 PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so \
 cargo run --release -p rxla-models --example gaussian_splatting_real -- \
