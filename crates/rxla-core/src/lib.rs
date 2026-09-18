@@ -916,7 +916,8 @@ impl Tensor {
             Ok(result)
         }
     }
-    pub fn reshape(&self, dims: &[i64]) -> Result<Self> {
+    pub fn reshape(&self, dims: impl AsRef<[i64]>) -> Result<Self> {
+        let dims = dims.as_ref();
         if elements(dims)? != elements(&self.shape)? {
             return Err(err("reshape changes element count"));
         }

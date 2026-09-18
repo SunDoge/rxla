@@ -35,8 +35,8 @@ pub struct TiledGaussianRender {
 
 fn broadcast_vector(value: &Tensor, count: i64, interactions: i64) -> Result<Tensor> {
     Ok(value
-        .reshape(&[count, 1])?
-        .broadcast_to(&[count, interactions])?)
+        .reshape([count, 1])?
+        .broadcast_to([count, interactions])?)
 }
 
 /// Render with static Gaussian/tile interactions and bounded per-tile work.
@@ -112,11 +112,11 @@ pub fn render_gaussians_tiled(
     let x = column(means, 0)?;
     let y = column(means, 1)?;
     let z = column(means, 2)?;
-    let near = z.scalar(camera.near)?.broadcast_to(&[count])?;
-    let far = z.scalar(camera.far)?.broadcast_to(&[count])?;
+    let near = z.scalar(camera.near)?.broadcast_to([count])?;
+    let far = z.scalar(camera.far)?.broadcast_to([count])?;
     let depth_valid = z.gt_mask(&near)?.mul(&z.lt_mask(&far)?)?.detach()?;
     let safe_z = depth_valid.select(&z, &near)?;
-    let inv_z = z.scalar(1.0)?.broadcast_to(&[count])?.div(&safe_z)?;
+    let inv_z = z.scalar(1.0)?.broadcast_to([count])?.div(&safe_z)?;
     let inv_z2 = inv_z.square()?;
     let j00 = inv_z.mul_scalar(camera.focal_x)?;
     let j02 = x.mul(&inv_z2)?.mul_scalar(-camera.focal_x)?;
@@ -167,30 +167,30 @@ pub fn render_gaussians_tiled(
         &midpoint
             .square()?
             .sub(&determinant)?
-            .maximum(&midpoint.scalar(0.0)?.broadcast_to(&[count])?)?
+            .maximum(&midpoint.scalar(0.0)?.broadcast_to([count])?)?
             .sqrt()?,
     )?;
     let radius = eigen.sqrt()?.mul_scalar(3.0)?.ceil()?;
     let on_screen = projected_x
         .add(&radius)?
-        .gt_mask(&projected_x.scalar(0.0)?.broadcast_to(&[count])?)?
+        .gt_mask(&projected_x.scalar(0.0)?.broadcast_to([count])?)?
         .mul(
             &projected_x.sub(&radius)?.lt_mask(
                 &projected_x
                     .scalar(camera.width as f32)?
-                    .broadcast_to(&[count])?,
+                    .broadcast_to([count])?,
             )?,
         )?
         .mul(
             &projected_y
                 .add(&radius)?
-                .gt_mask(&projected_y.scalar(0.0)?.broadcast_to(&[count])?)?,
+                .gt_mask(&projected_y.scalar(0.0)?.broadcast_to([count])?)?,
         )?
         .mul(
             &projected_y.sub(&radius)?.lt_mask(
                 &projected_y
                     .scalar(camera.height as f32)?
-                    .broadcast_to(&[count])?,
+                    .broadcast_to([count])?,
             )?,
         )?
         .mul(&depth_valid)?
@@ -224,7 +224,7 @@ pub fn render_gaussians_tiled(
     let span_limit = means
         .scalar(config.max_tile_span as f32)?
         .cast(DType::I32)?
-        .broadcast_to(&[count])?;
+        .broadcast_to([count])?;
     let span_overflow_gaussians = tile_max_x
         .wrapping_sub(&tile_min_x)?
         .wrapping_add_scalar(1)?
@@ -236,7 +236,7 @@ pub fn render_gaussians_tiled(
                 .gt_mask(&span_limit)?,
         )?
         .mul(&on_screen)?
-        .sum(&[0], false)?;
+        .sum([0], false)?;
 
     let offset_index = means.iota_i32(&[1, interactions], 1)?;
     let offsets_y = offset_index
@@ -249,30 +249,30 @@ pub fn render_gaussians_tiled(
             &means
                 .scalar(config.max_tile_span as f32)?
                 .cast(DType::I32)?
-                .broadcast_to(&[1, interactions])?,
+                .broadcast_to([1, interactions])?,
         )?,
     )?;
-    let offsets_x = offsets_x.broadcast_to(&[count, interactions])?;
-    let offsets_y = offsets_y.broadcast_to(&[count, interactions])?;
+    let offsets_x = offsets_x.broadcast_to([count, interactions])?;
+    let offsets_y = offsets_y.broadcast_to([count, interactions])?;
     let absolute_x = tile_min_x
-        .reshape(&[count, 1])?
-        .broadcast_to(&[count, interactions])?
+        .reshape([count, 1])?
+        .broadcast_to([count, interactions])?
         .wrapping_add(&offsets_x)?;
     let absolute_y = tile_min_y
-        .reshape(&[count, 1])?
-        .broadcast_to(&[count, interactions])?
+        .reshape([count, 1])?
+        .broadcast_to([count, interactions])?
         .wrapping_add(&offsets_y)?;
     let interaction_valid = absolute_x
         .le_mask(
             &tile_max_x
-                .reshape(&[count, 1])?
-                .broadcast_to(&[count, interactions])?,
+                .reshape([count, 1])?
+                .broadcast_to([count, interactions])?,
         )?
         .mul(
             &absolute_y.le_mask(
                 &tile_max_y
-                    .reshape(&[count, 1])?
-                    .broadcast_to(&[count, interactions])?,
+                    .reshape([count, 1])?
+                    .broadcast_to([count, interactions])?,
             )?,
         )?
         .mul(&broadcast_vector(&on_screen, count, interactions)?)?;
@@ -281,26 +281,26 @@ pub fn render_gaussians_tiled(
             &means
                 .scalar(tiles_x as f32)?
                 .cast(DType::I32)?
-                .broadcast_to(&[count, interactions])?,
+                .broadcast_to([count, interactions])?,
         )?
         .wrapping_add(&absolute_x)?;
     let sentinel = means
         .scalar(tile_count as f32)?
         .cast(DType::I32)?
-        .broadcast_to(&[count, interactions])?;
+        .broadcast_to([count, interactions])?;
     let tile_ids = interaction_valid
         .select(&tile_ids, &sentinel)?
-        .reshape(&[flattened])?;
+        .reshape([flattened])?;
     let depths = interaction_valid
         .select(
             &broadcast_vector(&z, count, interactions)?,
             &z.scalar(f32::INFINITY)?
-                .broadcast_to(&[count, interactions])?,
+                .broadcast_to([count, interactions])?,
         )?
-        .reshape(&[flattened])?;
+        .reshape([flattened])?;
     let gaussian_ids = means
         .iota_i32(&[count, interactions], 0)?
-        .reshape(&[flattened])?;
+        .reshape([flattened])?;
     let depth_order = depths.argsort(0, false)?;
     let tile_ids = tile_ids.take_along_axis(&depth_order, 0)?;
     let gaussian_ids = gaussian_ids.take_along_axis(&depth_order, 0)?;
@@ -316,8 +316,8 @@ pub fn render_gaussians_tiled(
     let tile_counts = counts.to_f32()?;
     let truncated_interactions = tile_counts
         .add_scalar(-(config.max_per_tile as f32))?
-        .maximum(&tile_counts.scalar(0.0)?.broadcast_to(&[tile_count])?)?
-        .sum(&[0], false)?;
+        .maximum(&tile_counts.scalar(0.0)?.broadcast_to([tile_count])?)?
+        .sum([0], false)?;
     let pixels = config.tile_size * config.tile_size;
     let tile_index = means.iota_i32(&[tile_count, 1], 0)?.to_f32()?;
     let tile_y = tile_index.mul_scalar(1.0 / tiles_x as f32)?.floor()?;
@@ -329,64 +329,64 @@ pub fn render_gaussians_tiled(
     let local_x = pixel_index.sub(&local_y.mul_scalar(config.tile_size as f32)?)?;
     let pixel_x = tile_x
         .mul_scalar(config.tile_size as f32)?
-        .broadcast_to(&[tile_count, pixels])?
-        .add(&local_x.broadcast_to(&[tile_count, pixels])?)?
+        .broadcast_to([tile_count, pixels])?
+        .add(&local_x.broadcast_to([tile_count, pixels])?)?
         .add_scalar(0.5)?;
     let pixel_y = tile_y
         .mul_scalar(config.tile_size as f32)?
-        .broadcast_to(&[tile_count, pixels])?
-        .add(&local_y.broadcast_to(&[tile_count, pixels])?)?
+        .broadcast_to([tile_count, pixels])?
+        .add(&local_y.broadcast_to([tile_count, pixels])?)?
         .add_scalar(0.5)?;
     let opacity = opacities.clamp(0.0, 0.99)?;
     let color = pixel_x
         .mul_scalar(0.0)?
         .unsqueeze(2)?
-        .broadcast_to(&[tile_count, pixels, 3])?;
+        .broadcast_to([tile_count, pixels, 3])?;
     let remaining = pixel_x.mul_scalar(0.0)?.add_scalar(1.0)?;
     let base_offsets = means.iota_i32(&[1, config.chunk_size], 1)?;
-    let starts = starts.reshape(&[tile_count, 1])?;
-    let counts = counts.reshape(&[tile_count, 1])?;
+    let starts = starts.reshape([tile_count, 1])?;
+    let counts = counts.reshape([tile_count, 1])?;
     let chunk_count = config.max_per_tile / config.chunk_size;
     let counter = means.scalar(0.0)?.cast(DType::I32)?;
     let composite_chunk =
-        |carry: &[Tensor]| -> rxla_core::Result<Vec<Tensor>> {
+        |carry: &[Tensor; 3]| -> rxla_core::Result<[Tensor; 3]> {
             let color = &carry[1];
             let remaining = &carry[2];
             let chunk_base = carry[0]
                 .wrapping_mul(&carry[0].scalar_i32(config.chunk_size as i32)?)?
-                .broadcast_to(&[1, config.chunk_size])?;
+                .broadcast_to([1, config.chunk_size])?;
             let offsets = base_offsets.wrapping_add(&chunk_base)?;
-            let offsets = offsets.broadcast_to(&[tile_count, config.chunk_size])?;
+            let offsets = offsets.broadcast_to([tile_count, config.chunk_size])?;
             let contributor_indices = starts
-                .broadcast_to(&[tile_count, config.chunk_size])?
+                .broadcast_to([tile_count, config.chunk_size])?
                 .wrapping_add(&offsets)?;
             let contributor_valid = offsets
-                .lt_mask(&counts.broadcast_to(&[tile_count, config.chunk_size])?)?
+                .lt_mask(&counts.broadcast_to([tile_count, config.chunk_size])?)?
                 .detach()?;
             let ids = sorted_gaussians.take(&contributor_indices, 0)?;
             let gathered_x = projected_x.take(&ids, 0)?;
             let gathered_y = projected_y.take(&ids, 0)?;
             let dx = pixel_x
-                .reshape(&[tile_count, pixels, 1])?
-                .broadcast_to(&[tile_count, pixels, config.chunk_size])?
+                .reshape([tile_count, pixels, 1])?
+                .broadcast_to([tile_count, pixels, config.chunk_size])?
                 .sub(
                     &gathered_x
-                        .reshape(&[tile_count, 1, config.chunk_size])?
-                        .broadcast_to(&[tile_count, pixels, config.chunk_size])?,
+                        .reshape([tile_count, 1, config.chunk_size])?
+                        .broadcast_to([tile_count, pixels, config.chunk_size])?,
                 )?;
             let dy = pixel_y
-                .reshape(&[tile_count, pixels, 1])?
-                .broadcast_to(&[tile_count, pixels, config.chunk_size])?
+                .reshape([tile_count, pixels, 1])?
+                .broadcast_to([tile_count, pixels, config.chunk_size])?
                 .sub(
                     &gathered_y
-                        .reshape(&[tile_count, 1, config.chunk_size])?
-                        .broadcast_to(&[tile_count, pixels, config.chunk_size])?,
+                        .reshape([tile_count, 1, config.chunk_size])?
+                        .broadcast_to([tile_count, pixels, config.chunk_size])?,
                 )?;
             let expand = |value: &Tensor| {
                 value
                     .take(&ids, 0)?
-                    .reshape(&[tile_count, 1, config.chunk_size])?
-                    .broadcast_to(&[tile_count, pixels, config.chunk_size])
+                    .reshape([tile_count, 1, config.chunk_size])?
+                    .broadcast_to([tile_count, pixels, config.chunk_size])
             };
             let exponent = dx
                 .square()?
@@ -396,12 +396,12 @@ pub fn render_gaussians_tiled(
                 .mul_scalar(-0.5)?;
             let alpha = exponent.exp()?.mul(&expand(&opacity)?)?;
             let valid = contributor_valid
-                .reshape(&[tile_count, 1, config.chunk_size])?
-                .broadcast_to(&[tile_count, pixels, config.chunk_size])?;
+                .reshape([tile_count, 1, config.chunk_size])?
+                .broadcast_to([tile_count, pixels, config.chunk_size])?;
             let active = remaining
                 .gt_mask(&remaining.scalar(1e-4)?.broadcast_to(remaining.shape())?)?
                 .unsqueeze(2)?
-                .broadcast_to(&[tile_count, pixels, config.chunk_size])?;
+                .broadcast_to([tile_count, pixels, config.chunk_size])?;
             let support = alpha
                 .gt_mask(
                     &alpha
@@ -420,31 +420,31 @@ pub fn render_gaussians_tiled(
             let weights = alpha.mul(&local_transmittance)?.mul(
                 &remaining
                     .unsqueeze(2)?
-                    .broadcast_to(&[tile_count, pixels, config.chunk_size])?,
+                    .broadcast_to([tile_count, pixels, config.chunk_size])?,
             )?;
             let gathered_colors = colors.take(&ids, 0)?;
             let contribution = weights
                 .unsqueeze(3)?
-                .broadcast_to(&[tile_count, pixels, config.chunk_size, 3])?
+                .broadcast_to([tile_count, pixels, config.chunk_size, 3])?
                 .mul(
                     &gathered_colors
-                        .reshape(&[tile_count, 1, config.chunk_size, 3])?
-                        .broadcast_to(&[tile_count, pixels, config.chunk_size, 3])?,
+                        .reshape([tile_count, 1, config.chunk_size, 3])?
+                        .broadcast_to([tile_count, pixels, config.chunk_size, 3])?,
                 )?
-                .sum(&[2], false)?;
+                .sum([2], false)?;
             let color = color.add(&contribution)?;
             let chunk_remaining = one_minus_alpha
                 .cumprod(2)?
                 .narrow(2, config.chunk_size - 1, 1)?
-                .reshape(&[tile_count, pixels])?;
+                .reshape([tile_count, pixels])?;
             let remaining = remaining.mul(&chunk_remaining)?;
-            Ok(vec![carry[0].wrapping_add_scalar(1)?, color, remaining])
+            Ok([carry[0].wrapping_add_scalar(1)?, color, remaining])
         };
     let carry = if chunk_count == 1 {
         composite_chunk(&[counter, color, remaining])?
     } else {
         Tensor::while_loop(
-            &[counter, color, remaining],
+            [counter, color, remaining],
             |carry| {
                 carry[0]
                     .lt_mask(&carry[0].scalar_i32(chunk_count as i32)?)?
@@ -459,24 +459,24 @@ pub fn render_gaussians_tiled(
     color = color.add(
         &remaining
             .unsqueeze(2)?
-            .broadcast_to(&[tile_count, pixels, 3])?
+            .broadcast_to([tile_count, pixels, 3])?
             .mul(
                 &background
-                    .reshape(&[1, 1, 3])?
-                    .broadcast_to(&[tile_count, pixels, 3])?,
+                    .reshape([1, 1, 3])?
+                    .broadcast_to([tile_count, pixels, 3])?,
             )?,
     )?;
     let padded_height = tiles_y * config.tile_size;
     let padded_width = tiles_x * config.tile_size;
     let color = color
-        .reshape(&[tiles_y, tiles_x, config.tile_size, config.tile_size, 3])?
-        .transpose(&[0, 2, 1, 3, 4])?
-        .reshape(&[padded_height, padded_width, 3])?
+        .reshape([tiles_y, tiles_x, config.tile_size, config.tile_size, 3])?
+        .transpose([0, 2, 1, 3, 4])?
+        .reshape([padded_height, padded_width, 3])?
         .slice(&[0, 0, 0], &[camera.height, camera.width, 3], &[1, 1, 1])?;
     let alpha = accumulated
-        .reshape(&[tiles_y, tiles_x, config.tile_size, config.tile_size])?
-        .transpose(&[0, 2, 1, 3])?
-        .reshape(&[padded_height, padded_width])?
+        .reshape([tiles_y, tiles_x, config.tile_size, config.tile_size])?
+        .transpose([0, 2, 1, 3])?
+        .reshape([padded_height, padded_width])?
         .slice(&[0, 0], &[camera.height, camera.width], &[1, 1])?;
     Ok(TiledGaussianRender {
         color,
@@ -493,16 +493,16 @@ mod tests {
     use rxla_core::{CacheLimits, Client, Compiler, Tracer};
 
     fn scene(tracer: &Tracer) -> Result<TiledGaussianRender> {
-        let means = tracer.constant(&[2, 3], &[0., 0., 2., 0., 0., 1.])?;
+        let means = tracer.constant([2, 3], [0., 0., 2., 0., 0., 1.])?;
         let covariances = tracer.constant(
-            &[2, 3, 3],
-            &[
+            [2, 3, 3],
+            [
                 0.04, 0., 0., 0., 0.04, 0., 0., 0., 0.04, 0.04, 0., 0., 0., 0.04, 0., 0., 0., 0.04,
             ],
         )?;
-        let colors = tracer.constant(&[2, 3], &[0., 1., 0., 1., 0., 0.])?;
-        let opacities = tracer.constant(&[2], &[0.5, 0.5])?;
-        let background = tracer.constant(&[3], &[0., 0., 1.])?;
+        let colors = tracer.constant([2, 3], [0., 1., 0., 1., 0., 0.])?;
+        let opacities = tracer.constant([2], [0.5, 0.5])?;
+        let background = tracer.constant([3], [0., 0., 1.])?;
         render_gaussians_tiled(
             &means,
             &covariances,
@@ -538,11 +538,11 @@ mod tests {
     #[test]
     fn tiled_renderer_keeps_continuous_gradients() {
         let tracer = Tracer::default();
-        let means = tracer.input(&[1, 3]).unwrap();
-        let covariance = tracer.input(&[1, 3, 3]).unwrap();
-        let colors = tracer.input(&[1, 3]).unwrap();
-        let opacity = tracer.input(&[1]).unwrap();
-        let background = tracer.constant(&[3], &[0., 0., 0.]).unwrap();
+        let means = tracer.input([1, 3]).unwrap();
+        let covariance = tracer.input([1, 3, 3]).unwrap();
+        let colors = tracer.input([1, 3]).unwrap();
+        let opacity = tracer.input([1]).unwrap();
+        let background = tracer.constant([3], [0., 0., 0.]).unwrap();
         let render = render_gaussians_tiled(
             &means,
             &covariance,
@@ -558,7 +558,7 @@ mod tests {
             },
         )
         .unwrap();
-        let loss = render.color.sum(&[0, 1, 2], false).unwrap();
+        let loss = render.color.sum([0, 1, 2], false).unwrap();
         let gradients = loss.grad(&[means, covariance, colors, opacity]).unwrap();
         assert_eq!(gradients.len(), 4);
         let stablehlo = tracer.stablehlo_many(&gradients).unwrap();

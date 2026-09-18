@@ -1,13 +1,13 @@
 use rxla_core::{Client, Tensor, Tracer};
 
-fn loop_program(graph: &Tracer) -> Vec<Tensor> {
+fn loop_program(graph: &Tracer) -> [Tensor; 2] {
     let counter = graph.input_i32_scalar().unwrap();
-    let values = graph.input(&[2]).unwrap();
-    let increment = graph.constant(&[2], &[2., 2.]).unwrap();
+    let values = graph.input([2]).unwrap();
+    let increment = graph.constant([2], [2., 2.]).unwrap();
     Tensor::while_loop(
-        &[counter, values],
+        [counter, values],
         |carry| Ok(carry[0].clone()),
-        |carry| Ok(vec![carry[0].scalar_i32(0)?, carry[1].add(&increment)?]),
+        |carry| Ok([carry[0].scalar_i32(0)?, carry[1].add(&increment)?]),
     )
     .unwrap()
 }

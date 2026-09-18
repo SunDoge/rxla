@@ -368,12 +368,13 @@ impl Tensor {
     }
 
     /// Broadcast using trailing-axis alignment. Singleton axes can expand.
-    pub fn broadcast_to(&self, dims: &[i64]) -> Result<Self> {
+    pub fn broadcast_to(&self, dims: impl AsRef<[i64]>) -> Result<Self> {
+        let dims = dims.as_ref();
         if dims.len() < self.shape.len() {
             return Err(err("broadcast target rank is too small"));
         }
         let offset = dims.len() - self.shape.len();
-        self.broadcast_in_dim(dims, &(offset..dims.len()).collect::<Vec<_>>())
+        self.broadcast_in_dim(dims, (offset..dims.len()).collect::<Vec<_>>())
     }
 
     /// Broadcast to another tensor's logical shape, retaining any bounded
@@ -428,7 +429,13 @@ impl Tensor {
         self.graph()
             .node_typed(Op::Broadcast { axes }, vec![self.node_id()], target.clone())
     }
-    pub fn broadcast_in_dim(&self, dims: &[i64], axes: &[usize]) -> Result<Self> {
+    pub fn broadcast_in_dim(
+        &self,
+        dims: impl AsRef<[i64]>,
+        axes: impl AsRef<[usize]>,
+    ) -> Result<Self> {
+        let dims = dims.as_ref();
+        let axes = axes.as_ref();
         if axes.len() != self.shape.len() || axes.windows(2).any(|w| w[0] >= w[1]) {
             return Err(err(
                 "broadcast axes must be strictly increasing and match input rank",
@@ -481,7 +488,8 @@ impl Tensor {
     }
     /// Reverse element order along explicit axes without changing shape.
     /// Axes must be distinct and in range. Empty axes are a no-op.
-    pub fn flip(&self, axes: &[usize]) -> Result<Self> {
+    pub fn flip(&self, axes: impl AsRef<[usize]>) -> Result<Self> {
+        let axes = axes.as_ref();
         let mut canonical = axes.to_vec();
         canonical.sort_unstable();
         if canonical.iter().any(|&axis| axis >= self.shape.len())
@@ -499,7 +507,8 @@ impl Tensor {
         )
     }
 
-    pub fn transpose(&self, permutation: &[usize]) -> Result<Self> {
+    pub fn transpose(&self, permutation: impl AsRef<[usize]>) -> Result<Self> {
+        let permutation = permutation.as_ref();
         let ty = self
             .ty()
             .permuted(permutation)
@@ -549,8 +558,8 @@ impl Tensor {
             Ok(output)
         }
     }
-    pub fn sum(&self, axes: &[usize], keepdims: bool) -> Result<Self> {
-        self.reduce(axes, keepdims, false)
+    pub fn sum(&self, axes: impl AsRef<[usize]>, keepdims: bool) -> Result<Self> {
+        self.reduce(axes.as_ref(), keepdims, false)
     }
     /// Inclusive prefix sums along one axis, retaining the input shape.
     /// Empty tensors and length-one axes are identity. Uses one HLO prefix
@@ -769,12 +778,13 @@ impl Tensor {
     /// of whether the backend's native forward max propagates that NaN. Winner
     /// selection/count is nondifferentiable; counts use F32 reduction arithmetic.
     /// Empty input gradients are empty; empty axes return the original tensor.
-    pub fn max(&self, axes: &[usize], keepdims: bool) -> Result<Self> {
-        self.reduce(axes, keepdims, true)
+    pub fn max(&self, axes: impl AsRef<[usize]>, keepdims: bool) -> Result<Self> {
+        self.reduce(axes.as_ref(), keepdims, true)
     }
     /// Reduce minimum using `-max(-x)`, with the same backward tie/NaN policy as
     /// max. Empty reductions produce positive infinity; empty axes are identity.
-    pub fn min(&self, axes: &[usize], keepdims: bool) -> Result<Self> {
+    pub fn min(&self, axes: impl AsRef<[usize]>, keepdims: bool) -> Result<Self> {
+        let axes = axes.as_ref();
         if axes.is_empty() {
             return Ok(self.clone());
         }
@@ -789,7 +799,8 @@ impl Tensor {
     /// reductions yield negative infinity, positive infinity yields positive
     /// infinity, and NaN inputs propagate NaN. Gradients for nonfinite results
     /// are undefined and may be NaN; empty input gradients remain empty.
-    pub fn logsumexp(&self, axes: &[usize], keepdims: bool) -> Result<Self> {
+    pub fn logsumexp(&self, axes: impl AsRef<[usize]>, keepdims: bool) -> Result<Self> {
+        let axes = axes.as_ref();
         if axes.is_empty() {
             return Ok(self.clone());
         }
@@ -819,7 +830,8 @@ impl Tensor {
             result.reshape(&shape)
         }
     }
-    pub fn mean(&self, axes: &[usize], keepdims: bool) -> Result<Self> {
+    pub fn mean(&self, axes: impl AsRef<[usize]>, keepdims: bool) -> Result<Self> {
+        let axes = axes.as_ref();
         let result = self.sum(axes, keepdims)?;
         let count = elements(&axes.iter().map(|&a| self.shape[a]).collect::<Vec<_>>())?;
         if count == 0 {
@@ -872,8 +884,13 @@ impl Tensor {
     /// Two-pass variance; see `moments` for correction, shape and numeric policy.
     /// For standard deviation, explicitly apply sqrt (whose derivative is singular
     /// at zero variance); add epsilon explicitly if regularization is desired.
-    pub fn variance(&self, axes: &[usize], keepdims: bool, correction: usize) -> Result<Self> {
-        Ok(self.moments(axes, keepdims, correction)?.1)
+    pub fn variance(
+        &self,
+        axes: impl AsRef<[usize]>,
+        keepdims: bool,
+        correction: usize,
+    ) -> Result<Self> {
+        Ok(self.moments(axes.as_ref(), keepdims, correction)?.1)
     }
 
     pub fn softmax(&self, axis: usize) -> Result<Self> {
@@ -882,12 +899,12 @@ impl Tensor {
         }
         let centered = self.sub(
             &self
-                .max(&[axis], true)?
+                .max([axis], true)?
                 .detach()?
                 .broadcast_to(&self.shape)?,
         )?;
         let e = centered.exp()?;
-        e.div(&e.sum(&[axis], true)?.broadcast_to(&self.shape)?)
+        e.div(&e.sum([axis], true)?.broadcast_to(&self.shape)?)
     }
     /// Log probabilities along a nonempty axis, computed as
     /// `(x - max(x)) - log(sum(exp(x - max(x))))`, not `log(softmax(x))`.
@@ -902,11 +919,11 @@ impl Tensor {
         }
         let centered = self.sub(
             &self
-                .max(&[axis], true)?
+                .max([axis], true)?
                 .detach()?
                 .broadcast_to(&self.shape)?,
         )?;
-        let normalizer = centered.exp()?.sum(&[axis], true)?.log()?;
+        let normalizer = centered.exp()?.sum([axis], true)?.log()?;
         centered.sub(&normalizer.broadcast_to(&self.shape)?)
     }
     pub fn rms_norm(&self, weight: &Tensor, epsilon: f32) -> Result<Self> {
@@ -919,7 +936,7 @@ impl Tensor {
         }
         let scale = self
             .square()?
-            .mean(&[axis], true)?
+            .mean([axis], true)?
             .add_scalar(epsilon)?
             .rsqrt()?
             .broadcast_to(&self.shape)?;

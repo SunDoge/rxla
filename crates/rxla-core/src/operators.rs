@@ -50,19 +50,40 @@ impl Neg for Tensor {
     }
 }
 
-impl Add<f32> for &Tensor {
-    type Output = Result<Tensor>;
-    fn add(self, rhs: f32) -> Self::Output {
-        Tensor::add_scalar(self, rhs)
-    }
+macro_rules! scalar_operator {
+    ($trait:ident, $method:ident, $tensor_method:ident) => {
+        impl $trait<f32> for &Tensor {
+            type Output = Result<Tensor>;
+            fn $method(self, rhs: f32) -> Self::Output {
+                Tensor::$tensor_method(self, rhs)
+            }
+        }
+
+        impl $trait<f32> for Tensor {
+            type Output = Result<Tensor>;
+            fn $method(self, rhs: f32) -> Self::Output {
+                Tensor::$tensor_method(&self, rhs)
+            }
+        }
+
+        impl $trait<&Tensor> for f32 {
+            type Output = Result<Tensor>;
+            fn $method(self, rhs: &Tensor) -> Self::Output {
+                Tensor::$tensor_method(rhs, self)
+            }
+        }
+
+        impl $trait<Tensor> for f32 {
+            type Output = Result<Tensor>;
+            fn $method(self, rhs: Tensor) -> Self::Output {
+                Tensor::$tensor_method(&rhs, self)
+            }
+        }
+    };
 }
 
-impl Mul<f32> for &Tensor {
-    type Output = Result<Tensor>;
-    fn mul(self, rhs: f32) -> Self::Output {
-        Tensor::mul_scalar(self, rhs)
-    }
-}
+scalar_operator!(Add, add, add_scalar);
+scalar_operator!(Mul, mul, mul_scalar);
 
 #[cfg(test)]
 mod tests {
@@ -76,6 +97,8 @@ mod tests {
         assert_eq!(z.shape(), [2]);
         assert!(!z.is_materialized());
         assert!((&x + 1.0).is_ok());
+        assert!((1.0 + x.clone()).is_ok());
+        assert!((y.clone() * 2.0).is_ok());
         assert!((-&y).is_ok());
     }
 }

@@ -678,7 +678,45 @@ impl Tensor {
     /// Build a structured StableHLO loop. The closures are traced once against
     /// the initial carry; execution iterates entirely inside the compiled
     /// program. Every body result must preserve its carry's shape and dtype.
-    pub fn while_loop<Condition, Body>(
+    pub fn while_loop<const N: usize, Condition, Body>(
+        initial: [Tensor; N],
+        condition: Condition,
+        body: Body,
+    ) -> Result<[Tensor; N]>
+    where
+        Condition: FnOnce(&[Tensor; N]) -> Result<Tensor>,
+        Body: FnOnce(&[Tensor; N]) -> Result<[Tensor; N]>,
+    {
+        let outputs = Self::while_loop_many(
+            &initial,
+            |carry| {
+                let carry =
+                    <&[Tensor; N]>::try_from(carry).map_err(|_| Error::WhileResultCount {
+                        expected: N,
+                        actual: carry.len(),
+                    })?;
+                condition(carry)
+            },
+            |carry| {
+                let carry =
+                    <&[Tensor; N]>::try_from(carry).map_err(|_| Error::WhileResultCount {
+                        expected: N,
+                        actual: carry.len(),
+                    })?;
+                body(carry).map(Vec::from)
+            },
+        )?;
+        outputs
+            .try_into()
+            .map_err(|outputs: Vec<Tensor>| Error::WhileResultCount {
+                expected: N,
+                actual: outputs.len(),
+            })
+    }
+
+    /// Dynamic-arity counterpart to [`Tensor::while_loop`]. Prefer the array
+    /// form when the number of loop carries is known at the call site.
+    pub fn while_loop_many<Condition, Body>(
         initial: &[Tensor],
         condition: Condition,
         body: Body,
@@ -1915,7 +1953,7 @@ mod tests {
         );
         assert_eq!(before, graph.stablehlo(&y).unwrap());
         assert_eq!(
-            y.sum(&[0], false).unwrap().grad(&[bound]).unwrap()[0].shape(),
+            y.sum([0], false).unwrap().grad(&[bound]).unwrap()[0].shape(),
             [2]
         );
         assert!(graph.input(&[1; 6]).unwrap().shape.spilled());

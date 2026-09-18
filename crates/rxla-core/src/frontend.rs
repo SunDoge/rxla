@@ -60,44 +60,48 @@ impl Tracer {
         Self::default()
     }
 
-    pub fn input(&self, shape: &[i64]) -> Result<Tensor> {
-        self.graph.input(shape)
+    pub fn input(&self, shape: impl AsRef<[i64]>) -> Result<Tensor> {
+        self.graph.input(shape.as_ref())
     }
 
-    pub fn input_dtype(&self, shape: &[i64], dtype: DType) -> Result<Tensor> {
-        self.graph.input_dtype(shape, dtype)
+    pub fn input_dtype(&self, shape: impl AsRef<[i64]>, dtype: DType) -> Result<Tensor> {
+        self.graph.input_dtype(shape.as_ref(), dtype)
     }
 
-    pub fn input_shape(&self, shape: &[Dim], dtype: DType) -> Result<Tensor> {
-        self.graph.input_shape(shape, dtype)
+    pub fn input_shape(&self, shape: impl AsRef<[Dim]>, dtype: DType) -> Result<Tensor> {
+        self.graph.input_shape(shape.as_ref(), dtype)
     }
 
-    pub fn input_bf16_as_f32(&self, shape: &[i64]) -> Result<Tensor> {
-        self.graph.input_bf16_as_f32(shape)
+    pub fn input_bf16_as_f32(&self, shape: impl AsRef<[i64]>) -> Result<Tensor> {
+        self.graph.input_bf16_as_f32(shape.as_ref())
     }
 
-    pub fn input_i32(&self, shape: &[i64]) -> Result<Tensor> {
-        self.graph.input_i32(shape)
+    pub fn input_i32(&self, shape: impl AsRef<[i64]>) -> Result<Tensor> {
+        self.graph.input_i32(shape.as_ref())
     }
 
     pub fn input_i32_scalar(&self) -> Result<Tensor> {
         self.graph.input_i32_scalar()
     }
 
-    pub fn constant(&self, shape: &[i64], values: &[f32]) -> Result<Tensor> {
-        self.graph.constant(shape, values)
+    pub fn constant(&self, shape: impl AsRef<[i64]>, values: impl AsRef<[f32]>) -> Result<Tensor> {
+        self.graph.constant(shape.as_ref(), values.as_ref())
     }
 
-    pub fn constant_i32(&self, shape: &[i64], values: &[i32]) -> Result<Tensor> {
-        self.graph.constant_i32(shape, values)
+    pub fn constant_i32(
+        &self,
+        shape: impl AsRef<[i64]>,
+        values: impl AsRef<[i32]>,
+    ) -> Result<Tensor> {
+        self.graph.constant_i32(shape.as_ref(), values.as_ref())
     }
 
     pub fn scalar_i32(&self, value: i32) -> Result<Tensor> {
         self.graph.scalar_i32(value)
     }
 
-    pub fn iota_i32(&self, shape: &[i64], axis: usize) -> Result<Tensor> {
-        self.graph.iota_i32(shape, axis)
+    pub fn iota_i32(&self, shape: impl AsRef<[i64]>, axis: usize) -> Result<Tensor> {
+        self.graph.iota_i32(shape.as_ref(), axis)
     }
 
     pub fn causal_attention_mask(
@@ -1349,8 +1353,8 @@ mod tests {
     #[test]
     fn program_tensor_input_validation_is_structured_without_a_runtime() {
         let tracer = Tracer::new();
-        let float = tracer.input(&[2]).unwrap();
-        let integer = tracer.input_i32(&[1]).unwrap();
+        let float = tracer.input([2]).unwrap();
+        let integer = tracer.input_i32([1]).unwrap();
         let program = tracer
             .program(vec![float.clone(), integer.clone()])
             .unwrap();
@@ -1407,24 +1411,24 @@ mod tests {
     #[test]
     fn tracer_builds_common_programs_directly_in_pliron() {
         let tracer = Tracer::new();
-        let x = tracer.input(&[2]).unwrap();
-        let bias = tracer.constant(&[2], &[1., 2.]).unwrap();
+        let x = tracer.input([2]).unwrap();
+        let bias = tracer.constant([2], [1., 2.]).unwrap();
         let output = x.add(&bias).unwrap();
         let program = tracer.program(vec![output]).unwrap();
         assert_eq!(program.lowered.format(), "mlir");
 
         let tracer = Tracer::new();
-        let lhs = tracer.input(&[2, 2]).unwrap();
-        let rhs = tracer.input(&[2, 2]).unwrap();
+        let lhs = tracer.input([2, 2]).unwrap();
+        let rhs = tracer.input([2, 2]).unwrap();
         let matmul = lhs.matmul(&rhs).unwrap();
-        let transposed = matmul.transpose(&[1, 0]).unwrap();
-        let reversed = transposed.flip(&[0]).unwrap();
+        let transposed = matmul.transpose([1, 0]).unwrap();
+        let reversed = transposed.flip([0]).unwrap();
         let cumulative = reversed.cumsum(0).unwrap();
         let slice = cumulative.narrow(0, 0, 1).unwrap();
         let padded = slice.pad(&[[1, 1], [0, 0]], 0.).unwrap();
         let concatenated = Tensor::concatenate(&[padded.clone(), padded], 0).unwrap();
         let finite = concatenated.is_finite_mask().unwrap();
-        let zero = tracer.constant(&[], &[0.]).unwrap();
+        let zero = tracer.constant([], [0.]).unwrap();
         let zero = zero.broadcast_to(concatenated.shape()).unwrap();
         let positive = concatenated.gt_mask(&zero).unwrap();
         let selected = finite.select(&positive, &zero).unwrap();
@@ -1438,8 +1442,8 @@ mod tests {
     #[test]
     fn tracer_rejects_unmigrated_training_ops_without_falling_back() {
         let tracer = Tracer::new();
-        let input = tracer.input(&[1, 2, 2, 1]).unwrap();
-        let kernel = tracer.input(&[1, 1, 1, 1]).unwrap();
+        let input = tracer.input([1, 2, 2, 1]).unwrap();
+        let kernel = tracer.input([1, 1, 1, 1]).unwrap();
         let error = tracer
             .graph
             .push_node(
@@ -1465,8 +1469,8 @@ mod tests {
     #[test]
     fn common_elementwise_trace_stays_native_pliron() {
         let tracer = Tracer::new();
-        let x = tracer.input(&[2]).unwrap();
-        let y = tracer.input(&[2]).unwrap();
+        let x = tracer.input([2]).unwrap();
+        let y = tracer.input([2]).unwrap();
         let output = x
             .exp()
             .unwrap()
@@ -1474,7 +1478,7 @@ mod tests {
             .unwrap()
             .tanh()
             .unwrap()
-            .reshape(&[1, 2])
+            .reshape([1, 2])
             .unwrap();
         tracer.program(vec![output]).unwrap();
     }
@@ -1482,9 +1486,9 @@ mod tests {
     #[test]
     fn structured_tensor_conditional_lowers_to_stablehlo_regions() {
         let tracer = Tracer::new();
-        let predicate = tracer.input_i32(&[]).unwrap();
-        let left = tracer.input(&[2]).unwrap();
-        let right = tracer.input(&[2]).unwrap();
+        let predicate = tracer.input_i32([]).unwrap();
+        let left = tracer.input([2]).unwrap();
+        let right = tracer.input([2]).unwrap();
         let output = Tensor::cond(&predicate, || left.add(&left), || right.mul(&right)).unwrap();
 
         let program = tracer.program(vec![output]).unwrap();
@@ -1498,9 +1502,9 @@ mod tests {
     #[test]
     fn structured_tensor_conditionals_can_be_nested() {
         let tracer = Tracer::new();
-        let outer = tracer.input_i32(&[]).unwrap();
-        let inner = tracer.input_i32(&[]).unwrap();
-        let value = tracer.input(&[2]).unwrap();
+        let outer = tracer.input_i32([]).unwrap();
+        let inner = tracer.input_i32([]).unwrap();
+        let value = tracer.input([2]).unwrap();
         let output = Tensor::cond(
             &outer,
             || Tensor::cond(&inner, || value.add_scalar(1.0), || value.neg()),
@@ -1516,11 +1520,11 @@ mod tests {
     #[test]
     fn structured_tensor_conditional_preserves_heterogeneous_results() {
         let tracer = Tracer::new();
-        let predicate = tracer.input_i32(&[]).unwrap();
-        let left = tracer.input(&[2]).unwrap();
-        let right = tracer.input(&[2]).unwrap();
-        let then_index = tracer.input_i32(&[1]).unwrap();
-        let else_index = tracer.input_i32(&[1]).unwrap();
+        let predicate = tracer.input_i32([]).unwrap();
+        let left = tracer.input([2]).unwrap();
+        let right = tracer.input([2]).unwrap();
+        let then_index = tracer.input_i32([1]).unwrap();
+        let else_index = tracer.input_i32([1]).unwrap();
         let outputs = Tensor::cond_many(
             &predicate,
             || Ok(vec![left.add_scalar(1.0)?, then_index]),
@@ -1538,7 +1542,7 @@ mod tests {
     #[test]
     fn runtime_shape_values_remain_in_control_flow_ir() {
         let tracer = Tracer::new();
-        let input = tracer.input(&[2, 3]).unwrap();
+        let input = tracer.input([2, 3]).unwrap();
         assert_eq!(input.static_dim(0), Some(2));
         assert_eq!(input.static_dim(2), None);
         let rows = input.dim(0).unwrap();
@@ -1557,7 +1561,7 @@ mod tests {
     #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
     fn runtime_shape_values_compile_and_execute_on_xla_cpu() {
         let tracer = Tracer::new();
-        let input = tracer.input(&[2, 3]).unwrap();
+        let input = tracer.input([2, 3]).unwrap();
         let program = tracer
             .program(vec![input.shape_tensor().unwrap(), input.numel().unwrap()])
             .unwrap();
@@ -1576,9 +1580,9 @@ mod tests {
     #[test]
     fn structured_tensor_conditional_checks_branch_metadata() {
         let tracer = Tracer::new();
-        let predicate = tracer.input_i32(&[]).unwrap();
-        let left = tracer.input(&[2]).unwrap();
-        let right = tracer.input(&[3]).unwrap();
+        let predicate = tracer.input_i32([]).unwrap();
+        let left = tracer.input([2]).unwrap();
+        let right = tracer.input([3]).unwrap();
         let error = match Tensor::cond(&predicate, || Ok(left), || Ok(right)) {
             Ok(_) => panic!("mismatched branch metadata should fail"),
             Err(error) => error,
@@ -1593,7 +1597,7 @@ mod tests {
     #[test]
     fn typed_custom_call_survives_semantic_lowering() {
         let tracer = Tracer::new();
-        let input = tracer.input(&[4]).unwrap();
+        let input = tracer.input([4]).unwrap();
         let call = crate::CustomCall::typed_ffi("rxla.test.identity")
             .unwrap()
             .backend_config("opaque=1");
@@ -1612,7 +1616,7 @@ mod tests {
     #[test]
     fn side_effecting_custom_call_is_not_pruned_with_its_result() {
         let tracer = Tracer::new();
-        let input = tracer.input(&[4]).unwrap();
+        let input = tracer.input([4]).unwrap();
         let call = crate::CustomCall::typed_ffi("rxla.test.observe")
             .unwrap()
             .has_side_effect(true);
@@ -1628,9 +1632,9 @@ mod tests {
     #[test]
     fn attention_forward_stays_native_pliron() {
         let tracer = Tracer::new();
-        let query = tracer.input(&[2, 3, 4]).unwrap();
-        let key = tracer.input(&[2, 5, 4]).unwrap();
-        let value = tracer.input(&[2, 5, 6]).unwrap();
+        let query = tracer.input([2, 3, 4]).unwrap();
+        let key = tracer.input([2, 5, 4]).unwrap();
+        let value = tracer.input([2, 5, 6]).unwrap();
         let output = query
             .scaled_dot_product_attention(&key, &value, None, None)
             .unwrap();
@@ -1651,8 +1655,8 @@ mod tests {
     #[test]
     fn convolution_forward_stays_native_pliron() {
         let tracer = Tracer::new();
-        let input = tracer.input(&[1, 5, 6, 4]).unwrap();
-        let kernel = tracer.input(&[2, 3, 2, 6]).unwrap();
+        let input = tracer.input([1, 5, 6, 4]).unwrap();
+        let kernel = tracer.input([2, 3, 2, 6]).unwrap();
         let output = input
             .conv2d(
                 &kernel,
@@ -1674,9 +1678,9 @@ mod tests {
     #[test]
     fn unet_style_residual_block_stays_native_pliron() {
         let tracer = Tracer::new();
-        let input = tracer.input(&[1, 4, 4, 4]).unwrap();
-        let first_kernel = tracer.input(&[3, 3, 4, 4]).unwrap();
-        let second_kernel = tracer.input(&[3, 3, 4, 4]).unwrap();
+        let input = tracer.input([1, 4, 4, 4]).unwrap();
+        let first_kernel = tracer.input([3, 3, 4, 4]).unwrap();
+        let second_kernel = tracer.input([3, 3, 4, 4]).unwrap();
         let convolution = crate::Conv2dOptions {
             padding: [[1, 1], [1, 1]],
             ..Default::default()
@@ -1684,11 +1688,11 @@ mod tests {
         let hidden = input
             .conv2d(&first_kernel, convolution)
             .unwrap()
-            .transpose(&[0, 3, 1, 2])
+            .transpose([0, 3, 1, 2])
             .unwrap()
             .group_norm(2, None, None, 1e-5)
             .unwrap()
-            .transpose(&[0, 2, 3, 1])
+            .transpose([0, 2, 3, 1])
             .unwrap()
             .silu()
             .unwrap()
@@ -1704,8 +1708,8 @@ mod tests {
     #[test]
     fn tracing_facade_hides_graph_from_program_users() {
         let program = Tracer::trace(|trace| {
-            let x = trace.input(&[2])?;
-            let one = trace.constant(&[2], &[1.0, 1.0])?;
+            let x = trace.input([2])?;
+            let one = trace.constant([2], [1.0, 1.0])?;
             Ok(vec![x.add(&one)?])
         })
         .unwrap();
@@ -1722,8 +1726,8 @@ mod tests {
             Program::from_tensors(&[]),
             Err(Error::ProgramOutputRequired)
         ));
-        let left = Tracer::new().input(&[1]).unwrap();
-        let right = Tracer::new().input(&[1]).unwrap();
+        let left = Tracer::new().input([1]).unwrap();
+        let right = Tracer::new().input([1]).unwrap();
         assert!(matches!(
             Program::from_tensors(&[left, right]),
             Err(Error::ProgramOutputTraceMismatch { index: 1 })
@@ -1793,7 +1797,7 @@ mod tests {
     fn program_is_a_snapshot_and_does_not_retain_the_tracing_graph() {
         let tracer = Tracer::new();
         let weak = Arc::downgrade(&tracer.graph.0);
-        let x = tracer.input(&[2]).unwrap();
+        let x = tracer.input([2]).unwrap();
         let program = tracer.program(vec![x]).unwrap();
         drop(tracer);
         assert!(weak.upgrade().is_none());
@@ -1805,14 +1809,14 @@ mod tests {
         let tracer = Tracer::new();
         let mesh = crate::Mesh::new([("data", 2)]).unwrap();
         let _unused = tracer
-            .input(&[4])
+            .input([4])
             .unwrap()
             .with_sharding(crate::Sharding::partitioned(
                 mesh,
                 crate::PartitionSpec::new([Some("data")]).unwrap(),
             ))
             .unwrap();
-        let used = tracer.input(&[2]).unwrap();
+        let used = tracer.input([2]).unwrap();
         let program = tracer.program(vec![used.exp().unwrap()]).unwrap();
 
         assert_eq!(program.input_count(), 1);
@@ -1826,7 +1830,7 @@ mod tests {
         let tracer = Tracer::new();
         let mesh = crate::Mesh::new([("data", 2)]).unwrap();
         let x = tracer
-            .input(&[4, 2])
+            .input([4, 2])
             .unwrap()
             .with_sharding(crate::Sharding::partitioned(
                 mesh.clone(),

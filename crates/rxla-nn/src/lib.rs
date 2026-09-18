@@ -408,7 +408,7 @@ impl Cx {
     }
 
     /// Declare/read an F32 parameter at the current lexical scope.
-    pub fn param(&self, name: &str, shape: &[i64]) -> Result<Tensor> {
+    pub fn param(&self, name: &str, shape: impl AsRef<[i64]>) -> Result<Tensor> {
         self.param_dtype(name, shape, self.parameter_storage_dtype)
     }
 
@@ -416,10 +416,15 @@ impl Cx {
     pub fn param_initialized(
         &self,
         name: &str,
-        shape: &[i64],
+        shape: impl AsRef<[i64]>,
         initializer: Initializer,
     ) -> Result<Tensor> {
-        self.param_dtype_initialized(name, shape, self.parameter_storage_dtype, Some(initializer))
+        self.param_dtype_initialized(
+            name,
+            shape.as_ref(),
+            self.parameter_storage_dtype,
+            Some(initializer),
+        )
     }
 
     /// Select storage for subsequently declared floating-point parameters.
@@ -460,12 +465,17 @@ impl Cx {
     /// The current symbolic tensor surface supports F32 parameters, frozen
     /// BF16 storage exposed as F32 computation values, and raw U8 storage for
     /// explicitly dequantized inference layers. Other dtypes are rejected.
-    pub fn param_dtype(&self, name: &str, shape: &[i64], dtype: DType) -> Result<Tensor> {
+    pub fn param_dtype(
+        &self,
+        name: &str,
+        shape: impl AsRef<[i64]>,
+        dtype: DType,
+    ) -> Result<Tensor> {
         let compute_dtype = match dtype {
             DType::F16 | DType::BF16 => DType::F32,
             _ => dtype,
         };
-        self.param_with_dtypes_impl(name, shape, dtype, compute_dtype, None)
+        self.param_with_dtypes_impl(name, shape.as_ref(), dtype, compute_dtype, None)
     }
 
     /// Declare/read a parameter with independent checkpoint and computation
@@ -473,11 +483,11 @@ impl Cx {
     pub fn param_with_dtypes(
         &self,
         name: &str,
-        shape: &[i64],
+        shape: impl AsRef<[i64]>,
         storage_dtype: DType,
         compute_dtype: DType,
     ) -> Result<Tensor> {
-        self.param_with_dtypes_impl(name, shape, storage_dtype, compute_dtype, None)
+        self.param_with_dtypes_impl(name, shape.as_ref(), storage_dtype, compute_dtype, None)
     }
 
     /// Declare/read a mixed-precision parameter with an initialization policy
@@ -485,12 +495,18 @@ impl Cx {
     pub fn param_with_dtypes_initialized(
         &self,
         name: &str,
-        shape: &[i64],
+        shape: impl AsRef<[i64]>,
         storage_dtype: DType,
         compute_dtype: DType,
         initializer: Initializer,
     ) -> Result<Tensor> {
-        self.param_with_dtypes_impl(name, shape, storage_dtype, compute_dtype, Some(initializer))
+        self.param_with_dtypes_impl(
+            name,
+            shape.as_ref(),
+            storage_dtype,
+            compute_dtype,
+            Some(initializer),
+        )
     }
 
     fn param_dtype_initialized(
@@ -692,12 +708,13 @@ impl Cx {
     }
 
     /// Create a visible F32 model input in this trace.
-    pub fn input(&self, shape: &[i64]) -> Result<Tensor> {
+    pub fn input(&self, shape: impl AsRef<[i64]>) -> Result<Tensor> {
         self.input_dtype(shape, DType::F32)
     }
 
     /// Create a visible input with an explicit dtype.
-    pub fn input_dtype(&self, shape: &[i64], dtype: DType) -> Result<Tensor> {
+    pub fn input_dtype(&self, shape: impl AsRef<[i64]>, dtype: DType) -> Result<Tensor> {
+        let shape = shape.as_ref();
         let requested = ModelInputSpec {
             shape: shape.to_vec(),
             dtype,
@@ -714,27 +731,27 @@ impl Cx {
     }
 
     /// Create a graph-local I32 coordinate tensor without adding an ABI input.
-    pub fn iota_i32(&self, shape: &[i64], axis: usize) -> Result<Tensor> {
+    pub fn iota_i32(&self, shape: impl AsRef<[i64]>, axis: usize) -> Result<Tensor> {
         Ok(self
             .inner
             .lock()
             .expect("trace context lock poisoned")
             .graph
-            .iota_i32(shape, axis)?)
+            .iota_i32(shape.as_ref(), axis)?)
     }
 
     /// Create a graph-local F32 constant without adding an ABI input.
-    pub fn constant(&self, shape: &[i64], values: &[f32]) -> Result<Tensor> {
+    pub fn constant(&self, shape: impl AsRef<[i64]>, values: impl AsRef<[f32]>) -> Result<Tensor> {
         Ok(self
             .inner
             .lock()
             .expect("trace context lock poisoned")
             .graph
-            .constant(shape, values)?)
+            .constant(shape.as_ref(), values.as_ref())?)
     }
 
     /// Declare or read named resident state at the current lexical scope.
-    pub fn state(&self, name: &str, shape: &[i64], dtype: DType) -> Result<State> {
+    pub fn state(&self, name: &str, shape: impl AsRef<[i64]>, dtype: DType) -> Result<State> {
         self.state_initialized(name, shape, dtype, Initializer::zeros())
     }
 
@@ -742,10 +759,11 @@ impl Cx {
     pub fn state_initialized(
         &self,
         name: &str,
-        shape: &[i64],
+        shape: impl AsRef<[i64]>,
         dtype: DType,
         initializer: Initializer,
     ) -> Result<State> {
+        let shape = shape.as_ref();
         ensure!(
             self.inner
                 .lock()
@@ -813,10 +831,10 @@ impl Cx {
             let words = {
                 let scope = self.scope(name)?;
                 [
-                    scope.state("key0", &[], DType::I32)?,
-                    scope.state("key1", &[], DType::I32)?,
-                    scope.state("counter_low", &[], DType::I32)?,
-                    scope.state("counter_high", &[], DType::I32)?,
+                    scope.state("key0", [], DType::I32)?,
+                    scope.state("key1", [], DType::I32)?,
+                    scope.state("counter_low", [], DType::I32)?,
+                    scope.state("counter_high", [], DType::I32)?,
                 ]
             };
             let values = words
@@ -986,23 +1004,24 @@ impl Rng {
         Ok(draw)
     }
 
-    pub fn blocks(&mut self, shape: &[i64]) -> Result<[Tensor; 2]> {
-        Ok(self.draw(shape)?.bits)
+    pub fn blocks(&mut self, shape: impl AsRef<[i64]>) -> Result<[Tensor; 2]> {
+        Ok(self.draw(shape.as_ref())?.bits)
     }
 
-    pub fn uniform_f32(&mut self, shape: &[i64]) -> Result<Tensor> {
-        let bits = self.draw(shape)?.bits;
+    pub fn uniform_f32(&mut self, shape: impl AsRef<[i64]>) -> Result<Tensor> {
+        let bits = self.draw(shape.as_ref())?.bits;
         Ok(rxla_core::random::uniform_f32_from_bits(&bits[0])?)
     }
 
-    pub fn normal_f32(&mut self, shape: &[i64]) -> Result<Tensor> {
-        let bits = self.draw(shape)?.bits;
+    pub fn normal_f32(&mut self, shape: impl AsRef<[i64]>) -> Result<Tensor> {
+        let bits = self.draw(shape.as_ref())?.bits;
         Ok(rxla_core::random::normal_f32_from_bits([
             &bits[0], &bits[1],
         ])?)
     }
 
-    pub fn bernoulli(&mut self, shape: &[i64], probability: f32) -> Result<Tensor> {
+    pub fn bernoulli(&mut self, shape: impl AsRef<[i64]>, probability: f32) -> Result<Tensor> {
+        let shape = shape.as_ref();
         ensure!(
             (0.0..=1.0).contains(&probability),
             InvalidProbabilitySnafu {
@@ -1258,7 +1277,7 @@ mod tests {
         let training_seen = Cell::new(None);
         Model::new(|cx: Cx| -> Result<Tensor> {
             training_seen.set(Some(cx.mode()));
-            cx.input(&[1])
+            cx.input([1])
         })
         .training()
         .trace()
@@ -1268,7 +1287,7 @@ mod tests {
         let inference_seen = Cell::new(None);
         Model::new(|cx: Cx| -> Result<Tensor> {
             inference_seen.set(Some(cx.mode()));
-            cx.input(&[1])
+            cx.input([1])
         })
         .inference()
         .trace()
@@ -1277,9 +1296,9 @@ mod tests {
     }
 
     fn classifier(cx: Cx) -> Result<Tensor> {
-        let input = cx.input(&[2, 4])?;
+        let input = cx.input([2, 4])?;
         let scope = cx.scope("head")?;
-        let weight = scope.param("weight", &[4, 3])?;
+        let weight = scope.param("weight", [4, 3])?;
         Ok(input.matmul(&weight)?)
     }
 
@@ -1306,7 +1325,7 @@ mod tests {
     #[test]
     fn parameter_schema_separates_checkpoint_and_compute_dtypes() {
         let (schema, value) =
-            init(|cx| cx.param_with_dtypes("weight", &[2, 3], DType::F16, DType::F32)).unwrap();
+            init(|cx| cx.param_with_dtypes("weight", [2, 3], DType::F16, DType::F32)).unwrap();
 
         let parameter = &schema.parameters()[0];
         assert_eq!(parameter.storage_dtype(), DType::F16);
@@ -1314,7 +1333,7 @@ mod tests {
         assert_eq!(value.dtype(), DType::F32);
         assert_eq!(value.shape(), [2, 3]);
 
-        let error = match init(|cx| cx.param_with_dtypes("weight", &[2], DType::I32, DType::F32)) {
+        let error = match init(|cx| cx.param_with_dtypes("weight", [2], DType::I32, DType::F32)) {
             Ok(_) => panic!("unsupported storage dtype was accepted"),
             Err(error) => error,
         };
@@ -1329,7 +1348,7 @@ mod tests {
         let (schema, value) = init(|cx| {
             cx.with_parameter_storage_dtype(DType::F16)?
                 .scope("encoder")?
-                .param("weight", &[2, 3])
+                .param("weight", [2, 3])
         })
         .unwrap();
 
@@ -1406,7 +1425,7 @@ mod tests {
     #[test]
     fn schema_guided_resident_trace_is_single_pass_and_structural() {
         fn source(cx: Cx) -> Result<Tensor> {
-            cx.param("weight", &[2])
+            cx.param("weight", [2])
         }
 
         let source = Model::new(source).trace().unwrap();
@@ -1415,7 +1434,7 @@ mod tests {
         let calls = Cell::new(0);
         let compatible = Model::new(|cx: Cx| -> Result<_> {
             calls.set(calls.get() + 1);
-            cx.param("weight", &[2])
+            cx.param("weight", [2])
         })
         .trace_resident(&selection)
         .unwrap();
@@ -1424,7 +1443,7 @@ mod tests {
         assert_eq!(compatible.parameter_tensors(&selection).unwrap().len(), 1);
         compatible.validate_resident_parameters(&selection).unwrap();
 
-        let incompatible = Model::new(|cx: Cx| cx.param("weight", &[3])).trace_resident(&selection);
+        let incompatible = Model::new(|cx: Cx| cx.param("weight", [3])).trace_resident(&selection);
         assert!(matches!(incompatible, Err(Error::ModelSchemaMismatch)));
     }
 
@@ -1433,10 +1452,10 @@ mod tests {
         let (schema, _) = init(|cx| {
             {
                 let block = cx.scope_path(["encoder", "0"])?;
-                block.param("weight", &[2])?;
+                block.param("weight", [2])?;
             }
             assert!(cx.scope_path(["unused", "bad.segment"]).is_err());
-            cx.param("root", &[1])
+            cx.param("root", [1])
         })
         .unwrap();
 
@@ -1450,8 +1469,8 @@ mod tests {
         let (schema, _) = init(|cx| {
             let block = path!(cx / "encoder" / "blocks" / 17usize)?;
             assert_eq!(block.model_path().to_string(), "encoder.blocks.17");
-            block.param("weight", &[2])?;
-            cx.param("root", &[1])
+            block.param("weight", [2])?;
+            cx.param("root", [1])
         })
         .unwrap();
 
@@ -1462,11 +1481,11 @@ mod tests {
     #[test]
     fn model_conditional_hoists_branch_parameters_into_the_abi() {
         let applied = Model::new(|cx: Cx| -> Result<Tensor> {
-            let predicate = cx.input_dtype(&[], DType::I32)?;
+            let predicate = cx.input_dtype([], DType::I32)?;
             cx.cond(
                 &predicate,
-                |cx| cx.scope("positive")?.param("weight", &[2]),
-                |cx| cx.scope("negative")?.param("weight", &[2]),
+                |cx| cx.scope("positive")?.param("weight", [2]),
+                |cx| cx.scope("negative")?.param("weight", [2]),
             )
         })
         .trace()
@@ -1481,9 +1500,9 @@ mod tests {
     #[test]
     fn model_conditional_merges_state_versions_as_hidden_results() {
         let applied = Model::new(|cx: Cx| -> Result<Tensor> {
-            let state = cx.state("counter", &[], DType::F32)?;
+            let state = cx.state("counter", [], DType::F32)?;
             let value = state.read(&cx)?;
-            let predicate = cx.input_dtype(&[], DType::I32)?;
+            let predicate = cx.input_dtype([], DType::I32)?;
             let visible = cx.cond(
                 &predicate,
                 |cx| {
@@ -1512,7 +1531,7 @@ mod tests {
     fn byte_inputs_can_be_preprocessed_inside_the_model_program() {
         fn preprocess(cx: Cx) -> Result<Tensor> {
             Ok(cx
-                .input_dtype(&[2, 2, 3], DType::U8)?
+                .input_dtype([2, 2, 3], DType::U8)?
                 .cast(DType::F32)?
                 .mul_scalar(1.0 / 255.0)?)
         }
@@ -1530,9 +1549,9 @@ mod tests {
     #[test]
     fn selected_parameter_tensors_drive_partial_autodiff() {
         fn product(cx: Cx) -> Result<Tensor> {
-            let body = cx.scope("body")?.param("weight", &[2])?;
-            let head = cx.scope("head")?.param("weight", &[2])?;
-            Ok(body.mul(&head)?.sum(&[0], false)?)
+            let body = cx.scope("body")?.param("weight", [2])?;
+            let head = cx.scope("head")?.param("weight", [2])?;
+            Ok(body.mul(&head)?.sum([0], false)?)
         }
 
         let (schema, _) = init(product).unwrap();
@@ -1548,16 +1567,16 @@ mod tests {
 
     #[test]
     fn selected_parameter_tensors_reject_another_schema() {
-        let (schema, _) = init(|cx| cx.param("weight", &[2])).unwrap();
-        let applied = apply(&schema, |cx| cx.param("weight", &[2])).unwrap();
-        let (other, _) = init(|cx| cx.param("weight", &[3])).unwrap();
+        let (schema, _) = init(|cx| cx.param("weight", [2])).unwrap();
+        let applied = apply(&schema, |cx| cx.param("weight", [2])).unwrap();
+        let (other, _) = init(|cx| cx.param("weight", [3])).unwrap();
         let error = match applied.parameter_tensors(&other.select_all()) {
             Ok(_) => panic!("a structurally different schema was accepted"),
             Err(error) => error,
         };
         assert!(matches!(error, Error::SelectionSchemaMismatch));
 
-        let (same_shape, _) = init(|cx| cx.param("weight", &[2])).unwrap();
+        let (same_shape, _) = init(|cx| cx.param("weight", [2])).unwrap();
         assert!(matches!(
             applied.parameter_tensors(&same_shape.select_all()),
             Err(Error::SelectionSchemaMismatch)
@@ -1567,14 +1586,14 @@ mod tests {
     #[test]
     fn repeated_parameter_reads_share_one_input() {
         let (schema, _) = init(|cx| {
-            let first = cx.param("weight", &[2, 2])?;
-            let second = cx.param("weight", &[2, 2])?;
+            let first = cx.param("weight", [2, 2])?;
+            let second = cx.param("weight", [2, 2])?;
             Ok(first.add(&second)?)
         })
         .unwrap();
         let applied = apply(&schema, |cx| {
-            let first = cx.param("weight", &[2, 2])?;
-            let second = cx.param("weight", &[2, 2])?;
+            let first = cx.param("weight", [2, 2])?;
+            let second = cx.param("weight", [2, 2])?;
             Ok(vec![first.add(&second)?])
         })
         .unwrap();
@@ -1602,7 +1621,7 @@ mod tests {
     #[test]
     fn linear_infers_input_features_at_its_use_site() {
         let (schema, output) = init(|cx| {
-            let input = cx.input(&[2, 4])?;
+            let input = cx.input([2, 4])?;
             input.apply(&cx.named_layer("head", Linear::new(3))?)
         })
         .unwrap();
@@ -1624,7 +1643,7 @@ mod tests {
     #[test]
     fn program_owns_the_model_body_and_layer_builders_own_scopes() {
         let model = Model::new(|cx: Cx| -> Result<_> {
-            let input = cx.input(&[2, 4])?;
+            let input = cx.input([2, 4])?;
             let hidden = cx
                 .scope("hidden")?
                 .linear(8)
@@ -1648,9 +1667,9 @@ mod tests {
     #[test]
     fn one_context_composes_parameters_and_resident_state() {
         let model = Model::new(|cx: Cx| -> Result<_> {
-            let input = cx.input(&[2, 4])?;
+            let input = cx.input([2, 4])?;
             let output = input.apply(&cx.named_layer("head", Linear::new(3))?)?;
-            let count = cx.state("steps", &[], DType::I32)?;
+            let count = cx.state("steps", [], DType::I32)?;
             let next = count.read(&cx)?.wrapping_add_scalar(1)?;
             count.write(&cx, &next)?;
             let noise = cx.rng("sampling")?.normal_f32(output.shape())?;
@@ -1677,7 +1696,7 @@ mod tests {
     #[test]
     fn invalid_random_probabilities_are_typed_errors() {
         let result = Model::new(|cx: Cx| {
-            let input = cx.input(&[2])?;
+            let input = cx.input([2])?;
             Ok(cx.rng("dropout")?.dropout(&input, f32::NAN)?.output)
         })
         .trace();
@@ -1694,7 +1713,7 @@ mod tests {
 
     #[test]
     fn transforms_append_named_resident_state() {
-        let mut applied = Model::new(|cx: Cx| cx.input(&[2])).trace().unwrap();
+        let mut applied = Model::new(|cx: Cx| cx.input([2])).trace().unwrap();
         let moment = applied
             .transform_state("__transform.moment", &[2], DType::F32)
             .unwrap();
@@ -1735,9 +1754,7 @@ mod tests {
         assert_eq!(prepared.state_type(slot).unwrap(), (DType::F32, vec![2, 3]));
 
         let quantized = Model::new(|cx: Cx| -> Result<_> {
-            Ok(cx
-                .param_dtype("weight", &[2], DType::U8)?
-                .cast(DType::F32)?)
+            Ok(cx.param_dtype("weight", [2], DType::U8)?.cast(DType::F32)?)
         });
         let (_, applied) = quantized.trace_resident_all().unwrap();
         let prepared = applied.prepare_stateful().unwrap();
@@ -1795,10 +1812,10 @@ mod tests {
     #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
     fn unified_context_state_and_rng_execute_as_one_program() {
         let model = Model::new(|cx: Cx| -> Result<_> {
-            let steps = cx.state("steps", &[], DType::I32)?;
+            let steps = cx.state("steps", [], DType::I32)?;
             let next = steps.read(&cx)?.wrapping_add_scalar(1)?;
             steps.write(&cx, &next)?;
-            let draw = cx.rng("sampling")?.uniform_f32(&[4])?;
+            let draw = cx.rng("sampling")?.uniform_f32([4])?;
             Ok([draw, next])
         });
         let applied = model.trace().unwrap();
@@ -1832,7 +1849,7 @@ mod tests {
             ..Default::default()
         };
         let model = |cx: Cx| {
-            let input = cx.input(&[1, 8, 8, 4])?;
+            let input = cx.input([1, 8, 8, 4])?;
             cx.scope("conv_in")?
                 .conv2d(6, [3, 3])
                 .options(options)
@@ -1857,7 +1874,7 @@ mod tests {
     #[test]
     fn group_norm_nhwc_infers_affine_channel_shape() {
         let model = |cx: Cx| {
-            let input = cx.input(&[1, 8, 8, 32])?;
+            let input = cx.input([1, 8, 8, 32])?;
             input.apply(&cx.named_layer("norm", GroupNorm::new(8))?)
         };
         let (schema, output) = init(model).unwrap();
@@ -1872,7 +1889,7 @@ mod tests {
     #[test]
     fn layer_norm_infers_trailing_affine_shape() {
         let (schema, output) = init(|cx| {
-            let input = cx.input(&[2, 7, 32])?;
+            let input = cx.input([2, 7, 32])?;
             input.apply(&cx.named_layer("norm", LayerNorm::new(1))?)
         })
         .unwrap();
@@ -1898,7 +1915,7 @@ mod tests {
         .expect("load CUDA plugin");
 
         let model = |cx: Cx| {
-            let input = cx.input(&[2, 3])?;
+            let input = cx.input([2, 3])?;
             Ok(cx
                 .scope("head")?
                 .linear(2)
