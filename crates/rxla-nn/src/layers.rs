@@ -95,6 +95,94 @@ pub struct Linear {
     bias: bool,
 }
 
+/// An affine projection with a frozen base path and trainable low-rank adapter.
+///
+/// Parameters use the interoperable names `weight`, optional `bias`,
+/// `lora_A.weight`, and `lora_B.weight`. `lora_B` starts at zero, so the layer
+/// initially computes exactly the base projection.
+#[must_use = "layer builders do nothing until apply is called"]
+#[derive(Clone, Setters)]
+#[setters(generate = false)]
+pub struct LoraLinear {
+    out_features: i64,
+    rank: i64,
+    #[setters(generate)]
+    alpha: f32,
+    #[setters(generate)]
+    bias: bool,
+}
+
+impl LoraLinear {
+    pub fn new(out_features: i64, rank: i64) -> Self {
+        Self {
+            out_features,
+            rank,
+            alpha: rank as f32,
+            bias: true,
+        }
+    }
+
+    pub fn apply(self, cx: Cx, name: &str, input: &Tensor) -> Result<Tensor> {
+        self.apply_in(&cx.scope(name)?, input)
+    }
+}
+
+impl Layer for LoraLinear {
+    fn apply_in(&self, cx: &Cx, input: &Tensor) -> Result<Tensor> {
+        ensure!(
+            input.dtype() == DType::F32 && !input.shape().is_empty(),
+            InvalidLayerInputSnafu {
+                layer: "LoraLinear",
+                requirement: "an F32 input with rank at least one",
+            }
+        );
+        let in_features = *input.shape().last().expect("rank checked above");
+        ensure!(
+            in_features > 0 && self.out_features > 0 && self.rank > 0 && self.alpha.is_finite(),
+            InvalidLayerInputSnafu {
+                layer: "LoraLinear",
+                requirement: "positive dimensions/rank and finite alpha",
+            }
+        );
+        let weight = cx.param_initialized(
+            "weight",
+            &[self.out_features, in_features],
+            Initializer::kaiming_uniform(),
+        )?;
+        let bias_bound = (1.0 / in_features as f32).sqrt();
+        let bias = self
+            .bias
+            .then(|| {
+                cx.param_initialized(
+                    "bias",
+                    &[self.out_features],
+                    Initializer::uniform(-bias_bound, bias_bound),
+                )
+            })
+            .transpose()?;
+        let down = input.linear(
+            &cx.scope("lora_A")?.param_initialized(
+                "weight",
+                &[self.rank, in_features],
+                Initializer::kaiming_uniform(),
+            )?,
+            None,
+        )?;
+        let adapter = down.linear(
+            &cx.scope("lora_B")?.param_initialized(
+                "weight",
+                &[self.out_features, self.rank],
+                Initializer::zeros(),
+            )?,
+            None,
+        )?;
+        input
+            .linear(&weight, bias.as_ref())?
+            .add(&adapter.mul_scalar(self.alpha / self.rank as f32)?)
+            .map_err(Into::into)
+    }
+}
+
 /// Weight-only affine projection with symmetric per-group U8 storage.
 ///
 /// Stored values encode signed INT8 as `value + 128`; `scale` is F32 with one

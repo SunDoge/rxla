@@ -20,8 +20,8 @@ mod initializer;
 pub use initializer::Initializer;
 mod layers;
 pub use layers::{
-    BatchNorm, Conv2d, Embedding, GroupNorm, ImageLayout, Layer, LayerNorm, Linear, NamedLayer,
-    QuantizedLinear, RmsNorm, TensorApply,
+    BatchNorm, Conv2d, Embedding, GroupNorm, ImageLayout, Layer, LayerNorm, Linear, LoraLinear,
+    NamedLayer, QuantizedLinear, RmsNorm, TensorApply,
 };
 mod model_path;
 pub use model_path::{ModelPath, ModelPathSegment};

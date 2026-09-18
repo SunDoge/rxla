@@ -433,6 +433,32 @@ impl AppliedModel {
             .collect()
     }
 
+    /// Borrow only a selected resident parameter subset in schema order.
+    ///
+    /// This is the checkpoint boundary used by adapter training: base
+    /// parameters may remain ordinary frozen inputs while only LoRA parameters
+    /// are resident and exported.
+    pub fn selected_resident_parameter_buffers<'model, 'session>(
+        &'model self,
+        session: &'session Session,
+        selection: &ParameterSelection,
+    ) -> Result<Vec<(&'model str, &'session Buffer)>> {
+        self.validate_resident_parameters(selection)?;
+        selection
+            .parameters()
+            .map(|(id, _)| {
+                let slot = self.resident_parameters[id.index()]
+                    .as_ref()
+                    .expect("resident selection validated");
+                let spec = self
+                    .schema
+                    .parameter(id)
+                    .expect("selection schema identity validated");
+                Ok((spec.path(), session.state(slot)?))
+            })
+            .collect()
+    }
+
     /// Borrow named model and transform state from a compatible session.
     pub fn state_buffers<'model, 'session>(
         &'model self,

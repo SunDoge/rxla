@@ -65,6 +65,7 @@ rand_distr = "0.5.1"
 regex = "1.12.3"
 rxla-core = { path = "../rxla-core", version = "=0.1.0-alpha.1" }
 rxla-models = { path = "../rxla-models", version = "=0.1.0-alpha.1" }
+rxla-train = { path = "../rxla-train", version = "=0.1.0-alpha.1" }
 serde = { version = "1.0.229", features = ["derive"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
@@ -74,4 +75,4 @@ rustix = { version = "1.1.4", features = ["fs"] }
 default = ["export"]
 disk-cache = ["rxla-core/disk-cache"]
 export = ["dep:tempfile"]
-model = ["dep:rxla-nn"]
+model = ["dep:rxla-core", "dep:rxla-nn"]

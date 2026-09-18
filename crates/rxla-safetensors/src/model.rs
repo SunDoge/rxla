@@ -1,7 +1,7 @@
 //! SafeTensors loading for parameter-effect model schemas.
 
 use super::*;
-use rxla_nn::{CompiledModelSessionBuilder, ModelSchema};
+use rxla_nn::{CompiledModelSessionBuilder, ModelSchema, ParameterSelection};
 use std::collections::HashMap;
 
 /// Weight buffers keyed by the stable paths in a parameter-effect schema.
@@ -37,6 +37,61 @@ impl SchemaBuffers {
 }
 
 impl<R: Read + Seek> SafeTensors<R> {
+    /// Load an exact selected parameter subset, such as a standalone LoRA
+    /// adapter checkpoint. Every selected path is validated before upload;
+    /// tensors outside the selection are ignored.
+    pub fn load_parameter_selection(
+        &mut self,
+        client: &Client,
+        selection: &ParameterSelection,
+    ) -> Result<SchemaBuffers> {
+        for (_, spec) in selection.parameters() {
+            let info = self
+                .info(spec.path())
+                .ok_or_else(|| invalid(format!("missing tensor {:?}", spec.path())))?;
+            let shape = info
+                .shape
+                .iter()
+                .map(|&dim| i64::try_from(dim).map_err(|_| invalid("dimension exceeds i64")))
+                .collect::<Result<Vec<_>>>()?;
+            if shape != spec.shape() {
+                return Err(invalid(format!("tensor {:?}: shape mismatch", spec.path())));
+            }
+            match spec.dtype() {
+                DType::U8 if info.dtype == Dtype::U8 => {}
+                DType::F32 | DType::F16 | DType::BF16
+                    if matches!(info.dtype, Dtype::F32 | Dtype::F16 | Dtype::BF16) => {}
+                dtype => {
+                    return Err(invalid(format!(
+                        "tensor {:?}: incompatible checkpoint dtype for {dtype:?} storage",
+                        spec.path()
+                    )));
+                }
+            }
+        }
+        let parameters = selection
+            .parameters()
+            .map(|(_, spec)| {
+                let source_dtype = self
+                    .info(spec.path())
+                    .ok_or_else(|| invalid(format!("missing tensor {:?}", spec.path())))?
+                    .dtype;
+                let buffer = match spec.dtype() {
+                    DType::U8 => self.upload_u8(client, spec.path())?,
+                    DType::F32 => self.upload_f32(client, spec.path())?,
+                    DType::F16 => self.upload_f16(client, spec.path())?,
+                    DType::BF16 if source_dtype == Dtype::BF16 => {
+                        self.upload_bf16(client, spec.path())?
+                    }
+                    DType::BF16 => self.upload_bf16_converted(client, spec.path())?,
+                    dtype => return Err(invalid(format!("unsupported parameter dtype {dtype:?}"))),
+                };
+                Ok((spec.path().to_owned(), buffer))
+            })
+            .collect::<Result<_>>()?;
+        Ok(SchemaBuffers { parameters })
+    }
+
     /// Validate an exact path/shape/dtype match without reading tensor payloads
     /// or requiring a PJRT client.
     pub fn validate_parameter_schema(&self, schema: &ModelSchema) -> Result<()> {
@@ -145,4 +200,21 @@ impl<R: Read + Seek> SafeTensors<R> {
 
         Ok(sources)
     }
+}
+
+/// Atomically save only `selection` from a live resident model session.
+/// Optimizer slots, frozen base parameters, RNG and unrelated model state are
+/// deliberately excluded.
+#[cfg(feature = "export")]
+pub fn save_parameter_selection_new(
+    path: impl AsRef<std::path::Path>,
+    model: &rxla_nn::AppliedModel,
+    session: &rxla_core::Session,
+    selection: &ParameterSelection,
+    metadata: Option<&std::collections::HashMap<String, String>>,
+) -> Result<()> {
+    let buffers = model
+        .selected_resident_parameter_buffers(session, selection)
+        .map_err(|source| Error::Model { source })?;
+    super::save_buffers_new(path, &buffers, metadata)
 }

@@ -12,6 +12,8 @@ use half::{bf16, f16};
 use memmap2::{Mmap, MmapOptions};
 #[cfg(feature = "model")]
 pub use model::SchemaBuffers;
+#[cfg(all(feature = "model", feature = "export"))]
+pub use model::save_parameter_selection_new;
 #[cfg(feature = "model")]
 use rxla_pjrt::DType;
 use rxla_pjrt::{Buffer, Client};
@@ -35,6 +37,9 @@ pub enum Error {
     Invalid { message: String },
     #[snafu(display("weight upload: {source}"))]
     Runtime { source: rxla_pjrt::Error },
+    #[cfg(feature = "model")]
+    #[snafu(display("model parameter selection: {source}"))]
+    Model { source: rxla_nn::Error },
 }
 pub type Result<T> = std::result::Result<T, Error>;
 fn invalid(message: impl Into<String>) -> Error {

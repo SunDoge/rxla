@@ -6,6 +6,8 @@
 mod data_rng;
 mod model_adam;
 pub use data_rng::{DataRng, SampleRng};
+mod lora;
+pub use lora::select_lora;
 pub use model_adam::{
     AdamOptions, ModelAdamError, ModelAdamOutputPlan, ModelAdamResult, ModelAdamState,
     ModelAdamStep, ModelAdamUpdate, apply_model_adam, prepare_model_adam,
