@@ -774,9 +774,9 @@ dependencies = [
 
 [[package]]
 name = "dlpark"
-version = "0.9.0-beta.1"
+version = "0.9.0-beta.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36e719c251fc1d6334d8c90a0557b63f02ad2d571f8d86759ca1a405c3cd7f3b"
+checksum = "4e14ae1cb0c660ae24bfc22e9e86dca459081ba079e3758e38b245d11a0e36e9"
 dependencies = [
  "bitflags",
  "half",
