@@ -51,6 +51,8 @@ its PJRT completion event; PNG download is outside the timed region.
   `[G, 3, 3]`, linear RGB `[G, 3]`, opacity `[G]`, a pixel-center grid
   `[H, W, 2]`, and background RGB `[3]`.
 - Opacities are values rather than logits and are clamped to `[0, 0.99]`.
+  Negligible Gaussian tails default to an alpha cutoff of `1/255`, configurable
+  on `GaussianCamera`; this prevents many invisible tails from accumulating.
 - Depth ordering and the near/far visibility decision are nondifferentiable.
   The selected continuous means, covariance, color, and opacity paths remain
   differentiable.
@@ -64,3 +66,34 @@ its PJRT completion event; PNG download is outside the timed region.
 The intended next architectural step is to retain this implementation as the
 portable reference and introduce tile/binning transformations or a specialized
 CUDA custom call behind the same public renderer contract.
+
+## Real-scene experiment
+
+`gaussian_splatting_real` loads the common compact `.splat` record layout and a
+Graphdeco-style `cameras.json`. It decodes world-space means, linear scales,
+RGBA and quantized quaternions, constructs full covariances, applies the selected
+camera transform, and renders a bounded subset through the same StableHLO path.
+
+The experiment used the public Bonsai mini checkpoint from the
+`dylanebert/3dgs` dataset: 272,956 real trained Gaussians, with roughly 80,000
+centers inside camera 0. CUDA successfully rendered subsets from 256 through
+100,000 Gaussians. A synchronized 100,000-Gaussian render at 24x16 took about
+2.34 ms after a 2.61 s compile on the local RTX 5080.
+
+The resulting full-scene image is not a quality result. Dense `[H,W,G]`
+compositing cannot retain the scene at useful resolution and does not construct
+the exact per-tile contributor stream used by production 3DGS. This experiment
+therefore establishes real checkpoint parsing and XLA execution while also
+rejecting the dense algorithm as the production path. The next renderer should
+use the pure-JAX `jax-gs` structure: projected radii, static Gaussian/tile
+interactions, packed tile/depth sorting, tile boundaries, and fixed-size scan
+compositing. A CUDA custom-call implementation can later share that public
+contract.
+
+```bash
+PJRT_PLUGIN_PATH=/path/to/xla_cuda_plugin.so \
+cargo run --release -p rxla-models --example gaussian_splatting_real -- \
+  --splat /path/to/scene.splat --cameras /path/to/cameras.json \
+  --camera 0 --width 160 --gaussians 4096 \
+  --output gaussian-splatting-real.png
+```

@@ -2175,6 +2175,8 @@ dependencies = [
  "rayon",
  "rxla-core",
  "rxla-nn",
+ "serde",
+ "serde_json",
  "snafu",
 ]
 

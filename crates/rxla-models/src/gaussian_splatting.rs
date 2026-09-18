@@ -19,6 +19,7 @@ pub struct GaussianCamera {
     near: f32,
     far: f32,
     covariance_epsilon: f32,
+    alpha_threshold: f32,
 }
 
 impl GaussianCamera {
@@ -33,6 +34,7 @@ impl GaussianCamera {
             near: 1e-2,
             far: 1e4,
             covariance_epsilon: 0.3,
+            alpha_threshold: 1.0 / 255.0,
         }
     }
 
@@ -50,6 +52,12 @@ impl GaussianCamera {
 
     pub fn covariance_epsilon(mut self, epsilon: f32) -> Self {
         self.covariance_epsilon = epsilon;
+        self
+    }
+
+    /// Discard negligible Gaussian tails before compositing.
+    pub fn alpha_threshold(mut self, threshold: f32) -> Self {
+        self.alpha_threshold = threshold;
         self
     }
 }
@@ -118,7 +126,10 @@ pub fn render_gaussians(
         && camera.near > 0.0
         && camera.far > camera.near
         && camera.covariance_epsilon.is_finite()
-        && camera.covariance_epsilon > 0.0;
+        && camera.covariance_epsilon > 0.0
+        && camera.alpha_threshold.is_finite()
+        && camera.alpha_threshold >= 0.0
+        && camera.alpha_threshold < 0.99;
     if !valid {
         return Err(Error::InvalidModel {
             kind: ModelDefinitionError::InvalidGaussianSplattingInput,
@@ -224,8 +235,15 @@ pub fn render_gaussians(
     let alpha = exponent
         .exp()?
         .mul(&broadcast(&opacity)?)?
-        .mul(&broadcast(&depth_mask)?)?
-        .clamp(0.0, 0.99)?;
+        .mul(&broadcast(&depth_mask)?)?;
+    let support = alpha
+        .gt_mask(
+            &alpha
+                .scalar(camera.alpha_threshold)?
+                .broadcast_to(alpha.shape())?,
+        )?
+        .detach()?;
+    let alpha = alpha.mul(&support)?.clamp(0.0, 0.99)?;
 
     let one_minus_alpha = alpha.mul_scalar(-1.0)?.add_scalar(1.0)?;
     let exclusive = one_minus_alpha
