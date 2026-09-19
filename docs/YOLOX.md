@@ -445,8 +445,10 @@ inference StableHLO/ABI fixture; the trainer then resumed the unchanged
 300-epoch run. At update 36,980 (epoch 20), the next periodic evaluation
 reached `AP=0.1654`, `AP50=0.3056`, `AP75=0.1682`, and `AR@100=0.3355` in
 58.0 seconds. The second immutable snapshot and finalized MCAP were published,
-and the paused trainer resumed again. These are intermediate convergence
-points, not the final AP claim.
+and the paused trainer resumed again. At update 55,470 (epoch 30), EMA reached
+`AP=0.1972`, `AP50=0.3501`, `AP75=0.2017`, and `AR@100=0.3678`; evaluation
+took 56.9 seconds and the trainer resumed at update 55,500. These are
+intermediate convergence points, not the final AP claim.
 
 The remaining intentional data-order difference is accepted by the training
 quality contract. Official YOLOX permutes one primary sample per output and
