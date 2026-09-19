@@ -408,6 +408,15 @@ preserving the exact interpolation order and OpenCV byte reference. Two
 400-step runs reached `555.8` and `561.4 images/s` (558.6 average), roughly
 0.9% above the preceding pair average.
 
+Mosaic tile placement now copies the selected RGB rows directly into the
+canvas. The former `crop_imm(...).to_image()` followed by `replace()` allocated
+four temporary images and copied every selected tile twice; those two generic
+image operations accounted for 581 and 612 leaf samples in the steady profile.
+The direct-copy version has a rectangle-level unit test and preserves the same
+coordinates. Two 400-step runs reached `555.5` and `562.0 images/s` (558.8
+average), so the eliminated allocation and memory traffic do not change
+throughput while the host pipeline remains overlapped with the device.
+
 `--random-resize` enables YOLOX's ten-step multi-scale schedule. It selects a
 square 32-pixel multiple in the inclusive `--random-size-min` to
 `--random-size-max` range (official defaults `10..20`), precompiles only the

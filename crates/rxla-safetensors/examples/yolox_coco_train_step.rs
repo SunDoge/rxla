@@ -1080,15 +1080,13 @@ fn prepare_mosaic(
         );
         let [lx1, ly1, lx2, ly2] = large;
         let [sx1, sy1, _, _] = small;
-        let crop = image::imageops::crop_imm(
+        copy_rgb_region(
+            &mut canvas,
             &resized,
-            sx1 as u32,
-            sy1 as u32,
-            (lx2 - lx1) as u32,
-            (ly2 - ly1) as u32,
-        )
-        .to_image();
-        image::imageops::replace(&mut canvas, &crop, i64::from(lx1), i64::from(ly1));
+            [lx1 as u32, ly1 as u32],
+            [sx1 as u32, sy1 as u32],
+            [(lx2 - lx1) as u32, (ly2 - ly1) as u32],
+        );
         let pad_x = (lx1 - sx1) as f32;
         let pad_y = (ly1 - sy1) as f32;
         for (bbox, class) in sample.boxes.iter().zip(&sample.classes) {
@@ -1117,6 +1115,37 @@ fn prepare_mosaic(
     }
     let (pixels, targets) = finish_training_sample(image, transformed, &classes, size, batch, rng)?;
     Ok((ids.join("+"), pixels, targets))
+}
+
+fn copy_rgb_region(
+    destination: &mut RgbImage,
+    source: &RgbImage,
+    [destination_x, destination_y]: [u32; 2],
+    [source_x, source_y]: [u32; 2],
+    [width, height]: [u32; 2],
+) {
+    debug_assert!(destination_x + width <= destination.width());
+    debug_assert!(destination_y + height <= destination.height());
+    debug_assert!(source_x + width <= source.width());
+    debug_assert!(source_y + height <= source.height());
+    let destination_stride = destination.width() as usize * 3;
+    let source_stride = source.width() as usize * 3;
+    let copy_bytes = width as usize * 3;
+    let destination_x = destination_x as usize * 3;
+    let destination_y = destination_y as usize;
+    let source_x = source_x as usize * 3;
+    let source_y = source_y as usize;
+    let source = source.as_raw();
+    destination
+        .as_mut()
+        .chunks_exact_mut(destination_stride)
+        .skip(destination_y)
+        .zip(source.chunks_exact(source_stride).skip(source_y))
+        .take(height as usize)
+        .for_each(|(destination, source)| {
+            destination[destination_x..destination_x + copy_bytes]
+                .copy_from_slice(&source[source_x..source_x + copy_bytes]);
+        });
 }
 
 fn apply_mixup(
@@ -1919,6 +1948,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn rgb_region_copy_writes_only_the_selected_rectangle() {
+        let source = RgbImage::from_fn(3, 2, |x, y| {
+            let value = (y * 3 + x) as u8;
+            Rgb([value, value + 10, value + 20])
+        });
+        let mut destination = RgbImage::from_pixel(4, 3, Rgb([99; 3]));
+        copy_rgb_region(&mut destination, &source, [1, 1], [1, 0], [2, 2]);
+        assert_eq!(destination.get_pixel(1, 1), source.get_pixel(1, 0));
+        assert_eq!(destination.get_pixel(2, 1), source.get_pixel(2, 0));
+        assert_eq!(destination.get_pixel(1, 2), source.get_pixel(1, 1));
+        assert_eq!(destination.get_pixel(2, 2), source.get_pixel(2, 1));
+        assert_eq!(*destination.get_pixel(0, 0), Rgb([99; 3]));
+        assert_eq!(*destination.get_pixel(3, 2), Rgb([99; 3]));
     }
 
     #[test]
