@@ -187,7 +187,7 @@ def pytorch_assignments(
 def pytorch_losses(
     outputs: dict[str, np.ndarray],
     assignments: tuple[np.ndarray, np.ndarray, np.ndarray],
-) -> np.ndarray:
+) -> tuple[np.ndarray, list[np.ndarray]]:
     decoded = []
     raw_boxes = []
     objectness_logits = []
@@ -197,8 +197,10 @@ def pytorch_losses(
     foreground = torch.from_numpy(assignments[1]).reshape(1, -1, 1)
     classes_target = torch.from_numpy(assignments[2]).unsqueeze(0)
     anchor_offset = 0
+    head_tensors = []
     for index, stride in enumerate((8, 16, 32)):
-        raw = torch.from_numpy(outputs[f"head{index}"])
+        raw = torch.tensor(outputs[f"head{index}"], requires_grad=True)
+        head_tensors.append(raw)
         batch, height, width, channels = raw.shape
         flat = raw.reshape(batch, height * width, channels)
         y, x = torch.meshgrid(torch.arange(height), torch.arange(width), indexing="ij")
@@ -252,9 +254,12 @@ def pytorch_losses(
         reduction="sum",
     ) / normalizer
     total = 5.0 * box_loss + objectness_loss + class_loss + l1_loss
-    return torch.stack(
-        [total, box_loss, objectness_loss, class_loss, l1_loss]
-    ).numpy()
+    losses = torch.stack([total, box_loss, objectness_loss, class_loss, l1_loss])
+    total.backward()
+    return (
+        losses.detach().numpy(),
+        [head.grad.detach().numpy() for head in head_tensors],
+    )
 
 
 def main() -> None:
@@ -321,7 +326,9 @@ def main() -> None:
             f"max_abs={maximum:.8g}"
         )
         failed |= not np.array_equal(actual != 0, reference != 0) or maximum > args.atol
-    expected_loss = pytorch_losses(expected_by_name, expected_assignment)
+    expected_loss, expected_gradients = pytorch_losses(
+        expected_by_name, expected_assignment
+    )
     actual_loss = np.fromfile(args.output / "loss.f32", dtype="<f4")
     loss_difference = np.abs(actual_loss - expected_loss)
     print(
@@ -333,6 +340,18 @@ def main() -> None:
         or not np.isfinite(actual_loss).all()
         or float(loss_difference.max()) > args.atol * 5
     )
+    for index, reference in enumerate(expected_gradients):
+        actual = np.fromfile(
+            args.output / f"head{index}_gradient.f32", dtype="<f4"
+        ).reshape(reference.shape)
+        difference = np.abs(actual - reference)
+        maximum = float(difference.max(initial=0.0))
+        mean = float(difference.mean())
+        print(
+            f"gradient=head{index} shape={reference.shape} "
+            f"max_abs={maximum:.8g} mean_abs={mean:.8g}"
+        )
+        failed |= not np.isfinite(difference).all() or maximum > args.atol * 5
     if failed:
         raise SystemExit(f"YOLOX oracle exceeded atol={args.atol}")
 

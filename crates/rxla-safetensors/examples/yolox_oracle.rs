@@ -115,8 +115,9 @@ fn main() -> Result<()> {
          classes: rxla_core::Tensor,
          valid: rxla_core::Tensor,
          l1_weight: rxla_core::Tensor| {
+            let heads = [head0, head1, head2];
             let assignments = yolox_simota(
-                &[head0.clone(), head1.clone(), head2.clone()],
+                &heads,
                 &YoloTargets {
                     boxes,
                     classes,
@@ -125,14 +126,15 @@ fn main() -> Result<()> {
                 YoloSimOtaConfig::default(),
             )?;
             let loss = yolox_loss_with_l1_weight(
-                &[head0, head1, head2],
+                &heads,
                 &assignments,
                 YoloLossConfig::default(),
                 &l1_weight,
             )?;
+            let gradients = loss.total.grad(&heads)?;
             let metrics = rxla_core::Tensor::stack(
                 &[
-                    loss.total,
+                    loss.total.clone(),
                     loss.boxes,
                     loss.objectness,
                     loss.classes,
@@ -145,6 +147,9 @@ fn main() -> Result<()> {
                 assignments.objectness,
                 assignments.classes,
                 metrics,
+                gradients[0].clone(),
+                gradients[1].clone(),
+                gradients[2].clone(),
             ))
         },
     )
@@ -171,7 +176,7 @@ fn main() -> Result<()> {
     let target_classes = client.buffer(&[1, 2, 80], &target_classes)?;
     let valid = client.buffer(&[1, 2, 1], &[1.0_f32, 1.0])?;
     let l1_weight = client.buffer(&[], &[1.0_f32])?;
-    let loss_outputs: [Buffer; 4] = loss_session.run([
+    let loss_outputs: [Buffer; 7] = loss_session.run([
         &outputs[8],
         &outputs[9],
         &outputs[10],
@@ -202,6 +207,12 @@ fn main() -> Result<()> {
         &args.output.join("loss.f32"),
         &loss_outputs[3].to_vec::<f32>()?,
     )?;
+    for (index, gradient) in loss_outputs[4..].iter().enumerate() {
+        write_f32(
+            &args.output.join(format!("head{index}_gradient.f32")),
+            &gradient.to_vec::<f32>()?,
+        )?;
+    }
     println!("output={} size={}", args.output.display(), args.size);
     Ok(())
 }
