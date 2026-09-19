@@ -1037,6 +1037,18 @@ fn apply_batch_norm(
 
     let batch = input.batch_norm_training(3, &weight, &bias, epsilon)?;
     let retain = 1.0 - momentum;
+    let observations = input.shape()[..3].iter().product::<i64>();
+    // StableHLO returns the population variance used to normalize the current
+    // batch. PyTorch stores its Bessel-corrected counterpart in running_var.
+    // Keep a finite fallback for the single-observation case supported by the
+    // underlying primitive.
+    let running_batch_variance = if observations > 1 {
+        batch
+            .variance
+            .mul_scalar(observations as f32 / (observations - 1) as f32)?
+    } else {
+        batch.variance.clone()
+    };
     let next_mean = running_mean
         .read(cx)?
         .mul_scalar(retain)?
@@ -1044,7 +1056,7 @@ fn apply_batch_norm(
     let next_variance = running_variance
         .read(cx)?
         .mul_scalar(retain)?
-        .add(&batch.variance.mul_scalar(momentum)?)?;
+        .add(&running_batch_variance.mul_scalar(momentum)?)?;
     running_mean.write(cx, &next_mean)?;
     running_variance.write(cx, &next_variance)?;
     match layout {

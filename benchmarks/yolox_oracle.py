@@ -19,6 +19,7 @@ class Args(TypedArgs):
     output: Annotated[Path, Arg(help="directory for RXLA raw heads")]
     size: Annotated[int, Arg(help="positive multiple-of-32 input size")] = 64
     atol: Annotated[float, Arg(help="maximum accepted absolute error")] = 5e-5
+    rtol: Annotated[float, Arg(help="training-gradient relative tolerance")] = 2e-3
     yolox_source: Annotated[
         Path, Arg(help="checkout containing the official-compatible fcyolox package")
     ] = Path("/home/me/code/projects/fcyolox/src")
@@ -275,9 +276,14 @@ def pytorch_loss_from_heads(
 def pytorch_model_gradients(
     model: torch.nn.Module,
     size: int,
-    assignments: tuple[np.ndarray, np.ndarray, np.ndarray],
+    loss_assignments: tuple[np.ndarray, np.ndarray, np.ndarray],
     paths: tuple[str, ...],
-) -> dict[str, np.ndarray]:
+) -> tuple[
+    float,
+    tuple[np.ndarray, np.ndarray, np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+]:
     captured: dict[str, list[torch.Tensor]] = {
         "reg": [],
         "obj": [],
@@ -298,11 +304,18 @@ def pytorch_model_gradients(
                 )
             )
 
+    model.train()
     model.zero_grad(set_to_none=True)
     elements = size * size * 3
     nhwc = ((torch.arange(elements, dtype=torch.int64) * 17 + 13) % 256).float()
     nchw = nhwc.reshape(1, size, size, 3).permute(0, 3, 1, 2).contiguous()
-    model(nchw)
+    features = model.backbone(nchw)
+    for index, feature in enumerate(features):
+        stem = model.head.stems[index](feature)
+        regression = model.head.reg_convs[index](stem)
+        model.head.reg_preds[index](regression)
+        model.head.obj_preds[index](regression)
+        model.head.cls_preds[index](model.head.cls_convs[index](stem))
     for handle in handles:
         handle.remove()
     heads = [
@@ -314,7 +327,12 @@ def pytorch_model_gradients(
         .contiguous()
         for index in range(3)
     ]
-    pytorch_loss_from_heads(heads, assignments)[0].backward()
+    detached_heads = {
+        f"head{index}": head.detach().numpy() for index, head in enumerate(heads)
+    }
+    assignments = pytorch_assignments(model, detached_heads)
+    loss = pytorch_loss_from_heads(heads, loss_assignments)[0]
+    loss.backward()
     parameters = dict(model.named_parameters())
     gradients = {}
     for path in paths:
@@ -322,7 +340,16 @@ def pytorch_model_gradients(
         if gradient is None:
             raise RuntimeError(f"parameter did not receive a gradient: {path}")
         gradients[path] = gradient.detach().numpy()
-    return gradients
+    state = model.state_dict()
+    states = {
+        "backbone.backbone.stem.conv.bn.running_mean": state[
+            "backbone.backbone.stem.conv.bn.running_mean"
+        ].numpy(),
+        "backbone.backbone.stem.conv.bn.running_variance": state[
+            "backbone.backbone.stem.conv.bn.running_var"
+        ].numpy(),
+    }
+    return float(loss.detach()), assignments, gradients, states
 
 
 def main() -> None:
@@ -421,9 +448,51 @@ def main() -> None:
         "backbone.backbone.dark5.1.conv2.conv.weight",
         "head.cls_preds.0.weight",
     )
-    expected_model_gradients = pytorch_model_gradients(
-        model, args.size, expected_assignment, model_gradient_paths
+    actual_model_assignment = (
+        np.fromfile(
+            args.output / "model_assignment_boxes.f32", dtype="<f4"
+        ).reshape(anchors, 4),
+        np.fromfile(
+            args.output / "model_assignment_objectness.f32", dtype="<f4"
+        ).reshape(anchors),
+        np.fromfile(
+            args.output / "model_assignment_classes.f32", dtype="<f4"
+        ).reshape(anchors, 80),
     )
+    (
+        expected_model_loss,
+        expected_model_assignment,
+        expected_model_gradients,
+        expected_model_states,
+    ) = pytorch_model_gradients(
+        model, args.size, actual_model_assignment, model_gradient_paths
+    )
+    actual_model_loss = np.fromfile(
+        args.output / "model_training_loss.f32", dtype="<f4"
+    )
+    model_loss_difference = abs(float(actual_model_loss[0]) - expected_model_loss)
+    print(
+        f"model_training_loss actual={float(actual_model_loss[0]):.8g} "
+        f"expected={expected_model_loss:.8g} max_abs={model_loss_difference:.8g}"
+    )
+    failed |= (
+        actual_model_loss.shape != (1,)
+        or not np.isfinite(actual_model_loss).all()
+        or model_loss_difference > args.atol * 5
+    )
+    for name, actual, reference in zip(
+        assignment_names,
+        actual_model_assignment,
+        expected_model_assignment,
+        strict=True,
+    ):
+        difference = np.abs(actual - reference)
+        maximum = float(difference.max(initial=0.0))
+        print(
+            f"model_assignment={name} foreground="
+            f"{int(expected_model_assignment[1].sum())} max_abs={maximum:.8g}"
+        )
+        failed |= not np.array_equal(actual != 0, reference != 0) or maximum > args.atol
     for path, reference in expected_model_gradients.items():
         actual = np.fromfile(
             args.output / f"model_gradient_{path.replace('.', '_')}.f32",
@@ -432,11 +501,26 @@ def main() -> None:
         difference = np.abs(actual - reference)
         maximum = float(difference.max(initial=0.0))
         mean = float(difference.mean())
+        scale = float(np.abs(reference).max(initial=0.0))
+        relative_l2 = float(
+            np.linalg.norm(difference.reshape(-1))
+            / max(np.linalg.norm(reference.reshape(-1)), args.atol)
+        )
         print(
             f"model_gradient={path} shape={reference.shape} "
-            f"max_abs={maximum:.8g} mean_abs={mean:.8g}"
+            f"max_abs={maximum:.8g} mean_abs={mean:.8g} reference_max={scale:.8g} "
+            f"relative_l2={relative_l2:.8g}"
         )
-        failed |= not np.isfinite(difference).all() or maximum > args.atol * 5
+        failed |= not np.isfinite(difference).all() or relative_l2 > args.rtol
+    for path, reference in expected_model_states.items():
+        actual = np.fromfile(
+            args.output / f"model_state_{path.replace('.', '_')}.f32",
+            dtype="<f4",
+        ).reshape(reference.shape)
+        difference = np.abs(actual - reference)
+        maximum = float(difference.max(initial=0.0))
+        print(f"model_state={path} shape={reference.shape} max_abs={maximum:.8g}")
+        failed |= not np.allclose(actual, reference, atol=args.atol, rtol=args.rtol)
     if failed:
         raise SystemExit(f"YOLOX oracle exceeded atol={args.atol}")
 

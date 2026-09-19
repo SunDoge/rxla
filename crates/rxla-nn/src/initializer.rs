@@ -366,4 +366,43 @@ mod tests {
             .unwrap();
         assert_ne!(first, second);
     }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
+    fn training_batch_norm_updates_pytorch_compatible_running_statistics()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let client = unsafe {
+            Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
+        }?;
+        let definition = Model::new(|cx: Cx, input: Tensor| {
+            input.apply(&cx.named_layer("norm", BatchNorm::new().epsilon(1e-3).momentum(0.1))?)
+        })
+        .inputs(crate::ModelInput::new([1, 2, 2, 1]))
+        .training();
+        let (_, model) = definition.trace_resident_all()?;
+        let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+        let program = model.compile_stateful_program(&mut compiler)?;
+        let mut session = model.session(&program).initialize_parameters(0)?.build()?;
+        let input = client.buffer(&[1, 2, 2, 1], &[0.0_f32, 1.0, 2.0, 3.0])?;
+        let outputs = session.run(&[&input])?;
+        let output = outputs[0].to_vec::<f32>()?;
+        let inverse_standard_deviation = (1.25_f32 + 1e-3).sqrt().recip();
+        for (actual, value) in output.iter().zip([0.0_f32, 1.0, 2.0, 3.0]) {
+            let expected = (value - 1.5) * inverse_standard_deviation;
+            assert!((actual - expected).abs() < 1e-5);
+        }
+        let states = model.state_buffers(&session)?;
+        let state = |path| {
+            states
+                .iter()
+                .find(|(candidate, _)| *candidate == path)
+                .expect("declared BatchNorm state")
+                .1
+                .to_vec::<f32>()
+                .expect("F32 state")
+        };
+        assert!((state("norm.running_mean")[0] - 0.15).abs() < 1e-6);
+        assert!((state("norm.running_variance")[0] - 1.066_666_7).abs() < 1e-6);
+        Ok(())
+    }
 }

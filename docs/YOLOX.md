@@ -35,11 +35,15 @@ objectness, and class assignments plus total, IoU, objectness, class, and L1
 losses. On the CUDA 13 PJRT plugin, the largest observed raw-head absolute error
 was `2.10e-5`, the assignments selected the same two foreground anchors, and
 the largest loss error was `4.30e-6`. The largest absolute gradient error over
-all three raw heads was `2.54e-7`. Parameter gradients are checked at the stem,
-immediately before and after the SPP max-pool branches, and at the first class
-predictor. Their largest observed absolute error was `1.67e-5` (default tensor
-tolerance `5e-5`). This full-model comparison runs BatchNorm in inference mode
-so that it isolates model/autodiff parity from training-state semantics.
+all three raw heads was `2.54e-7`. A second graph runs the complete model in
+training mode and checks matcher outputs, loss, selected parameter gradients,
+and BatchNorm state. Gradients are sampled at the stem, immediately before and
+after the SPP max-pool branches, and at the first class predictor. Their largest
+observed relative L2 error was `7.59e-4` (`rtol=2e-3`); the training loss differed
+by `1.44e-5`. The stem running mean and variance differed by at most `9.54e-7`
+and `2.45e-4`, respectively. RXLA applies the same Bessel correction as PyTorch
+when updating running variance while retaining population variance for the
+current batch's normalization.
 
 ## Inference
 

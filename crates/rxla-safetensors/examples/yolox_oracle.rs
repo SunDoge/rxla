@@ -215,9 +215,9 @@ fn main() -> Result<()> {
     }
 
     // The head-gradient oracle above isolates loss and SimOTA semantics. This
-    // second graph differentiates through the actual model, including all three
-    // SPP max-pool branches, and catches backbone/autodiff mismatches that raw
-    // head cotangents cannot observe.
+    // second, training-mode graph differentiates through the actual model,
+    // including BatchNorm and all three SPP max-pool branches, and catches
+    // backbone/autodiff mismatches that raw head cotangents cannot observe.
     const MODEL_GRADIENT_PATHS: [&str; 4] = [
         "backbone.backbone.stem.conv.conv.weight",
         "backbone.backbone.dark5.1.conv1.conv.weight",
@@ -247,7 +247,12 @@ fn main() -> Result<()> {
                 YoloLossConfig::default(),
                 &l1_weight,
             )?;
-            Ok::<_, rxla_models::Error>(loss.total)
+            Ok::<_, rxla_models::Error>((
+                loss.total,
+                assignments.boxes,
+                assignments.objectness,
+                assignments.classes,
+            ))
         },
     )
     .inputs((
@@ -257,7 +262,7 @@ fn main() -> Result<()> {
         ModelInput::new([1, 2, 1]),
         ModelInput::new([]),
     ))
-    .inference();
+    .training();
     let (all_parameters, full_model) = full_definition.trace_resident_all()?;
     let selected =
         all_parameters.matching(|_, parameter| MODEL_GRADIENT_PATHS.contains(&parameter.path()));
@@ -270,17 +275,36 @@ fn main() -> Result<()> {
         .collect::<Vec<_>>();
     let parameter_tensors = full_model.parameter_tensors(&selected)?;
     let gradients = full_model.outputs()[0].grad(&parameter_tensors)?;
-    let full_program = full_model.compile_stateful_tensors(&mut compiler, &gradients)?;
+    let full_outputs = full_model
+        .outputs()
+        .iter()
+        .cloned()
+        .chain(gradients)
+        .collect::<Vec<_>>();
+    let full_program = full_model.compile_stateful_tensors(&mut compiler, &full_outputs)?;
     let full_weights = checkpoint.load_model_schema(&client, full_model.schema())?;
     let mut full_session = full_weights
         .initialize_raw(full_model.session(&full_program))?
         .build()?;
-    let full_gradients =
+    let full_outputs: Vec<Buffer> =
         full_session.run(&[&input, &target_boxes, &target_classes, &valid, &l1_weight])?;
+    write_f32(
+        &args.output.join("model_training_loss.f32"),
+        &full_outputs[0].to_vec::<f32>()?,
+    )?;
+    for (name, value) in ["boxes", "objectness", "classes"]
+        .into_iter()
+        .zip(&full_outputs[1..4])
+    {
+        write_f32(
+            &args.output.join(format!("model_assignment_{name}.f32")),
+            &value.to_vec::<f32>()?,
+        )?;
+    }
     for ((path, expected_path), gradient) in selected_paths
         .iter()
         .zip(MODEL_GRADIENT_PATHS)
-        .zip(&full_gradients)
+        .zip(&full_outputs[4..])
     {
         if path != expected_path {
             return Err(format!(
@@ -293,6 +317,23 @@ fn main() -> Result<()> {
                 .output
                 .join(format!("model_gradient_{}.f32", path.replace('.', "_"))),
             &gradient.to_vec::<f32>()?,
+        )?;
+    }
+    for path in [
+        "backbone.backbone.stem.conv.bn.running_mean",
+        "backbone.backbone.stem.conv.bn.running_variance",
+    ] {
+        let buffer = full_model
+            .state_buffers(&full_session)?
+            .into_iter()
+            .find(|(candidate, _)| *candidate == path)
+            .ok_or_else(|| format!("missing training state {path}"))?
+            .1;
+        write_f32(
+            &args
+                .output
+                .join(format!("model_state_{}.f32", path.replace('.', "_"))),
+            &buffer.to_vec::<f32>()?,
         )?;
     }
     println!("output={} size={}", args.output.display(), args.size);
