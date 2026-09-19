@@ -19,7 +19,7 @@ pub use model_sgd::{
     prepare_model_sgd,
 };
 mod pipeline;
-pub use pipeline::{BoundedPipeline, PipelineError, PipelineResult};
+pub use pipeline::{BoundedPipeline, PipelineError, PipelineResult, ShufflePool};
 mod rl;
 pub use rl::{RlError, RlResult, clipped_policy_gradient_loss, policy_gradient_loss};
 mod yolo;

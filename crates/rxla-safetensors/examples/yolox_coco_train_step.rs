@@ -10,8 +10,8 @@ use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::{SafeTensors, save_model_new};
 use rxla_tfrecord::Reader as TfrecordReader;
 use rxla_train::{
-    BoundedPipeline, DecodedYoloBatch, DetectionTarget, SgdOptions, SimOtaConfig, YoloHead,
-    YoloLrSchedule, apply_model_sgd_with_learning_rate,
+    BoundedPipeline, DecodedYoloBatch, DetectionTarget, SgdOptions, ShufflePool, SimOtaConfig,
+    YoloHead, YoloLrSchedule, apply_model_sgd_with_learning_rate,
 };
 use serde::Deserialize;
 use std::{
@@ -41,6 +41,11 @@ struct Args {
     /// Number of prepared host batches retained ahead of the device.
     #[arg(long, default_value_t = 2)]
     prefetch: usize,
+    /// Number of sequential samples retained for deterministic pool shuffle.
+    #[arg(long, default_value_t = 1024)]
+    shuffle_buffer: usize,
+    #[arg(long, default_value_t = 7)]
+    seed: u64,
     #[arg(long, default_value_t = 0.00015625)]
     learning_rate: f32,
     /// Override warmup duration (default: 5/300 of all steps).
@@ -130,8 +135,10 @@ struct PreparedBatch {
     load_ms: f64,
 }
 
-struct PreparedBatches {
-    source: TrainingSource,
+struct SourceSamples(TrainingSource);
+
+struct PreparedBatches<I> {
+    samples: I,
     remaining: usize,
     batch_size: usize,
     size: u32,
@@ -160,9 +167,10 @@ fn main() -> Result<()> {
         || args.log_every == 0
         || args.batch_size == 0
         || args.prefetch == 0
+        || args.shuffle_buffer == 0
     {
         return Err(
-            "size must be a positive multiple of 32; learning rate must be finite; steps, batch-size, prefetch and log-every must be non-zero"
+            "size must be a positive multiple of 32; learning rate must be finite; steps, batch-size, prefetch, shuffle-buffer and log-every must be non-zero"
                 .into(),
         );
     }
@@ -246,8 +254,9 @@ fn main() -> Result<()> {
     let schedule = YoloLrSchedule::new(args.learning_rate, args.steps)
         .warmup_steps(args.warmup_steps.unwrap_or(args.steps / 60))
         .no_augmentation_steps(args.no_augmentation_steps.unwrap_or(args.steps / 20));
+    let samples = ShufflePool::new(SourceSamples(source), args.shuffle_buffer, args.seed)?;
     let batches = PreparedBatches {
-        source,
+        samples,
         remaining: args.steps,
         batch_size: args.batch_size,
         size: u32::try_from(args.size)?,
@@ -363,7 +372,21 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-impl Iterator for PreparedBatches {
+impl Iterator for SourceSamples {
+    type Item = std::result::Result<DetectionSample, String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0
+            .next_sample()
+            .transpose()
+            .map(|result| result.map_err(|error| error.to_string()))
+    }
+}
+
+impl<I> Iterator for PreparedBatches<I>
+where
+    I: Iterator<Item = std::result::Result<DetectionSample, String>>,
+{
     type Item = std::result::Result<PreparedBatch, String>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -373,9 +396,9 @@ impl Iterator for PreparedBatches {
         let load_started = Instant::now();
         let mut samples = Vec::with_capacity(self.batch_size);
         for _ in 0..self.batch_size {
-            match self.source.next_sample() {
-                Ok(Some(sample)) => samples.push(sample),
-                Ok(None) => {
+            match self.samples.next() {
+                Some(Ok(sample)) => samples.push(sample),
+                None => {
                     self.remaining = 0;
                     return Some(Err(format!(
                         "dataset ended with only {} of {} samples in the next batch",
@@ -383,9 +406,9 @@ impl Iterator for PreparedBatches {
                         self.batch_size
                     )));
                 }
-                Err(error) => {
+                Some(Err(error)) => {
                     self.remaining = 0;
-                    return Some(Err(error.to_string()));
+                    return Some(Err(error));
                 }
             }
         }

@@ -72,13 +72,18 @@ uv run --no-sync python benchmarks/fory_tfrecord.py \
 cargo run -p rxla-safetensors --release --features model \
   --example yolox_coco_train_step -- \
   /path/to/xla_cuda_plugin.so yolox_tiny.safetensors \
-  --size 416 --batch-size 8 --prefetch 2 --steps 100 \
+  --size 416 --batch-size 8 --prefetch 2 --shuffle-buffer 1024 --seed 7 \
+  --steps 100 \
   tfrecord /data/datasets/coco2017-fory-4096.tfrecord
 ```
 
 The training reader requires the adjacent `.tfrecord.json` manifest and checks
 the container, Fory version, and schema hash before reading any records. Each
 TFRecord length and payload CRC32C is then verified while streaming.
+The reader remains sequential; a deterministic bounded pool above the storage
+layer supplies randomized samples without seeking. This is also the sampling
+boundary for compound augmentations: Mosaic will consume four samples from the
+pool, while the final no-augmentation phase consumes one.
 
 ## Verified baseline
 
