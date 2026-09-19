@@ -439,6 +439,53 @@ impl AppliedModel {
             .collect()
     }
 
+    /// Commit selected forward model-state effects only when `update_mask` is
+    /// one.
+    ///
+    /// The model's computation still observes ordinary training-time values;
+    /// this only selects whether the resulting persistent state replaces the
+    /// step-start value. It is useful for gradient accumulation that emulates
+    /// data-parallel local BatchNorm, where every microbatch uses batch
+    /// statistics but a rank advances its running statistics once per global
+    /// optimizer update. The predicate keeps unrelated effects such as RNG
+    /// counters advancing on every microbatch.
+    pub fn gate_model_state_updates_where(
+        &mut self,
+        update_mask: &Tensor,
+        mut should_gate: impl FnMut(&StateSpec) -> bool,
+    ) -> Result<()> {
+        ensure!(
+            update_mask.shape().is_empty() && update_mask.dtype() == DType::F32,
+            InvalidStateUpdateMaskSnafu
+        );
+        let current = self.current_model_state_tensors()?;
+        let selected = self
+            .schema
+            .states()
+            .iter()
+            .zip(
+                self.states
+                    .iter()
+                    .take(self.schema.states().len())
+                    .map(|(_, slot)| slot),
+            )
+            .zip(self.initial_states.iter().zip(current))
+            .filter(|((spec, _), _)| should_gate(spec))
+            .map(|((_, slot), (initial, current))| {
+                Ok((
+                    slot.clone(),
+                    update_mask
+                        .broadcast_to(initial.shape())?
+                        .select(&current, initial)?,
+                ))
+            })
+            .collect::<std::result::Result<Vec<_>, rxla_core::Error>>()?;
+        let (slots, values): (Vec<_>, Vec<_>) = selected.into_iter().unzip();
+        Ok(self
+            .state_graph
+            .write_many(&slots.iter().zip(&values).collect::<Vec<_>>())?)
+    }
+
     /// Resident parameter identities in schema order.
     pub fn resident_parameters(
         &self,

@@ -171,6 +171,8 @@ pub enum Error {
     },
     #[snafu(display("state declaration for {path:?} is incompatible with the schema"))]
     IncompatibleState { path: String },
+    #[snafu(display("model-state update mask must be a scalar F32 tensor"))]
+    InvalidStateUpdateMask,
     #[snafu(display("transform state {path:?} is already declared"))]
     DuplicateTransformState { path: String },
     #[snafu(display("model returned {actual} output buffers, expected {expected}"))]
@@ -1759,6 +1761,81 @@ mod tests {
         let prepared = applied.prepare_stateful().unwrap();
         let (_, slot) = applied.states().next().unwrap();
         assert_eq!(prepared.state_type(slot).unwrap(), (DType::F32, vec![2]));
+    }
+
+    #[test]
+    fn model_state_updates_can_be_gated_by_a_scalar_effect() {
+        let mut applied = Model::new(|cx: Cx, mask: Tensor| -> Result<_> {
+            let steps = cx.state("steps", [], DType::F32)?;
+            steps.add_(&cx, &cx.constant(&[], &[1.0])?)?;
+            Ok(mask)
+        })
+        .inputs(ModelInput::new([]))
+        .trace()
+        .unwrap();
+        let mask = applied.outputs()[0].clone();
+        applied
+            .gate_model_state_updates_where(&mask, |_| true)
+            .unwrap();
+
+        let prepared = applied.prepare_stateful().unwrap();
+        let stablehlo = std::str::from_utf8(prepared.lowered_program().code()).unwrap();
+        assert!(stablehlo.contains("stablehlo.select"));
+        assert!(matches!(
+            applied.gate_model_state_updates_where(&mask.broadcast_to([1]).unwrap(), |_| true),
+            Err(Error::InvalidStateUpdateMask)
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
+    fn gated_model_state_only_commits_on_selected_invocations() {
+        let client = unsafe {
+            Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
+        }
+        .unwrap();
+        let mut applied = Model::new(|cx: Cx, mask: Tensor| -> Result<_> {
+            let steps = cx.state("steps", [], DType::F32)?;
+            steps.add_(&cx, &cx.constant(&[], &[1.0])?)?;
+            Ok(mask)
+        })
+        .inputs(ModelInput::new([]))
+        .trace()
+        .unwrap();
+        let mask = applied.outputs()[0].clone();
+        applied
+            .gate_model_state_updates_where(&mask, |_| true)
+            .unwrap();
+        let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+        let program = applied.compile_stateful_program(&mut compiler).unwrap();
+        let initial = client.buffer(&[], &[5.0_f32]).unwrap();
+        let mut session = applied
+            .session(&program)
+            .state("steps", initial)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let disabled = client.buffer(&[], &[0.0_f32]).unwrap();
+        let _ = session.run(&[&disabled]).unwrap();
+        assert_eq!(
+            session
+                .state(applied.states().next().unwrap().1)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap(),
+            [5.0]
+        );
+        let enabled = client.buffer(&[], &[1.0_f32]).unwrap();
+        let _ = session.run(&[&enabled]).unwrap();
+        assert_eq!(
+            session
+                .state(applied.states().next().unwrap().1)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap(),
+            [6.0]
+        );
     }
 
     #[test]

@@ -472,6 +472,11 @@ fn build_training_variant(
             options,
         )?)
     };
+    if let Some(accumulation) = &accumulation {
+        model.gate_model_state_updates_where(accumulation.applied(), |state| {
+            state.path().ends_with(".running_mean") || state.path().ends_with(".running_variance")
+        })?;
+    }
     let ema = if use_ema {
         Some(if let Some(accumulation) = &accumulation {
             apply_model_ema_when(&mut model, &trainable, 0.9998, accumulation.applied())?

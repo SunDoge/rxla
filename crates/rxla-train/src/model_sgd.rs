@@ -370,7 +370,10 @@ pub fn apply_model_sgd_with_learning_rate(
 ///
 /// Weight decay, momentum, Nesterov, and the learning rate are applied only on
 /// a completed optimizer step, matching the usual `loss / accumulation_steps`
-/// PyTorch recipe. Model state such as BatchNorm still advances per microbatch.
+/// PyTorch recipe. Callers emulating data-parallel local BatchNorm can pass
+/// [`ModelSgdAccumulation::applied`] to
+/// [`rxla_nn::AppliedModel::gate_model_state_updates_where`] so persistent running
+/// statistics advance only at optimizer boundaries.
 pub fn apply_model_sgd_accumulating_with_learning_rate(
     model: &mut AppliedModel,
     selection: &ParameterSelection,

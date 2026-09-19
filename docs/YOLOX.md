@@ -146,10 +146,14 @@ approximation. Each microbatch adds to resident F32 gradient buffers. Only the
 last microbatch divides the sum by `--gradient-accumulation`, applies weight
 decay and Nesterov momentum, updates parameters, and advances model EMA. The
 learning-rate schedule, random-size schedule, `--steps`, `--run-steps`, and
-checkpoint `completed_steps` therefore count optimizer updates. BatchNorm state
-still advances on each physical microbatch, matching ordinary local-batch
-training. Resumable snapshots include the accumulation counter and buffers and
-are written only at optimizer-step boundaries.
+checkpoint `completed_steps` therefore count optimizer updates. Every
+microbatch uses its own training-time BatchNorm statistics for forward and
+backward, as on one local rank of the official distributed run. Persistent
+running mean and variance are committed only on the final microbatch, so batch
+8 accumulated eight ways advances them once per global update rather than
+silently applying momentum eight times. Resumable snapshots include the
+accumulation counter and buffers and are written only at optimizer-step
+boundaries.
 
 The initial checkpoint is optional. Omitting both the positional weights path
 and `--resume` initializes every parameter from the model schema, including
