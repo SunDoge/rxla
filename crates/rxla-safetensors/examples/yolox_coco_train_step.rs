@@ -1342,32 +1342,42 @@ fn adjust_hsv_pixel(
     opencv_hsv_to_rgb([hue, saturation, value])
 }
 
+const HSV_SHIFT: i32 = 12;
+const HSV_ROUND: i32 = 1 << (HSV_SHIFT - 1);
+const HSV_SATURATION_DIVISORS: [i32; 256] = hsv_divisors(255, 1);
+const HSV_HUE_DIVISORS: [i32; 256] = hsv_divisors(180, 6);
+
+const fn hsv_divisors(numerator: i32, denominator_scale: i32) -> [i32; 256] {
+    let mut table = [0; 256];
+    let mut value = 1;
+    while value < 256 {
+        let denominator = denominator_scale * value as i32;
+        table[value] = ((numerator << HSV_SHIFT) + denominator / 2) / denominator;
+        value += 1;
+    }
+    table
+}
+
 fn rgb_to_opencv_hsv([red, green, blue]: [u8; 3]) -> [f32; 3] {
-    let red = f32::from(red);
-    let green = f32::from(green);
-    let blue = f32::from(blue);
+    let red = i32::from(red);
+    let green = i32::from(green);
+    let blue = i32::from(blue);
     let maximum = red.max(green).max(blue);
     let minimum = red.min(green).min(blue);
     let delta = maximum - minimum;
-    let hue = if delta == 0.0 {
-        0.0
-    } else if maximum == red {
-        let sector = (green - blue) / delta;
-        30.0 * if sector < 0.0 { sector + 6.0 } else { sector }
+    let saturation = (delta * HSV_SATURATION_DIVISORS[maximum as usize] + HSV_ROUND) >> HSV_SHIFT;
+    let hue_base = if maximum == red {
+        green - blue
     } else if maximum == green {
-        30.0 * ((blue - red) / delta + 2.0)
+        blue - red + 2 * delta
     } else {
-        30.0 * ((red - green) / delta + 4.0)
+        red - green + 4 * delta
     };
-    [
-        hue,
-        if maximum == 0.0 {
-            0.0
-        } else {
-            delta / maximum * 255.0
-        },
-        maximum,
-    ]
+    let mut hue = (hue_base * HSV_HUE_DIVISORS[delta as usize] + HSV_ROUND) >> HSV_SHIFT;
+    if hue < 0 {
+        hue += 180;
+    }
+    [hue as f32, saturation as f32, maximum as f32]
 }
 
 fn opencv_hsv_to_rgb([hue, saturation, value]: [f32; 3]) -> [u8; 3] {

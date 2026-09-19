@@ -352,6 +352,16 @@ images/s`, versus `531.6` and `534.1 images/s` for the SIMD-resize baseline,
 about 2.8% higher by pair average. JPEG entropy decoding is now the largest
 sampled host hotspot.
 
+RGB-to-HSV now also uses OpenCV's 12-bit fixed-point divisor tables and
+rounding rules rather than an approximate floating-point conversion. Against
+OpenCV 5.0, one million seeded random RGB pixels matched all three HSV bytes
+exactly; the former implementation matched only 97.38% after rounding and had
+a hue wraparound outlier. The remaining float HSV-to-RGB path matched 99.20%
+of full adjusted RGB pixels exactly and every tested channel within one byte.
+Two 400-step end-to-end runs reached `560.7` and `554.2 images/s`, statistically
+unchanged from the prior 558.6 average, so this is retained as an official
+augmentation-semantics correction rather than a speed claim.
+
 Replacing the decoder was measured before adding another dependency. The
 current `image` feature set already selects `zune-jpeg 0.5.15` with its x86
 SIMD implementation. On 512 real COCO train JPEGs, three warm-cache sequential
