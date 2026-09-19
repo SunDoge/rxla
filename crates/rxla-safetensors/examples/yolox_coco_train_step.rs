@@ -341,6 +341,7 @@ fn training_sizes(
 fn build_training_variant(
     compiler: &mut Compiler,
     batch: i64,
+    augmentation_size: i64,
     size: i64,
     target_capacity: i64,
     config: YoloConfig,
@@ -354,7 +355,12 @@ fn build_training_variant(
               target_valid: Tensor,
               learning_rate: Tensor,
               l1_weight: Tensor| {
-            let image = image.cast(DType::F32)?;
+            let mut image = image.cast(DType::F32)?;
+            let mut target_boxes = target_boxes;
+            if size != augmentation_size {
+                image = image.resize_bilinear2d([size, size])?;
+                target_boxes = target_boxes.mul_scalar(size as f32 / augmentation_size as f32)?;
+            }
             let outputs = yolo(cx, &image, &config)?;
             let targets = YoloTargets {
                 boxes: target_boxes,
@@ -381,7 +387,7 @@ fn build_training_variant(
         },
     )
     .inputs((
-        ModelInput::new([batch, size, size, 3]).with_dtype(DType::U8),
+        ModelInput::new([batch, augmentation_size, augmentation_size, 3]).with_dtype(DType::U8),
         ModelInput::new([batch, target_capacity, 4]),
         ModelInput::new([batch, target_capacity, 1]).with_dtype(DType::I32),
         ModelInput::new([batch, target_capacity, 1]),
@@ -426,7 +432,7 @@ fn training_metadata(
     completed_steps: usize,
 ) -> HashMap<String, String> {
     [
-        ("format", "rxla-yolox-training-v1".to_owned()),
+        ("format", "rxla-yolox-training-v2".to_owned()),
         ("completed_steps", completed_steps.to_string()),
         ("total_steps", args.steps.to_string()),
         ("batch_size", args.batch_size.to_string()),
@@ -581,10 +587,11 @@ fn main() -> Result<()> {
     let replay_ms = replay_started.elapsed().as_secs_f64() * 1e3;
     // Host input preparation starts before XLA compilation so initial pool fill
     // and the first augmented batches are normally hidden by compilation.
+    let augmentation_size = u32::try_from(args.size)?;
     let pipeline = BoundedPipeline::from_iter(args.prefetch, batches)?.map_parallel_ordered(
         args.prefetch,
         args.augmentation_workers,
-        |batch| prepare_batch(batch.groups, batch.size),
+        move |batch| prepare_batch(batch.groups, augmentation_size, batch.size),
     )?;
     let batch = i64::try_from(args.batch_size)?;
     let client = unsafe { Client::load(&args.plugin) }?;
@@ -634,6 +641,7 @@ fn main() -> Result<()> {
         let variant = build_training_variant(
             &mut compiler,
             batch,
+            args.size,
             i64::from(size),
             i64::try_from(args.target_capacity)?,
             training_config,
@@ -702,7 +710,7 @@ fn main() -> Result<()> {
                 .build()?;
             current_size = size;
         }
-        let input = client.buffer(&[batch, i64::from(size), i64::from(size), 3], &pixels)?;
+        let input = client.buffer(&[batch, args.size, args.size, 3], &pixels)?;
         let step_learning_rate = schedule.at(completed)?;
         let learning_rate = client.buffer(&[], &[step_learning_rate])?;
         let l1_weight_value = if no_augmentation_steps != 0
@@ -942,7 +950,8 @@ where
 
 fn prepare_batch(
     groups: Vec<AugmentationGroup>,
-    size: u32,
+    augmentation_size: u32,
+    model_size: u32,
 ) -> std::result::Result<PreparedBatch, String> {
     let load_started = Instant::now();
     let prepared = groups
@@ -955,17 +964,18 @@ fn prepare_batch(
                 rng,
             } = group;
             if samples.len() == 4 {
-                prepare_mosaic(samples, mixup, size, batch_index, rng)
+                prepare_mosaic(samples, mixup, augmentation_size, batch_index, rng)
             } else {
                 let sample = samples
                     .into_iter()
                     .next()
                     .ok_or_else(|| "empty augmentation sample group".to_owned())?;
-                prepare_single(sample, size, batch_index, rng)
+                prepare_single(sample, augmentation_size, batch_index, rng)
             }
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
-    let mut pixels = Vec::with_capacity(prepared.len() * (size * size * 3) as usize);
+    let mut pixels =
+        Vec::with_capacity(prepared.len() * (augmentation_size * augmentation_size * 3) as usize);
     let mut targets = Vec::new();
     let mut sample_ids = Vec::with_capacity(prepared.len());
     for (id, sample_pixels, sample_targets) in prepared {
@@ -977,7 +987,7 @@ fn prepare_batch(
         sample_ids,
         pixels,
         targets,
-        size,
+        size: model_size,
         load_ms: load_started.elapsed().as_secs_f64() * 1e3,
     })
 }
@@ -1843,6 +1853,33 @@ mod tests {
                 .all(|&size| size % 32 == 0 && (320..=640).contains(&size))
         );
         assert_eq!(training_sizes(416, 31, 7, false, 10, 20), vec![416; 31]);
+    }
+
+    #[test]
+    fn random_resize_keeps_host_augmentation_at_the_base_size() {
+        let image = RgbImage::from_pixel(4, 2, Rgb([10, 20, 30]));
+        let mut encoded_image = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut encoded_image)
+            .encode_image(&image)
+            .unwrap();
+        let prepared = prepare_batch(
+            vec![AugmentationGroup {
+                samples: vec![DetectionSample {
+                    id: "sample".to_owned(),
+                    encoded_image,
+                    dimensions: Some([4, 2]),
+                    boxes: Vec::new(),
+                    classes: Vec::new(),
+                }],
+                mixup: None,
+                rng: DataRng::new(3).sample(0, 0),
+            }],
+            8,
+            12,
+        )
+        .unwrap();
+        assert_eq!(prepared.pixels.len(), 8 * 8 * 3);
+        assert_eq!(prepared.size, 12);
     }
 
     #[test]

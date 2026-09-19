@@ -127,7 +127,7 @@ cargo run -p rxla-safetensors --release --features model \
   --example yolox_coco_train_step -- \
   /path/to/xla_cuda_plugin.so yolox_tiny.safetensors \
   --compute-dtype bf16 \
-  --size 416 --batch-size 8 --prefetch 16 --augmentation-workers 16 \
+  --size 416 --batch-size 8 \
   --shuffle-buffer 1024 --seed 7 \
   --steps 100 \
   tfrecord /data/datasets/coco2017-fory-4096.tfrecord
@@ -309,15 +309,24 @@ overrides for memory-constrained hosts.
 square 32-pixel multiple in the inclusive `--random-size-min` to
 `--random-size-max` range (official defaults `10..20`), precompiles only the
 unique static sizes that this run will use, and switches at ten-step
-boundaries. Parameter, BatchNorm, momentum, EMA, and counter buffers migrate
-between the size-specialized programs on the same PJRT client without a host
-tensor round-trip. A real CUDA/COCO check trained ten steps at 64×64, migrated
-to 96×96, and completed the eleventh update with finite loss. That step also
-verified the official empty-match behavior: after augmentation removed every
-box, SimOTA produced zero foreground and the normalized objectness-only loss
-continued instead of treating the batch as an error. Multi-scale remains
-opt-in because compiling several static XLA programs is expensive; two tiny
-size variants took 43.4 seconds in this check. Building the example with
+boundaries. As in the official trainer, Mosaic, affine, HSV, and flip remain at
+the base `--size`; the selected variant then performs PyTorch-compatible
+half-pixel bilinear resize in the device graph and scales target coordinates by
+the same ratio. This keeps a sampled augmentation independent of the current
+network size, unlike the former implementation that regenerated augmentation
+directly at each selected size. Parameter, BatchNorm, momentum, EMA, and
+counter buffers migrate between the size-specialized programs on the same PJRT
+client without a host tensor round-trip. A real CUDA/COCO check trained ten
+steps at 64×64, migrated the device input to 96×96, and completed the eleventh
+update with finite loss and 21 foreground anchors. The training snapshot marker
+is `rxla-yolox-training-v2`; v1 snapshots predate these exact multi-scale replay
+semantics and are rejected instead of silently resuming a different data
+stream. A separate real check verified the official empty-match behavior:
+after augmentation removed every box, SimOTA produced zero foreground and the
+normalized objectness-only loss continued instead of treating the batch as an
+error. Multi-scale remains opt-in because compiling several static XLA
+programs is expensive; two tiny size variants took 43.7 seconds in this check.
+Building the example with
 `--features model,disk-cache` and passing a trusted `--compile-cache DIR`
 persists PJRT-native executables per exact StableHLO/shape. In a fresh-process
 two-size test, the first run compiled both programs in `43.762 s`; the second
@@ -377,10 +386,10 @@ concurrently, while a bounded reorder buffer preserves the exact seeded sample
 order. On the same 100-step workload, 16 augmentation workers with 16 prefetched
 batches raised end-to-end throughput from 305.6 to 513.6 images/s. Final
 measurements for 1, 2, 4, 8, 16, and 24 workers were respectively 339.7, about
-417, 429.1, 480.4, 513.6, and 497.7 images/s. The example therefore defaults to
-two thirds of the available host parallelism for both values (16 on this
-24-thread host), while retaining explicit overrides. The prepared sample IDs
-remained identical across every run.
+417, 429.1, 480.4, 513.6, and 497.7 images/s. Those measurements predated the
+parallel pixel transforms, which made high outer concurrency redundant; the
+current four-worker/deeper-prefetch defaults and their paired measurements are
+documented above. The prepared sample IDs remained identical across every run.
 
 BF16 XLA autotune logs also confirm that forward and weight-gradient
 convolutions remain BF16, while input gradients are represented as
