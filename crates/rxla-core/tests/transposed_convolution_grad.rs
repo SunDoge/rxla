@@ -18,6 +18,7 @@ fn real_transposed_convolution_gradients_match_scalar_scatter() {
                 padding: [[1, 0], [0, 2]],
                 dilation: [2, 1],
                 output_padding: [1, 2],
+                groups: 1,
             },
         ),
         (
@@ -26,6 +27,16 @@ fn real_transposed_convolution_gradients_match_scalar_scatter() {
             ConvTranspose2dOptions {
                 strides: [3, 2],
                 output_padding: [2, 1],
+                ..Default::default()
+            },
+        ),
+        (
+            [1, 2, 3, 4],
+            [2, 2, 6, 2],
+            ConvTranspose2dOptions {
+                strides: [2, 1],
+                padding: [[1, 0], [0, 1]],
+                groups: 2,
                 ..Default::default()
             },
         ),
@@ -61,6 +72,8 @@ fn real_transposed_convolution_gradients_match_scalar_scatter() {
             let mut dw = vec![0.0_f64; wn];
             let [n, h, width, ci] = shape;
             let [kh, kw, co, _] = kernel_shape;
+            let input_per_group = ci / options.groups;
+            let output_per_group = co / options.groups;
             let oh = output_shape[1];
             let ow = output_shape[2];
             for batch in 0..n {
@@ -68,6 +81,7 @@ fn real_transposed_convolution_gradients_match_scalar_scatter() {
                     for col in 0..width {
                         for ic in 0..ci {
                             let input = (((batch * h + row) * width + col) * ci + ic) as usize;
+                            let group = ic / input_per_group;
                             for kr in 0..kh {
                                 for kc in 0..kw {
                                     let out_h = row * options.strides[0] + kr * options.dilation[0]
@@ -77,11 +91,14 @@ fn real_transposed_convolution_gradients_match_scalar_scatter() {
                                     if out_h < 0 || out_h >= oh || out_w < 0 || out_w >= ow {
                                         continue;
                                     }
-                                    for oc in 0..co {
+                                    for oc in
+                                        group * output_per_group..(group + 1) * output_per_group
+                                    {
                                         let output = (((batch * oh + out_h) * ow + out_w) * co + oc)
                                             as usize;
-                                        let kernel =
-                                            (((kr * kw + kc) * co + oc) * ci + ic) as usize;
+                                        let kernel = (((kr * kw + kc) * co + oc) * input_per_group
+                                            + ic % input_per_group)
+                                            as usize;
                                         expected_y[output] +=
                                             f64::from(values[input]) * f64::from(weights[kernel]);
                                         dx[input] +=

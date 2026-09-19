@@ -254,6 +254,7 @@ impl Importer<'_> {
                 padding,
                 dilation: cast2(conv.config.dilation),
                 output_padding: cast2(conv.config.padding_out),
+                groups: 1,
             }),
             &[ids[0], weight],
             result,

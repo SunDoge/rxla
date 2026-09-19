@@ -205,6 +205,7 @@ fn lower(node: &Node, input: &[Tensor]) -> Result<Tensor> {
                             dilation,
                             padding: pads,
                             output_padding: [0, 0],
+                            groups: 1,
                         },
                     )?
                 }

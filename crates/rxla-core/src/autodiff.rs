@@ -527,11 +527,7 @@ impl Tensor {
                     let source = value(node.operands[1]);
                     add(
                         0,
-                        self.graph().node(
-                            Op::Conv2dInputGradient(*options),
-                            vec![source.node_id(), dy.node_id()],
-                            input.shape(),
-                        )?,
+                        conv2d_input_gradient(&source, &dy, input.shape(), *options)?,
                     );
                     add(1, input.conv2d(&dy, *options)?);
                 }
@@ -553,21 +549,24 @@ impl Tensor {
                         );
                     } else {
                         // <transpose_conv(x,k),dy> = <x,conv(dy,k)>.
-                        // HWOI for transpose_conv is HWIO for this paired conv.
-                        let options = Conv2dOptions {
+                        // Grouped HWOI must be rearranged to grouped HWIO for
+                        // this paired forward convolution.
+                        let forward_kernel = transpose_kernel_as_forward(&kernel, options.groups)?;
+                        let conv_options = Conv2dOptions {
                             strides: options.strides,
                             padding: options.padding,
                             dilation: options.dilation,
-                            groups: 1,
+                            groups: options.groups,
                         };
-                        add(0, dy.conv2d(&kernel, options)?);
+                        add(0, dy.conv2d(&forward_kernel, conv_options)?);
+                        let forward_gradient = self.graph().node(
+                            Op::Conv2dKernelGradient(conv_options),
+                            vec![dy.node_id(), input.node_id()],
+                            forward_kernel.shape(),
+                        )?;
                         add(
                             1,
-                            self.graph().node(
-                                Op::Conv2dKernelGradient(options),
-                                vec![dy.node_id(), input.node_id()],
-                                kernel.shape(),
-                            )?,
+                            forward_kernel_as_transpose(&forward_gradient, options.groups)?,
                         );
                     }
                 }
@@ -706,37 +705,40 @@ impl Tensor {
     }
 }
 
+fn transpose_kernel_as_forward(kernel: &Tensor, groups: i64) -> Result<Tensor> {
+    if groups == 1 {
+        return Ok(kernel.clone());
+    }
+    let [kh, kw, output_channels, input_per_group] = kernel.shape() else {
+        unreachable!("validated transposed-convolution kernel is rank four")
+    };
+    let output_per_group = output_channels / groups;
+    kernel
+        .reshape([*kh, *kw, groups, output_per_group, *input_per_group])?
+        .transpose([0, 1, 3, 2, 4])?
+        .reshape([*kh, *kw, output_per_group, groups * input_per_group])
+}
+
+fn forward_kernel_as_transpose(kernel: &Tensor, groups: i64) -> Result<Tensor> {
+    if groups == 1 {
+        return Ok(kernel.clone());
+    }
+    let [kh, kw, output_per_group, input_channels] = kernel.shape() else {
+        unreachable!("validated convolution kernel is rank four")
+    };
+    let input_per_group = input_channels / groups;
+    kernel
+        .reshape([*kh, *kw, *output_per_group, groups, input_per_group])?
+        .transpose([0, 1, 3, 2, 4])?
+        .reshape([*kh, *kw, groups * output_per_group, input_per_group])
+}
+
 fn conv2d_input_gradient(
     output_gradient: &Tensor,
     kernel: &Tensor,
     input_shape: &[i64],
     options: Conv2dOptions,
 ) -> Result<Tensor> {
-    if options.groups > 1 {
-        let output_channels = output_gradient.shape()[3] / options.groups;
-        let input_channels = input_shape[3] / options.groups;
-        let mut gradients = Vec::with_capacity(options.groups as usize);
-        for group in 0..options.groups {
-            let group_output =
-                output_gradient.narrow(3, group * output_channels, output_channels)?;
-            let group_kernel = kernel.narrow(3, group * output_channels, output_channels)?;
-            let mut group_options = options;
-            group_options.groups = 1;
-            let group_shape = [
-                input_shape[0],
-                input_shape[1],
-                input_shape[2],
-                input_channels,
-            ];
-            gradients.push(conv2d_input_gradient(
-                &group_output,
-                &group_kernel,
-                &group_shape,
-                group_options,
-            )?);
-        }
-        return Tensor::concatenate(&gradients, 3);
-    }
     let mut output_padding = [0; 2];
     for axis in 0..2 {
         let effective = (kernel.shape()[axis] - 1) * options.dilation[axis] + 1;
@@ -745,13 +747,30 @@ fn conv2d_input_gradient(
             - options.padding[axis][1];
         output_padding[axis] = input_shape[axis + 1] - base;
     }
+    // Forward grouped HWIO is [K,K,Cin/G,Cout]. StableHLO grouped transpose
+    // convolution expects HWOI [K,K,Cin,Cout/G], with groups contiguous in
+    // both feature dimensions. This is metadata movement around one native
+    // grouped convolution, not one convolution per group.
+    let kernel = if options.groups == 1 {
+        kernel.clone()
+    } else {
+        let [kh, kw, input_per_group, output_channels] = kernel.shape() else {
+            unreachable!("validated convolution kernel is rank four")
+        };
+        let output_per_group = output_channels / options.groups;
+        kernel
+            .reshape([*kh, *kw, *input_per_group, options.groups, output_per_group])?
+            .transpose([0, 1, 3, 2, 4])?
+            .reshape([*kh, *kw, input_shape[3], output_per_group])?
+    };
     output_gradient.conv_transpose2d(
-        kernel,
+        &kernel,
         ConvTranspose2dOptions {
             strides: options.strides,
             padding: options.padding,
             dilation: options.dilation,
             output_padding,
+            groups: options.groups,
         },
     )
 }

@@ -85,7 +85,7 @@ impl Default for Conv2dOptions {
     }
 }
 
-/// Ungrouped NHWC transposed convolution with HWOI weights.
+/// NHWC transposed convolution with HWOI weights.
 #[derive(Clone, Copy, Debug)]
 pub struct ConvTranspose2dOptions {
     pub strides: [i64; 2],
@@ -94,6 +94,8 @@ pub struct ConvTranspose2dOptions {
     pub dilation: [i64; 2],
     /// Additional high-end output extent; each value is below its stride.
     pub output_padding: [i64; 2],
+    /// Number of independent feature groups.
+    pub groups: i64,
 }
 
 impl Default for ConvTranspose2dOptions {
@@ -103,6 +105,7 @@ impl Default for ConvTranspose2dOptions {
             padding: [[0, 0]; 2],
             dilation: [1, 1],
             output_padding: [0, 0],
+            groups: 1,
         }
     }
 }

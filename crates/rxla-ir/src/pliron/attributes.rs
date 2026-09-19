@@ -36,7 +36,7 @@ verify_multiple_bytes!(ShapeAttr, 8, "shape");
 verify_multiple_bytes!(DynamicBoundsAttr, 8, "dynamic bounds");
 verify_exact_bytes!(ElementTypeAttr, 4, "element type");
 verify_exact_bytes!(Conv2dOptionsAttr, 72, "conv2d options");
-verify_exact_bytes!(ConvTranspose2dOptionsAttr, 80, "conv transpose options");
+verify_exact_bytes!(ConvTranspose2dOptionsAttr, 88, "conv transpose options");
 verify_exact_bytes!(Pool2dOptionsAttr, 64, "pool2d options");
 verify_multiple_bytes!(AxesAttr, 8, "axes");
 verify_exact_bytes!(AxisAttr, 8, "axis");
@@ -460,6 +460,7 @@ impl ConvTranspose2dOptionsAttr {
             options.dilation[1],
             options.output_padding[0],
             options.output_padding[1],
+            options.groups,
         ];
         Self {
             bytes: BytesAttr::new(values.into_iter().flat_map(i64::to_le_bytes).collect()),
@@ -469,7 +470,7 @@ impl ConvTranspose2dOptionsAttr {
     pub(super) fn options(&self) -> ConvTranspose2dOptions {
         let (values, remainder) = self.bytes.as_ref().as_chunks::<8>();
         assert!(
-            remainder.is_empty() && values.len() == 10,
+            remainder.is_empty() && values.len() == 11,
             "malformed conv_transpose2d options"
         );
         let value = |index| i64::from_le_bytes(values[index]);
@@ -478,6 +479,7 @@ impl ConvTranspose2dOptionsAttr {
             padding: [[value(2), value(3)], [value(4), value(5)]],
             dilation: [value(6), value(7)],
             output_padding: [value(8), value(9)],
+            groups: value(10),
         }
     }
 }

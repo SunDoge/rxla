@@ -55,12 +55,13 @@ pub(super) fn emit_convolution(emission: &mut OperationEmission<'_>) -> Result<b
         );
         writeln!(
             emission.body,
-            "    {} = stablehlo.convolution({}, {}) dim_numbers = [b, 0, 1, f]x[0, 1, o, i]->[b, 0, 1, f], window = {{stride = [1, 1], pad = [{padding}], lhs_dilate = [{}], rhs_dilate = [{}], reverse = [true, true]}} {{batch_group_count = 1 : i64, feature_group_count = 1 : i64, precision_config = [#stablehlo<precision HIGHEST>, #stablehlo<precision HIGHEST>]}} : ({lhs_type}, {rhs_type}) -> {}",
+            "    {} = stablehlo.convolution({}, {}) dim_numbers = [b, 0, 1, f]x[0, 1, o, i]->[b, 0, 1, f], window = {{stride = [1, 1], pad = [{padding}], lhs_dilate = [{}], rhs_dilate = [{}], reverse = [true, true]}} {{batch_group_count = 1 : i64, feature_group_count = {} : i64, precision_config = [#stablehlo<precision HIGHEST>, #stablehlo<precision HIGHEST>]}} : ({lhs_type}, {rhs_type}) -> {}",
             emission.name,
             emission.operands[0],
             emission.operands[1],
             pair(options.strides),
             pair(options.dilation),
+            options.groups,
             emission.ty,
         )
         .unwrap();

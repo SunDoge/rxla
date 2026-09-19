@@ -1109,7 +1109,10 @@ impl Verify for ConvTranspose2dOp {
         }
         if input.dims[0] != result.dims[0]
             || input.bound(0) != result.bound(0)
-            || input.dims[3] != kernel.dims[3]
+            || options.groups <= 0
+            || input.dims[3] % options.groups != 0
+            || input.dims[3] / options.groups != kernel.dims[3]
+            || kernel.dims[2] % options.groups != 0
             || kernel.dims[2] != result.dims[3]
         {
             return pliron::verify_err_noloc!(

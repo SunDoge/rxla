@@ -2,10 +2,10 @@ use super::*;
 
 impl Tensor {
     /// Scatter each input pixel through a spatial kernel: input `[N,H,W,Cin]`,
-    /// weight `[Kh,Kw,Cout,Cin]`, result `[N,Oh,Ow,Cout]`. Bias is separate.
+    /// weight `[Kh,Kw,Cout,Cin/groups]`, result `[N,Oh,Ow,Cout]`. Bias is separate.
     /// Output size is `(input-1)*stride + (kernel-1)*dilation + 1 - padding_low - padding_high + output_padding`.
-    /// Spatial input/output sizes must be positive. Groups and explicit
-    /// output-shape overrides are unsupported.
+    /// Spatial input/output sizes must be positive. Explicit output-shape
+    /// overrides are unsupported.
     /// Reverse-mode supports input and kernel gradients, including output_padding.
     /// Generated convolution adjoints also support reverse-mode composition.
     pub fn conv_transpose2d(&self, kernel: &Self, options: ConvTranspose2dOptions) -> Result<Self> {
@@ -17,7 +17,13 @@ impl Tensor {
         }
         let x = &self.shape;
         let k = &kernel.shape;
-        if x[1..].iter().any(|&v| v <= 0) || k.iter().any(|&v| v <= 0) || x[3] != k[3] {
+        if options.groups <= 0
+            || x[1..].iter().any(|&v| v <= 0)
+            || k.iter().any(|&v| v <= 0)
+            || x[3] % options.groups != 0
+            || x[3] / options.groups != k[3]
+            || k[2] % options.groups != 0
+        {
             return Err(err("invalid transposed convolution channels or dimensions"));
         }
         let mut output = vec![x[0]];

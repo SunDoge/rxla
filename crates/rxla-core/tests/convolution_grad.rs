@@ -29,6 +29,16 @@ fn real_convolution_both_gradients_match_independent_scalar_loops() {
                 ..Default::default()
             },
         ),
+        (
+            [1, 4, 5, 4],
+            [2, 3, 2, 6],
+            Conv2dOptions {
+                strides: [2, 1],
+                padding: [[1, 0], [0, 2]],
+                dilation: [1, 2],
+                groups: 2,
+            },
+        ),
     ];
     for (shape, kernel_shape, options) in cases {
         let g = Tracer::default();
@@ -159,4 +169,28 @@ fn ungrouped_convolution_training_lowers_to_supported_ir() {
     assert_eq!(stablehlo.matches("stablehlo.convolution").count(), 2);
     assert!(stablehlo.contains("[f, 0, 1, b]x[i, 0, 1, o]->[0, 1, b, f]"));
     assert!(!stablehlo.contains("stablehlo.dot_general"));
+}
+
+#[test]
+fn grouped_convolution_input_gradient_remains_one_native_convolution() {
+    let g = Tracer::default();
+    let x = g.input([1, 5, 6, 4]).unwrap();
+    let w = g.input([3, 3, 1, 4]).unwrap();
+    let loss = x
+        .conv2d(
+            &w,
+            Conv2dOptions {
+                padding: [[1, 1], [1, 1]],
+                groups: 4,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .sum([0, 1, 2, 3], false)
+        .unwrap();
+    let input_gradient = loss.grad(&[x]).unwrap().remove(0);
+    let lowered = g.prepare_many(&[input_gradient]).unwrap();
+    let stablehlo = std::str::from_utf8(lowered.code()).unwrap();
+    assert_eq!(stablehlo.matches("stablehlo.convolution").count(), 1);
+    assert!(stablehlo.contains("feature_group_count = 4 : i64"));
 }
