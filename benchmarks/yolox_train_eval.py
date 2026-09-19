@@ -22,7 +22,9 @@ class Args(TypedArgs):
     plugin: Annotated[Path, Arg(help="trusted CUDA PJRT plugin")]
     train_records: Annotated[Path, Arg(help="full COCO train TFRecord")]
     coco_root: Annotated[Path, Arg(help="COCO root containing annotations and val2017")]
-    output: Annotated[Path, Arg(help="new run output directory")]
+    output: Annotated[
+        Path, Arg(help="new run output directory, or its existing directory with --resume")
+    ]
     epochs: Annotated[int, Arg("--epochs")] = 300
     batch_size: Annotated[int, Arg("--batch-size")] = 8
     gradient_accumulation: Annotated[int, Arg("--gradient-accumulation")] = 8
@@ -30,6 +32,7 @@ class Args(TypedArgs):
     eval_every_epochs: Annotated[int, Arg("--eval-every-epochs")] = 10
     log_every: Annotated[int, Arg("--log-every")] = 100
     run_id: Annotated[str | None, Arg("--run-id")] = None
+    resume: Annotated[Path | None, Arg("--resume")] = None
     confidence: Annotated[float, Arg("--confidence")] = 0.01
     iou_threshold: Annotated[float, Arg("--iou-threshold")] = 0.65
     skip_build: Annotated[bool, Arg("--skip-build")] = False
@@ -42,10 +45,20 @@ class Args(TypedArgs):
 
 
 CHECKPOINT = re.compile(r"^checkpoint_step=(\d+) output=(.+)$")
+CHECKPOINT_FILE = re.compile(r"^training-final\.step-(\d+)\.safetensors$")
 
 
 def command(*parts: object) -> list[str]:
     return [str(part) for part in parts]
+
+
+def resume_step(path: Path) -> int:
+    match = CHECKPOINT_FILE.fullmatch(path.name)
+    if match is None:
+        raise ValueError(
+            "--resume must name an immutable training-final.step-N.safetensors checkpoint"
+        )
+    return int(match.group(1))
 
 
 def evaluate(
@@ -161,6 +174,12 @@ def main() -> None:
     args.coco_root = args.coco_root.resolve()
     args.output = args.output.resolve()
     args.compile_cache = args.compile_cache.resolve()
+    if args.resume is not None:
+        args.resume = args.resume.resolve()
+        if not args.resume.is_file():
+            raise FileNotFoundError(args.resume)
+        if args.run_id is None:
+            raise ValueError("--resume requires the original --run-id")
     if args.max_eval_images is not None and args.max_eval_images <= 0:
         raise ValueError("--max-eval-images must be positive")
     if not args.skip_build:
@@ -181,7 +200,8 @@ def main() -> None:
             cwd=root,
             check=True,
         )
-    args.output.mkdir(parents=True, exist_ok=False)
+    resumed_at = resume_step(args.resume) if args.resume is not None else 0
+    args.output.mkdir(parents=True, exist_ok=args.resume is not None)
     training_binary = root / "target/release/examples/yolox_coco_train_step"
     evaluator_binary = root / "target/release/examples/yolox_coco_eval"
     for binary in (training_binary, evaluator_binary):
@@ -192,12 +212,22 @@ def main() -> None:
     steps_per_epoch = math.ceil(args.samples / effective_batch)
     checkpoint_every = steps_per_epoch * args.eval_every_epochs
     total_steps = steps_per_epoch * args.epochs
+    if resumed_at >= total_steps:
+        raise ValueError(
+            f"resume step {resumed_at} must be below total step count {total_steps}"
+        )
+    if resumed_at and resumed_at % checkpoint_every != 0:
+        raise ValueError(
+            f"resume step {resumed_at} is not an evaluation milestone ({checkpoint_every})"
+        )
     run_id = args.run_id or f"yolox-{time.time_ns()}"
     training_state = args.output / "training-final.safetensors"
     model = args.output / "model-ema.safetensors"
-    training_log = args.output / "training.mcap"
-    evaluation_log = args.output / "evaluation.mcap"
+    segment = f"-resume-step-{resumed_at}" if resumed_at else ""
+    training_log = args.output / f"training{segment}.mcap"
+    evaluation_log = args.output / f"evaluation{segment}.mcap"
     stablehlo = args.output / "stablehlo-training"
+    inference_stablehlo = args.output / "stablehlo-inference"
 
     invocation = command(
         training_binary,
@@ -218,8 +248,6 @@ def main() -> None:
         training_log,
         "--run-id",
         run_id,
-        "--stablehlo-dir",
-        stablehlo,
         "--compile-cache",
         args.compile_cache,
         "--log-every",
@@ -229,6 +257,14 @@ def main() -> None:
         "tfrecord",
         args.train_records,
     )
+    if args.resume is not None:
+        source = invocation[-2:]
+        del invocation[-2:]
+        invocation.extend(["--resume", args.resume, *source])
+    if not stablehlo.exists():
+        source = invocation[-2:]
+        del invocation[-2:]
+        invocation.extend(["--stablehlo-dir", stablehlo, *source])
     if args.short_schedule:
         source = invocation[-2:]
         del invocation[-2:]
@@ -253,10 +289,24 @@ def main() -> None:
                 metadata=[
                     Metric(name="total_steps", integer=total_steps),
                     Metric(name="eval_every_steps", integer=checkpoint_every),
+                    Metric(name="resumed_at", integer=resumed_at),
                 ],
             ),
             time.time_ns(),
         )
+        if args.resume is not None and not (
+            args.output / f"evaluation-step-{resumed_at}.mcap"
+        ).exists():
+            stats, seconds = evaluate(
+                evaluator_binary,
+                args,
+                args.resume,
+                resumed_at,
+                args.output,
+                export_stablehlo=not inference_stablehlo.exists(),
+            )
+            log_evaluation(log, args.output, run_id, resumed_at, stats, seconds)
+            log.flush()
         process = subprocess.Popen(
             invocation,
             cwd=root,
@@ -265,7 +315,6 @@ def main() -> None:
             bufsize=1,
             start_new_session=True,
         )
-        evaluated: set[int] = set()
         try:
             assert process.stdout is not None
             for line in process.stdout:
@@ -285,11 +334,10 @@ def main() -> None:
                         checkpoint,
                         step,
                         args.output,
-                        export_stablehlo=not evaluated,
+                        export_stablehlo=not inference_stablehlo.exists(),
                     )
                     log_evaluation(log, args.output, run_id, step, stats, seconds)
                     log.flush()
-                    evaluated.add(step)
                 finally:
                     os.kill(process.pid, signal.SIGCONT)
             status = process.wait()
@@ -302,7 +350,7 @@ def main() -> None:
                 training_state,
                 total_steps,
                 args.output,
-                export_stablehlo=not evaluated,
+                export_stablehlo=not inference_stablehlo.exists(),
             )
             log_evaluation(log, args.output, run_id, total_steps, stats, seconds)
             log.write(

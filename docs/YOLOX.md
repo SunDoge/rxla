@@ -364,6 +364,27 @@ evaluator can coexist on one GPU without each reserving 75% of VRAM. Raw COCO
 detection JSON is deleted after metrics are recorded unless
 `--keep-detections` is supplied.
 
+An interrupted supervised run resumes from an immutable milestone snapshot;
+the original run ID is required so training and evaluation segments retain one
+logical identity:
+
+```sh
+uv run --frozen python benchmarks/yolox_train_eval.py \
+  /path/to/cuda_pjrt_plugin.so \
+  /data/datasets/coco2017-train2017.tfrecord \
+  /data/datasets/coco2017 \
+  .cache/yolox/runs/yolox-tiny-v4 \
+  --epochs 300 --eval-every-epochs 10 --log-every 100 \
+  --run-id yolox-tiny-coco-v4 \
+  --resume .cache/yolox/runs/yolox-tiny-v4/training-final.step-18490.safetensors
+```
+
+Resume preserves prior artifacts and writes new
+`training-resume-step-N.mcap` and `evaluation-resume-step-N.mcap` segments.
+The Rust trainer validates the snapshot's full schedule and optimizer metadata;
+the supervisor rejects mutable/final snapshots whose filename does not encode
+the completed milestone. Existing StableHLO exports are reused.
+
 Create that full accuracy dataset explicitly with:
 
 ```sh
