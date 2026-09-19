@@ -221,6 +221,20 @@ instead of the preceding fully synchronized `490.8 images/s`. A matching
 no-EMA asynchronous run reached `502.2 images/s`, so packed parameter and
 BatchNorm EMA had no measurable throughput cost in this pair of short runs.
 
+`--random-resize` enables YOLOX's ten-step multi-scale schedule. It selects a
+square 32-pixel multiple in the inclusive `--random-size-min` to
+`--random-size-max` range (official defaults `10..20`), precompiles only the
+unique static sizes that this run will use, and switches at ten-step
+boundaries. Parameter, BatchNorm, momentum, EMA, and counter buffers migrate
+between the size-specialized programs on the same PJRT client without a host
+tensor round-trip. A real CUDA/COCO check trained ten steps at 64×64, migrated
+to 96×96, and completed the eleventh update with finite loss. That step also
+verified the official empty-match behavior: after augmentation removed every
+box, SimOTA produced zero foreground and the normalized objectness-only loss
+continued instead of treating the batch as an error. Multi-scale remains
+opt-in because compiling several static XLA programs is expensive; two tiny
+size variants took 43.4 seconds in this check.
+
 Run the comparable RXLA side with:
 
 ```sh

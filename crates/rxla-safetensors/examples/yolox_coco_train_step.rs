@@ -4,21 +4,21 @@ use clap::{Parser, Subcommand, ValueEnum};
 use fory::{ForyRow, from_row};
 use image::{Rgb, RgbImage, imageops::FilterType};
 use rayon::prelude::*;
-use rxla_core::{CacheLimits, Client, Compiler, DType, Precision, Tensor};
+use rxla_core::{CacheLimits, Client, Compiler, DType, Precision, StateProgram, Tensor};
 use rxla_models::{
     YoloConfig, YoloLossConfig, YoloSimOtaConfig, YoloTargets, yolo, yolox_loss_with_l1_weight,
     yolox_simota,
 };
-use rxla_nn::{Cx, Model, ModelInput};
+use rxla_nn::{AppliedModel, Cx, Model, ModelInput};
 use rxla_safetensors::{SafeTensors, save_buffers_new, save_model_new};
 use rxla_tfrecord::Reader as TfrecordReader;
 use rxla_train::{
-    BoundedPipeline, DataRng, DetectionTarget, SampleRng, SgdOptions, ShufflePool, YoloLrSchedule,
-    apply_model_ema, apply_model_sgd_with_learning_rate,
+    BoundedPipeline, DataRng, DetectionTarget, ModelEma, SampleRng, SgdOptions, ShufflePool,
+    YoloLrSchedule, apply_model_ema, apply_model_sgd_with_learning_rate,
 };
 use serde::Deserialize;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
     time::Instant,
 };
@@ -54,6 +54,13 @@ struct Args {
     size: i64,
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
+    /// Use YOLOX's random 32-pixel-multiple input size every 10 steps.
+    #[arg(long)]
+    random_resize: bool,
+    #[arg(long, default_value_t = 10)]
+    random_size_min: u32,
+    #[arg(long, default_value_t = 20)]
+    random_size_max: u32,
     /// Number of prepared host batches retained ahead of the device.
     #[arg(long, default_value_t = default_augmentation_workers())]
     prefetch: usize,
@@ -188,7 +195,14 @@ struct PreparedBatch {
     sample_ids: Vec<String>,
     pixels: Vec<u8>,
     targets: Vec<DetectionTarget>,
+    size: u32,
     load_ms: f64,
+}
+
+struct TrainingVariant {
+    model: AppliedModel,
+    program: StateProgram,
+    ema: Option<ModelEma>,
 }
 
 struct CudaProfiler {
@@ -244,7 +258,7 @@ struct PlannedBatches<I> {
     mosaic_probability: f32,
     mixup_probability: f32,
     batch_size: usize,
-    size: u32,
+    sizes: Vec<u32>,
     rng: DataRng,
 }
 
@@ -262,6 +276,108 @@ enum TrainingSource {
     },
 }
 
+fn training_sizes(
+    base: u32,
+    steps: usize,
+    seed: u64,
+    random_resize: bool,
+    minimum: u32,
+    maximum: u32,
+) -> Vec<u32> {
+    let rng = DataRng::new(seed);
+    let choices = u64::from(maximum - minimum + 1);
+    let mut current = base;
+    (0..steps)
+        .map(|step| {
+            if random_resize && step != 0 && step % 10 == 0 {
+                let block = (step / 10) as u64;
+                let multiple = minimum + (rng.sample(0, block).word(91, 0) % choices) as u32;
+                current = multiple * 32;
+            }
+            current
+        })
+        .collect()
+}
+
+fn build_training_variant(
+    compiler: &mut Compiler,
+    batch: i64,
+    size: i64,
+    config: YoloConfig,
+    use_ema: bool,
+) -> Result<TrainingVariant> {
+    let definition = Model::new(
+        move |cx: Cx,
+              image: Tensor,
+              target_boxes: Tensor,
+              target_classes: Tensor,
+              target_valid: Tensor,
+              learning_rate: Tensor,
+              l1_weight: Tensor| {
+            let image = image.cast(DType::F32)?;
+            let outputs = yolo(cx, &image, &config)?;
+            let targets = YoloTargets {
+                boxes: target_boxes,
+                class_indices: target_classes,
+                valid: target_valid,
+            };
+            let assignments = yolox_simota(&outputs, &targets, YoloSimOtaConfig::default())?;
+            let foreground = assignments.objectness.sum([0, 1, 2], false)?;
+            let loss = yolox_loss_with_l1_weight(
+                &outputs,
+                &assignments,
+                YoloLossConfig::default(),
+                &l1_weight,
+            )?;
+            Ok::<_, rxla_models::Error>((
+                loss.total,
+                loss.boxes,
+                loss.objectness,
+                loss.classes,
+                loss.l1,
+                foreground,
+                learning_rate,
+            ))
+        },
+    )
+    .inputs((
+        ModelInput::new([batch, size, size, 3]).with_dtype(DType::U8),
+        ModelInput::new([batch, MAX_TARGETS as i64, 4]),
+        ModelInput::new([batch, MAX_TARGETS as i64, 1]).with_dtype(DType::I32),
+        ModelInput::new([batch, MAX_TARGETS as i64, 1]),
+        ModelInput::new([]),
+        ModelInput::new([]),
+    ))
+    .training();
+    let (trainable, mut model) = definition.trace_resident_all()?;
+    let metrics = Tensor::stack(&model.outputs()[..6], 0)?;
+    let loss = model.outputs()[0].clone();
+    let learning_rate = model.outputs()[6].clone();
+    apply_model_sgd_with_learning_rate(
+        &mut model,
+        &trainable,
+        &loss,
+        &learning_rate,
+        |parameter| {
+            let decay =
+                parameter.path().ends_with(".weight") && !parameter.path().contains(".bn.weight");
+            SgdOptions::default()
+                .momentum(0.9)
+                .nesterov(true)
+                .weight_decay(if decay { 5e-4 } else { 0.0 })
+        },
+    )?;
+    let ema = use_ema
+        .then(|| apply_model_ema(&mut model, &trainable, 0.9998))
+        .transpose()?;
+    let program = model.compile_stateful_tensors(compiler, &[metrics])?;
+    Ok(TrainingVariant {
+        model,
+        program,
+        ema,
+    })
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.size <= 0
@@ -275,14 +391,25 @@ fn main() -> Result<()> {
         || args.prefetch == 0
         || args.augmentation_workers == 0
         || args.shuffle_buffer == 0
+        || args.random_size_min == 0
+        || args.random_size_min > args.random_size_max
+        || args.random_size_max > u32::MAX / 32
         || !(0.0..=1.0).contains(&args.mosaic_probability)
         || !(0.0..=1.0).contains(&args.mixup_probability)
     {
         return Err(
-            "size must be a positive multiple of 32; learning rate must be finite and nonnegative; steps, batch-size, prefetch, augmentation-workers, shuffle-buffer and log-every must be non-zero; mosaic-probability and mixup-probability must be in [0, 1]"
+            "size must be a positive multiple of 32; learning rate must be finite and nonnegative; steps, batch-size, prefetch, augmentation-workers, shuffle-buffer, log-every and random-size-min must be non-zero; random-size-min must not exceed random-size-max; mosaic-probability and mixup-probability must be in [0, 1]"
                 .into(),
         );
     }
+    let step_sizes = training_sizes(
+        u32::try_from(args.size)?,
+        args.steps,
+        args.seed,
+        args.random_resize,
+        args.random_size_min,
+        args.random_size_max,
+    );
     let base_learning_rate = args
         .learning_rate
         .unwrap_or_else(|| default_learning_rate(args.batch_size));
@@ -297,7 +424,7 @@ fn main() -> Result<()> {
         mosaic_probability: args.mosaic_probability,
         mixup_probability: args.mixup_probability,
         batch_size: args.batch_size,
-        size: u32::try_from(args.size)?,
+        sizes: step_sizes.clone(),
         rng: DataRng::new(args.seed),
     };
     // Host input preparation starts before XLA compilation so initial pool fill
@@ -326,80 +453,27 @@ fn main() -> Result<()> {
     let training_config = YoloConfig::yolox_tiny(80)
         .compute_dtype(compute_dtype)
         .convolution_precision(convolution_precision);
-    let training = Model::new(
-        move |cx: Cx,
-              image: Tensor,
-              target_boxes: Tensor,
-              target_classes: Tensor,
-              target_valid: Tensor,
-              learning_rate: Tensor,
-              l1_weight: Tensor| {
-            let image = image.cast(DType::F32)?;
-            let outputs = yolo(cx, &image, &training_config)?;
-            let targets = YoloTargets {
-                boxes: target_boxes,
-                class_indices: target_classes,
-                valid: target_valid,
-            };
-            let assignments = yolox_simota(&outputs, &targets, YoloSimOtaConfig::default())?;
-            let foreground = assignments.objectness.sum([0, 1, 2], false)?;
-            let loss = yolox_loss_with_l1_weight(
-                &outputs,
-                &assignments,
-                YoloLossConfig::default(),
-                &l1_weight,
-            )?;
-            Ok::<_, rxla_models::Error>((
-                loss.total,
-                loss.boxes,
-                loss.objectness,
-                loss.classes,
-                loss.l1,
-                foreground,
-                learning_rate,
-            ))
-        },
-    )
-    .inputs((
-        ModelInput::new([batch, args.size, args.size, 3]).with_dtype(DType::U8),
-        ModelInput::new([batch, MAX_TARGETS as i64, 4]),
-        ModelInput::new([batch, MAX_TARGETS as i64, 1]).with_dtype(DType::I32),
-        ModelInput::new([batch, MAX_TARGETS as i64, 1]),
-        ModelInput::new([]),
-        ModelInput::new([]),
-    ))
-    .training();
-    let (trainable, mut training) = training.trace_resident_all()?;
-    let checkpoint_schema = training.schema().clone();
-    let metrics = Tensor::stack(&training.outputs()[..6], 0)?;
-    let loss = training.outputs()[0].clone();
-    let learning_rate = training.outputs()[6].clone();
-    apply_model_sgd_with_learning_rate(
-        &mut training,
-        &trainable,
-        &loss,
-        &learning_rate,
-        |parameter| {
-            let decay =
-                parameter.path().ends_with(".weight") && !parameter.path().contains(".bn.weight");
-            SgdOptions::default()
-                .momentum(0.9)
-                .nesterov(true)
-                .weight_decay(if decay { 5e-4 } else { 0.0 })
-        },
-    )?;
-    let model_ema = if args.disable_model_ema {
-        None
-    } else {
-        Some(apply_model_ema(&mut training, &trainable, 0.9998)?)
-    };
     let train_compile_started = Instant::now();
-    let program = training.compile_stateful_tensors(&mut compiler, &[metrics])?;
+    let mut variants = BTreeMap::new();
+    for size in step_sizes.iter().copied().collect::<BTreeSet<_>>() {
+        let variant = build_training_variant(
+            &mut compiler,
+            batch,
+            i64::from(size),
+            training_config,
+            !args.disable_model_ema,
+        )?;
+        variants.insert(size, variant);
+    }
     let train_compile_ms = train_compile_started.elapsed().as_secs_f64() * 1e3;
+    let mut current_size = step_sizes[0];
+    let initial = variants
+        .get(&current_size)
+        .expect("the first scheduled size was compiled");
     let mut checkpoint = SafeTensors::open(&args.weights)?;
-    let weights = checkpoint.load_model_schema(&client, &checkpoint_schema)?;
+    let weights = checkpoint.load_model_schema(&client, initial.model.schema())?;
     let mut training_session = weights
-        .initialize_raw(training.session(&program))?
+        .initialize_raw(initial.model.session(&initial.program))?
         .initializer_seed(7)
         .build()?;
     let schedule = YoloLrSchedule::new(base_learning_rate, args.steps)
@@ -418,9 +492,24 @@ fn main() -> Result<()> {
             sample_ids,
             pixels,
             targets,
+            size,
             load_ms,
         } = prepared?;
-        let input = client.buffer(&[batch, args.size, args.size, 3], &pixels)?;
+        if size != current_size {
+            let snapshot = variants
+                .get(&current_size)
+                .expect("current training size was compiled")
+                .model
+                .take_session(training_session)?;
+            let target = variants
+                .get(&size)
+                .expect("scheduled training size was compiled");
+            training_session = snapshot
+                .restore_model(target.model.session(&target.program))?
+                .build()?;
+            current_size = size;
+        }
+        let input = client.buffer(&[batch, i64::from(size), i64::from(size), 3], &pixels)?;
         let step_learning_rate = schedule.at(completed)?;
         let learning_rate = client.buffer(&[], &[step_learning_rate])?;
         let l1_weight_value = if no_augmentation_steps != 0
@@ -452,13 +541,6 @@ fn main() -> Result<()> {
             if losses.len() != 6 || losses.iter().any(|value| !value.is_finite()) {
                 return Err("training produced invalid losses".into());
             }
-            if losses[5] as usize == 0 {
-                return Err(format!(
-                    "SimOTA produced no foreground anchors for image {}",
-                    sample_ids.join(",")
-                )
-                .into());
-            }
             Some(losses)
         } else {
             None
@@ -470,7 +552,7 @@ fn main() -> Result<()> {
         if let Some(losses) = losses {
             let foreground = losses[5] as usize;
             println!(
-                "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} l1={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} train_ms={train_ms:.1}",
+                "step={completed} size={size} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} l1={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} train_ms={train_ms:.1}",
                 sample_ids.join(","),
                 targets.len(),
                 foreground,
@@ -499,7 +581,10 @@ fn main() -> Result<()> {
         ])
         .into_iter()
         .collect();
-        if let Some(model_ema) = &model_ema {
+        let current = variants
+            .get(&current_size)
+            .expect("current training size was compiled");
+        if let Some(model_ema) = &current.ema {
             // EMA is packed into one device state to keep the hot step to one
             // bandwidth-sized update. Checkpointing is cold-path work, so split
             // it only once here before writing canonical parameter tensors.
@@ -524,11 +609,12 @@ fn main() -> Result<()> {
                 .iter()
                 .map(|(path, buffer)| (path.as_str(), buffer))
                 .collect::<Vec<_>>();
-            let states = training
+            let states = current
+                .model
                 .state_buffers(&training_session)?
                 .into_iter()
                 .collect::<HashMap<_, _>>();
-            for spec in training.schema().states() {
+            for spec in current.model.schema().states() {
                 if model_ema
                     .states()
                     .iter()
@@ -544,14 +630,15 @@ fn main() -> Result<()> {
             }
             save_buffers_new(output, &buffers, Some(&metadata))?;
         } else {
-            save_model_new(output, &training, &training_session, Some(&metadata))?;
+            save_model_new(output, &current.model, &training_session, Some(&metadata))?;
         }
     }
     println!(
-        "completed={completed} images={} run_ms={:.1} images_per_second={:.1} train_compile_ms={train_compile_ms:.1}",
+        "completed={completed} images={} run_ms={:.1} images_per_second={:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={}",
         completed * args.batch_size,
         run_seconds * 1e3,
         completed as f64 * args.batch_size as f64 / run_seconds,
+        variants.len(),
     );
     Ok(())
 }
@@ -619,12 +706,10 @@ where
                 rng: sample_rng,
             });
         }
+        let size = self.sizes[self.step];
         self.remaining -= 1;
         self.step += 1;
-        Some(Ok(AugmentationBatch {
-            groups,
-            size: self.size,
-        }))
+        Some(Ok(AugmentationBatch { groups, size }))
     }
 }
 
@@ -665,6 +750,7 @@ fn prepare_batch(
         sample_ids,
         pixels,
         targets,
+        size,
         load_ms: load_started.elapsed().as_secs_f64() * 1e3,
     })
 }
@@ -1432,5 +1518,21 @@ mod tests {
     fn default_learning_rate_scales_official_per_image_rate() {
         assert_eq!(default_learning_rate(8), 0.00125);
         assert_eq!(default_learning_rate(64), 0.01);
+    }
+
+    #[test]
+    fn random_resize_keeps_ten_step_blocks_and_is_reproducible() {
+        let first = training_sizes(416, 31, 7, true, 10, 20);
+        let second = training_sizes(416, 31, 7, true, 10, 20);
+        assert_eq!(first, second);
+        assert!(first[..10].iter().all(|&size| size == 416));
+        assert!(first[10..20].iter().all(|&size| size == first[10]));
+        assert!(first[20..30].iter().all(|&size| size == first[20]));
+        assert!(
+            first[10..]
+                .iter()
+                .all(|&size| size % 32 == 0 && (320..=640).contains(&size))
+        );
+        assert_eq!(training_sizes(416, 31, 7, false, 10, 20), vec![416; 31]);
     }
 }
