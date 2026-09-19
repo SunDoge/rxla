@@ -313,15 +313,12 @@ fn main() -> Result<()> {
               l1_weight: Tensor| {
             let image = image.cast(DType::F32)?;
             let outputs = yolo(cx, &image, &training_config)?;
-            let assignments = yolox_simota(
-                &outputs,
-                &YoloTargets {
-                    boxes: target_boxes,
-                    classes: target_classes,
-                    valid: target_valid,
-                },
-                YoloSimOtaConfig::default(),
-            )?;
+            let targets = YoloTargets {
+                boxes: target_boxes,
+                class_indices: target_classes,
+                valid: target_valid,
+            };
+            let assignments = yolox_simota(&outputs, &targets, YoloSimOtaConfig::default())?;
             let foreground = assignments.objectness.sum([0, 1, 2], false)?;
             let loss = yolox_loss_with_l1_weight(
                 &outputs,
@@ -343,7 +340,7 @@ fn main() -> Result<()> {
     .inputs((
         ModelInput::new([batch, args.size, args.size, 3]).with_dtype(DType::U8),
         ModelInput::new([batch, MAX_TARGETS as i64, 4]),
-        ModelInput::new([batch, MAX_TARGETS as i64, 80]),
+        ModelInput::new([batch, MAX_TARGETS as i64, 1]).with_dtype(DType::I32),
         ModelInput::new([batch, MAX_TARGETS as i64, 1]),
         ModelInput::new([]),
         ModelInput::new([]),
@@ -409,7 +406,7 @@ fn main() -> Result<()> {
         let (target_boxes, target_classes, target_valid) =
             padded_targets(args.batch_size, MAX_TARGETS, 80, &targets)?;
         let target_boxes = client.buffer(&[batch, MAX_TARGETS as i64, 4], &target_boxes)?;
-        let target_classes = client.buffer(&[batch, MAX_TARGETS as i64, 80], &target_classes)?;
+        let target_classes = client.buffer(&[batch, MAX_TARGETS as i64, 1], &target_classes)?;
         let target_valid = client.buffer(&[batch, MAX_TARGETS as i64, 1], &target_valid)?;
         let train_started = Instant::now();
         let outputs = training_session.run(&[
@@ -1223,9 +1220,9 @@ fn padded_targets(
     max_targets: usize,
     classes: usize,
     targets: &[DetectionTarget],
-) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+) -> Result<(Vec<f32>, Vec<i32>, Vec<f32>)> {
     let mut boxes = vec![0.0; batch * max_targets * 4];
-    let mut one_hot = vec![0.0; batch * max_targets * classes];
+    let mut class_indices = vec![0; batch * max_targets];
     let mut valid = vec![0.0; batch * max_targets];
     let mut counts = vec![0; batch];
     for target in targets {
@@ -1239,10 +1236,10 @@ fn padded_targets(
         counts[target.batch] += 1;
         let row = target.batch * max_targets + slot;
         boxes[row * 4..row * 4 + 4].copy_from_slice(&target.cxcywh);
-        one_hot[row * classes + target.class] = 1.0;
+        class_indices[row] = i32::try_from(target.class)?;
         valid[row] = 1.0;
     }
-    Ok((boxes, one_hot, valid))
+    Ok((boxes, class_indices, valid))
 }
 
 fn letterbox(image: &RgbImage, size: u32) -> (Vec<u8>, f32) {
@@ -1263,7 +1260,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn targets_are_padded_one_hot_and_capped_per_image() {
+    fn targets_are_padded_as_class_indices_and_capped_per_image() {
         let targets = [
             DetectionTarget {
                 batch: 1,
@@ -1278,7 +1275,7 @@ mod tests {
         ];
         let (boxes, classes, valid) = padded_targets(2, 1, 3, &targets).unwrap();
         assert_eq!(&boxes[4..8], &[1.0, 2.0, 3.0, 4.0]);
-        assert_eq!(&classes[3..6], &[0.0, 0.0, 1.0]);
+        assert_eq!(classes, [0, 2]);
         assert_eq!(valid, [0.0, 1.0]);
     }
 

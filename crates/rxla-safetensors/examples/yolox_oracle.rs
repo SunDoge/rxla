@@ -115,7 +115,7 @@ fn main() -> Result<()> {
          head1: rxla_core::Tensor,
          head2: rxla_core::Tensor,
          boxes: rxla_core::Tensor,
-         classes: rxla_core::Tensor,
+         class_indices: rxla_core::Tensor,
          valid: rxla_core::Tensor,
          l1_weight: rxla_core::Tensor| {
             let heads = [head0, head1, head2];
@@ -123,7 +123,7 @@ fn main() -> Result<()> {
                 &heads,
                 &YoloTargets {
                     boxes,
-                    classes,
+                    class_indices,
                     valid,
                 },
                 YoloSimOtaConfig::default(),
@@ -161,7 +161,7 @@ fn main() -> Result<()> {
         ModelInput::new(model_shapes[1]),
         ModelInput::new(model_shapes[2]),
         ModelInput::new([1, 2, 4]),
-        ModelInput::new([1, 2, 80]),
+        ModelInput::new([1, 2, 1]).with_dtype(rxla_core::DType::I32),
         ModelInput::new([1, 2, 1]),
         ModelInput::new([]),
     ))
@@ -173,10 +173,7 @@ fn main() -> Result<()> {
         &[1, 2, 4],
         &[20.0_f32, 20.0, 12.0, 16.0, 44.0, 42.0, 18.0, 14.0],
     )?;
-    let mut target_classes = vec![0.0_f32; 160];
-    target_classes[0] = 1.0;
-    target_classes[80 + 7] = 1.0;
-    let target_classes = client.buffer(&[1, 2, 80], &target_classes)?;
+    let target_classes = client.buffer(&[1, 2, 1], &[0_i32, 7])?;
     let valid = client.buffer(&[1, 2, 1], &[1.0_f32, 1.0])?;
     let l1_weight = client.buffer(&[], &[1.0_f32])?;
     let loss_outputs: [Buffer; 7] = loss_session.run([
@@ -231,7 +228,7 @@ fn main() -> Result<()> {
         |cx: Cx,
          image: rxla_core::Tensor,
          boxes: rxla_core::Tensor,
-         classes: rxla_core::Tensor,
+         class_indices: rxla_core::Tensor,
          valid: rxla_core::Tensor,
          l1_weight: rxla_core::Tensor,
          learning_rate: rxla_core::Tensor| {
@@ -240,7 +237,7 @@ fn main() -> Result<()> {
                 &heads,
                 &YoloTargets {
                     boxes,
-                    classes,
+                    class_indices,
                     valid,
                 },
                 YoloSimOtaConfig::default(),
@@ -263,7 +260,7 @@ fn main() -> Result<()> {
     .inputs((
         ModelInput::new([1, args.size, args.size, 3]),
         ModelInput::new([1, 2, 4]),
-        ModelInput::new([1, 2, 80]),
+        ModelInput::new([1, 2, 1]).with_dtype(rxla_core::DType::I32),
         ModelInput::new([1, 2, 1]),
         ModelInput::new([]),
         ModelInput::new([]),

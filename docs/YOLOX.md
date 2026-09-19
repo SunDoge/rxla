@@ -174,9 +174,9 @@ A dedicated synthetic benchmark now runs the same U8 input pattern, 12 targets
 per image, device SimOTA, loss, BatchNorm updates, Nesterov SGD, warmup count,
 and per-step synchronization in RXLA and the official-compatible PyTorch model.
 At 416×416, batch 8, 10 warmups, and 100 measured F32 steps, RXLA with default
-convolution precision measured `17.108 ms` (`467.6 images/s`), while
+convolution precision measured `16.871 ms` (`474.2 images/s`), while
 `torch.compile` measured `21.453 ms` (`372.9 images/s`). A shorter 20-step BF16
-run measured `12.868 ms` (`621.7 images/s`) for RXLA, `16.918 ms` (`472.9
+run measured `12.901 ms` (`620.1 images/s`) for RXLA, `16.918 ms` (`472.9
 images/s`) for `torch.compile`, and `24.189 ms` for eager PyTorch. The Python
 loss still has a graph break at its per-image `Tensor.item()` SimOTA loop, while
 RXLA compiles matching and optimization into the same program.
@@ -193,9 +193,14 @@ cargo run -p rxla-safetensors --release --features model \
 
 The input boundary preserves decoded images as U8 through host batching and
 PCIe transfer, then performs the exact U8-to-F32 conversion in the compiled
-graph. Mosaic also exposes its four independent JPEG decode/resize jobs to the
-same Rayon pool as the batch, rather than serializing them inside each output
-image. Before the native max-pool adjoint, this let a 100-step real-data run
+graph. Target classes likewise cross the boundary as compact I32 indices rather
+than host one-hot vectors. For batch 8, 120 padded targets, and 80 COCO classes,
+this reduces their per-step upload from 307,200 to 3,840 bytes. SimOTA gathers
+the selected class cost directly and only materializes one-hot classes for the
+final matched anchors; this also removes the class-selection `dot_general` that
+caused unnecessary GEMM autotuning. Mosaic exposes its four independent JPEG
+decode/resize jobs to the same Rayon pool as the batch, rather than serializing
+them inside each output image. Before the native max-pool adjoint, this let a 100-step real-data run
 sustain 295.6 images/s (2.707 seconds for 800 images), 37.9% above the U8-only
 result. Steady device steps were then 22.6–24.8 ms, observed Mosaic preparation
 was 22.6–28.3 ms, and consumer wait remained 0.0 ms.

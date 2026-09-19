@@ -124,15 +124,12 @@ fn main() -> Result<()> {
               learning_rate: Tensor,
               l1_weight: Tensor| {
             let heads = yolo(cx, &image.cast(DType::F32)?, &config)?;
-            let assignments = yolox_simota(
-                &heads,
-                &YoloTargets {
-                    boxes: target_boxes,
-                    classes: target_classes,
-                    valid: target_valid,
-                },
-                YoloSimOtaConfig::default(),
-            )?;
+            let targets = YoloTargets {
+                boxes: target_boxes,
+                class_indices: target_classes,
+                valid: target_valid,
+            };
+            let assignments = yolox_simota(&heads, &targets, YoloSimOtaConfig::default())?;
             let loss = yolox_loss_with_l1_weight(
                 &heads,
                 &assignments,
@@ -145,7 +142,7 @@ fn main() -> Result<()> {
     .inputs((
         ModelInput::new([batch, args.size, args.size, 3]).with_dtype(DType::U8),
         ModelInput::new([batch, MAX_TARGETS as i64, 4]),
-        ModelInput::new([batch, MAX_TARGETS as i64, CLASSES as i64]),
+        ModelInput::new([batch, MAX_TARGETS as i64, 1]).with_dtype(DType::I32),
         ModelInput::new([batch, MAX_TARGETS as i64, 1]),
         ModelInput::new([]),
         ModelInput::new([]),
@@ -238,7 +235,7 @@ fn synthetic_inputs(client: &Client, args: &Args) -> Result<Inputs> {
         .map(|index| ((index * 17 + 13) % 256) as u8)
         .collect::<Vec<_>>();
     let mut boxes = vec![0.0_f32; args.batch_size * MAX_TARGETS * 4];
-    let mut classes = vec![0.0_f32; args.batch_size * MAX_TARGETS * CLASSES];
+    let mut classes = vec![0_i32; args.batch_size * MAX_TARGETS];
     let mut valid = vec![0.0_f32; args.batch_size * MAX_TARGETS];
     let scale = args.size as f32 / 64.0;
     for batch_index in 0..args.batch_size {
@@ -250,14 +247,14 @@ fn synthetic_inputs(client: &Client, args: &Args) -> Result<Inputs> {
                 (6 + target % 13) as f32 * scale,
                 (7 + target * 3 % 12) as f32 * scale,
             ]);
-            classes[slot * CLASSES + target % CLASSES] = 1.0;
+            classes[slot] = i32::try_from(target % CLASSES)?;
             valid[slot] = 1.0;
         }
     }
     Ok(Inputs {
         image: client.buffer(&[batch, args.size, args.size, 3], &image)?,
         boxes: client.buffer(&[batch, MAX_TARGETS as i64, 4], &boxes)?,
-        classes: client.buffer(&[batch, MAX_TARGETS as i64, CLASSES as i64], &classes)?,
+        classes: client.buffer(&[batch, MAX_TARGETS as i64, 1], &classes)?,
         valid: client.buffer(&[batch, MAX_TARGETS as i64, 1], &valid)?,
         learning_rate: client.buffer(&[], &[args.learning_rate])?,
         l1_weight: client.buffer(&[], &[f32::from(args.l1)])?,

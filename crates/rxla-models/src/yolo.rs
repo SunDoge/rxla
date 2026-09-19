@@ -701,11 +701,12 @@ pub struct YoloAssignments {
 
 /// Fixed-shape ground truth consumed by device-side SimOTA.
 ///
-/// Rows with a zero `valid` value are padding. `classes` contains one-hot class
-/// targets, which keeps the matcher entirely in F32 StableHLO.
+/// Rows with a zero `valid` value are padding. `class_indices` contains I32
+/// class IDs as `[batch, max_targets, 1]`; SimOTA keeps them compact until the
+/// final matched-anchor targets are materialized.
 pub struct YoloTargets {
     pub boxes: Tensor,
-    pub classes: Tensor,
+    pub class_indices: Tensor,
     pub valid: Tensor,
 }
 
@@ -762,10 +763,10 @@ pub fn yolox_simota(
         || max_targets <= 0
         || coordinates != 4
         || target_batch != batch
-        || targets.classes.shape() != [batch, max_targets, classes]
+        || targets.class_indices.shape() != [batch, max_targets, 1]
         || targets.valid.shape() != [batch, max_targets, 1]
         || targets.boxes.dtype() != DType::F32
-        || targets.classes.dtype() != DType::F32
+        || targets.class_indices.dtype() != DType::I32
         || targets.valid.dtype() != DType::F32
         || !config.center_radius.is_finite()
         || config.center_radius <= 0.0
@@ -874,11 +875,21 @@ pub fn yolox_simota(
         .clamp(1e-8, 1.0 - 1e-8)?;
     let negative_class_cost = probability.neg()?.log1p()?.neg()?;
     let positive_delta = probability.log()?.neg()?.sub(&negative_class_cost)?;
+    let target_class_indices =
+        targets
+            .class_indices
+            .unsqueeze(2)?
+            .broadcast_to([batch, max_targets, anchors, 1])?;
+    let positive_class_cost = positive_delta
+        .unsqueeze(1)?
+        .broadcast_to([batch, max_targets, anchors, classes])?
+        .take_along_axis(&target_class_indices, 3)?
+        .reshape(pair_shape)?;
     let classification_cost = negative_class_cost
         .sum([2], false)?
         .unsqueeze(1)?
         .broadcast_to(pair_shape)?
-        .add(&targets.classes.einsum("bmc,bac->bma", &positive_delta)?)?;
+        .add(&positive_class_cost)?;
     let cost = classification_cost
         .sub(
             &pairwise_iou
@@ -916,7 +927,8 @@ pub fn yolox_simota(
             .scalar(config.outside_penalty * 4.0)?
             .broadcast_to(pair_shape)?,
     )?;
-    let winner = selected_cost.neg()?.argmax(1, true)?.to_f32()?;
+    let winner_index = selected_cost.neg()?.argmax(1, true)?;
+    let winner = winner_index.to_f32()?;
     let target_index = decoded
         .iota_i32(&[1, max_targets, 1], 1)?
         .to_f32()?
@@ -931,20 +943,18 @@ pub fn yolox_simota(
         .broadcast_to(pair_boxes_shape)?
         .mul(&targets.boxes.unsqueeze(2)?.broadcast_to(pair_boxes_shape)?)?
         .sum([1], false)?;
-    let matched_iou = chosen.mul(&pairwise_iou)?.unsqueeze(3)?.broadcast_to([
-        batch,
-        max_targets,
-        anchors,
-        classes,
-    ])?;
-    let classes = matched_iou
-        .mul(&targets.classes.unsqueeze(2)?.broadcast_to([
-            batch,
-            max_targets,
-            anchors,
-            classes,
-        ])?)?
-        .sum([1], false)?;
+    let matched_iou = chosen.mul(&pairwise_iou)?.sum([1], false)?.unsqueeze(2)?;
+    let matched_class = targets
+        .class_indices
+        .take_along_axis(&winner_index.transpose([0, 2, 1])?, 1)?;
+    let class_ids = targets
+        .class_indices
+        .iota_i32(&[1, 1, classes], 2)?
+        .broadcast_to([batch, anchors, classes])?;
+    let classes = matched_class
+        .broadcast_to([batch, anchors, classes])?
+        .eq_mask(&class_ids)?
+        .mul(&matched_iou.broadcast_to([batch, anchors, classes])?)?;
     Ok(YoloAssignments {
         boxes: boxes.detach()?,
         objectness: foreground.detach()?,
@@ -1351,7 +1361,7 @@ mod tests {
             &outputs,
             &YoloTargets {
                 boxes: graph.input([1, 3, 4]).unwrap(),
-                classes: graph.input([1, 3, 2]).unwrap(),
+                class_indices: graph.input_i32([1, 3, 1]).unwrap(),
                 valid: graph.input([1, 3, 1]).unwrap(),
             },
             YoloSimOtaConfig::default(),
