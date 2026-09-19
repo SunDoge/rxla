@@ -1299,50 +1299,69 @@ fn augment_hsv(image: &mut RgbImage, rng: SampleRng) {
         return;
     }
     image.as_mut().par_chunks_mut(3).for_each(|pixel| {
-        let [mut hue, mut saturation, mut value] =
-            rgb_to_opencv_hsv([pixel[0], pixel[1], pixel[2]]);
-        hue = (hue + hue_delta).rem_euclid(180.0);
-        saturation = (saturation + saturation_delta).clamp(0.0, 255.0);
-        value = (value + value_delta).clamp(0.0, 255.0);
-        pixel.copy_from_slice(&opencv_hsv_to_rgb([hue, saturation, value]));
+        pixel.copy_from_slice(&adjust_hsv_pixel(
+            [pixel[0], pixel[1], pixel[2]],
+            [hue_delta, saturation_delta, value_delta],
+        ));
     });
 }
 
+fn adjust_hsv_pixel(
+    pixel: [u8; 3],
+    [hue_delta, saturation_delta, value_delta]: [f32; 3],
+) -> [u8; 3] {
+    let [mut hue, mut saturation, mut value] = rgb_to_opencv_hsv(pixel);
+    hue += hue_delta;
+    if hue < 0.0 {
+        hue += 180.0;
+    } else if hue >= 180.0 {
+        hue -= 180.0;
+    }
+    saturation = (saturation + saturation_delta).clamp(0.0, 255.0);
+    value = (value + value_delta).clamp(0.0, 255.0);
+    opencv_hsv_to_rgb([hue, saturation, value])
+}
+
 fn rgb_to_opencv_hsv([red, green, blue]: [u8; 3]) -> [f32; 3] {
-    let red = f32::from(red) / 255.0;
-    let green = f32::from(green) / 255.0;
-    let blue = f32::from(blue) / 255.0;
+    let red = f32::from(red);
+    let green = f32::from(green);
+    let blue = f32::from(blue);
     let maximum = red.max(green).max(blue);
     let minimum = red.min(green).min(blue);
     let delta = maximum - minimum;
     let hue = if delta == 0.0 {
         0.0
     } else if maximum == red {
-        60.0 * ((green - blue) / delta).rem_euclid(6.0)
+        let sector = (green - blue) / delta;
+        30.0 * if sector < 0.0 { sector + 6.0 } else { sector }
     } else if maximum == green {
-        60.0 * ((blue - red) / delta + 2.0)
+        30.0 * ((blue - red) / delta + 2.0)
     } else {
-        60.0 * ((red - green) / delta + 4.0)
+        30.0 * ((red - green) / delta + 4.0)
     };
     [
-        hue * 0.5,
+        hue,
         if maximum == 0.0 {
             0.0
         } else {
             delta / maximum * 255.0
         },
-        maximum * 255.0,
+        maximum,
     ]
 }
 
 fn opencv_hsv_to_rgb([hue, saturation, value]: [f32; 3]) -> [u8; 3] {
-    let hue = hue * 2.0;
-    let saturation = saturation / 255.0;
-    let value = value / 255.0;
-    let chroma = value * saturation;
-    let section = hue / 60.0;
-    let x = chroma * (1.0 - (section.rem_euclid(2.0) - 1.0).abs());
-    let (red, green, blue) = match section as usize {
+    let chroma = value * saturation / 255.0;
+    let section = hue / 30.0;
+    let sector = section as usize;
+    let fraction = section - sector as f32;
+    let x = chroma
+        * if sector.is_multiple_of(2) {
+            fraction
+        } else {
+            1.0 - fraction
+        };
+    let (red, green, blue) = match sector {
         0 => (chroma, x, 0.0),
         1 => (x, chroma, 0.0),
         2 => (0.0, chroma, x),
@@ -1351,7 +1370,7 @@ fn opencv_hsv_to_rgb([hue, saturation, value]: [f32; 3]) -> [u8; 3] {
         _ => (chroma, 0.0, x),
     };
     let offset = value - chroma;
-    [red, green, blue].map(|channel| ((channel + offset) * 255.0).round() as u8)
+    [red, green, blue].map(|channel| (channel + offset + 0.5) as u8)
 }
 
 fn mosaic_coordinates(
@@ -1484,6 +1503,42 @@ fn transform_box(bbox: [f32; 4], matrix: [[f32; 3]; 2], extent: f32) -> [f32; 4]
     ]
 }
 
+fn interpolate_rgb_bilinear(image: &RgbImage, x: f32, y: f32) -> Option<[u8; 3]> {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    if width == 0
+        || height == 0
+        || x < 0.0
+        || y < 0.0
+        || x > (width - 1) as f32
+        || y > (height - 1) as f32
+    {
+        return None;
+    }
+    let x0 = x as usize;
+    let y0 = y as usize;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+    let bytes = image.as_raw();
+    let offsets = [
+        (y0 * width + x0) * 3,
+        (y0 * width + x1) * 3,
+        (y1 * width + x0) * 3,
+        (y1 * width + x1) * 3,
+    ];
+    Some(std::array::from_fn(|channel| {
+        let top_left = f32::from(bytes[offsets[0] + channel]);
+        let top_right = f32::from(bytes[offsets[1] + channel]);
+        let bottom_left = f32::from(bytes[offsets[2] + channel]);
+        let bottom_right = f32::from(bytes[offsets[3] + channel]);
+        let top = top_left + (top_right - top_left) * fx;
+        let bottom = bottom_left + (bottom_right - bottom_left) * fx;
+        (top + (bottom - top) * fy + 0.5) as u8
+    }))
+}
+
 fn warp_affine(image: &RgbImage, size: u32, matrix: [[f32; 3]; 2]) -> RgbImage {
     let determinant = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
     let inverse = [
@@ -1500,10 +1555,8 @@ fn warp_affine(image: &RgbImage, size: u32, matrix: [[f32; 3]; 2]) -> RgbImage {
                 let translated_y = y as f32 - matrix[1][2];
                 let source_x = inverse[0][0] * translated_x + inverse[0][1] * translated_y;
                 let source_y = inverse[1][0] * translated_x + inverse[1][1] * translated_y;
-                if let Some(pixel) =
-                    image::imageops::interpolate_bilinear(image, source_x, source_y)
-                {
-                    row[x * 3..x * 3 + 3].copy_from_slice(&pixel.0);
+                if let Some(pixel) = interpolate_rgb_bilinear(image, source_x, source_y) {
+                    row[x * 3..x * 3 + 3].copy_from_slice(&pixel);
                 }
             }
         });
@@ -1852,6 +1905,23 @@ mod tests {
     }
 
     #[test]
+    fn specialized_bilinear_matches_image_reference() {
+        let image = RgbImage::from_fn(7, 5, |x, y| {
+            Rgb([
+                (x * 31 + y * 7) as u8,
+                (x * 3 + y * 41) as u8,
+                (x * 17 + y * 13) as u8,
+            ])
+        });
+        for y in [-0.25, 0.0, 0.2, 1.75, 4.0, 4.25] {
+            for x in [-0.25, 0.0, 0.6, 3.125, 6.0, 6.25] {
+                let expected = image::imageops::interpolate_bilinear(&image, x, y).map(|p| p.0);
+                assert_eq!(interpolate_rgb_bilinear(&image, x, y), expected);
+            }
+        }
+    }
+
+    #[test]
     fn simd_resize_matches_opencv_linear_within_one_lsb() {
         let pixels = (0..36).map(|value| (value * 7) as u8).collect();
         let image = RgbImage::from_raw(4, 3, pixels).unwrap();
@@ -1874,6 +1944,38 @@ mod tests {
     fn hsv_conversion_round_trips_primary_colors() {
         for color in [[255, 0, 0], [0, 255, 0], [0, 0, 255], [128, 128, 128]] {
             assert_eq!(opencv_hsv_to_rgb(rgb_to_opencv_hsv(color)), color);
+        }
+    }
+
+    #[test]
+    fn hsv_adjustment_tracks_opencv_reference() {
+        let input = [
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [128, 64, 32],
+            [17, 99, 201],
+            [240, 241, 239],
+            [0, 0, 0],
+        ];
+        let opencv = [
+            [255, 49, 17],
+            [17, 255, 49],
+            [49, 17, 255],
+            [151, 96, 48],
+            [34, 91, 224],
+            [255, 255, 255],
+            [23, 23, 23],
+        ];
+        for (pixel, expected) in input.into_iter().zip(opencv) {
+            let actual = adjust_hsv_pixel(pixel, [4.0, -17.0, 23.0]);
+            assert!(
+                actual
+                    .into_iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| actual.abs_diff(expected) <= 2),
+                "actual={actual:?} expected={expected:?}",
+            );
         }
     }
 

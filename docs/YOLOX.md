@@ -317,6 +317,20 @@ gain even against the faster old run and a 10.8% gain between pair averages.
 The follow-up CPU profile no longer contained the former generic resize
 hotspot; JPEG, HSV, and affine interpolation became the leading host costs.
 
+The remaining scalar color and affine paths were then specialized without
+changing their sampling contract. HSV conversion now operates directly in
+OpenCV's byte-scale H/S/V domains, avoids redundant normalization and
+`fmodf`, and matches fixed OpenCV augmentation references within two integer
+LSBs. Its sampled leaf cost fell from 5,657 to 3,684 samples (-34.9%). The
+affine warp uses a raw RGB8 bilinear sampler that is byte-identical to the
+previous generic `image` implementation on an edge/interior coordinate grid;
+its leaf samples fell from 4,282 to 3,393 (-20.8%), while total `roundf`
+samples fell from 2,584 to 1,151 before the final positive-value rounding was
+inlined. Two 400-step runs after both changes reached `547.3` and `547.7
+images/s`, versus `531.6` and `534.1 images/s` for the SIMD-resize baseline,
+about 2.8% higher by pair average. JPEG entropy decoding is now the largest
+sampled host hotspot.
+
 `--random-resize` enables YOLOX's ten-step multi-scale schedule. It selects a
 square 32-pixel multiple in the inclusive `--random-size-min` to
 `--random-size-max` range (official defaults `10..20`), precompiles only the
