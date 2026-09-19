@@ -342,6 +342,7 @@ struct CxInner {
 
 struct StateDeclaration {
     slot: StateSlot,
+    initial: Tensor,
     shape: Vec<i64>,
     dtype: DType,
     initializer: Initializer,
@@ -815,10 +816,12 @@ impl Cx {
             initializer,
         });
         let slot = inner.graph.state_named(&path, shape, dtype)?;
+        let initial = inner.graph.read(&slot)?;
         inner.states.insert(
             path.clone(),
             StateDeclaration {
                 slot: slot.clone(),
+                initial,
                 shape: shape.to_vec(),
                 dtype,
                 initializer,
@@ -945,6 +948,15 @@ impl Cx {
                     inner.states[state.path()].slot.clone(),
                 )
             })
+            .collect()
+    }
+
+    fn initial_state_tensors(&self, schema: &ModelSchema) -> Vec<Tensor> {
+        let inner = self.inner.lock().expect("trace context lock poisoned");
+        schema
+            .states()
+            .iter()
+            .map(|state| inner.states[state.path()].initial.clone())
             .collect()
     }
 
@@ -1266,6 +1278,7 @@ where
         .taps
         .clone();
     let states = cx.state_slots(&schema);
+    let initial_states = cx.initial_state_tensors(&schema);
     let resident_parameters = cx.resident_parameter_slots(&schema);
     let graph = cx
         .inner
@@ -1275,7 +1288,7 @@ where
         .clone();
     Ok(AppliedModel::new(
         graph,
-        states,
+        applied::AppliedStates::new(states, initial_states),
         outputs,
         taps,
         parameters,

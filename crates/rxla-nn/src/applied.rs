@@ -14,6 +14,7 @@ pub struct AppliedModel {
     graph: Tracer,
     state_graph: StateGraph,
     states: Vec<(String, StateSlot)>,
+    initial_states: Vec<Tensor>,
     outputs: Vec<Tensor>,
     taps: BTreeMap<String, Tensor>,
     parameters: Vec<Tensor>,
@@ -80,6 +81,18 @@ pub struct ModelSessionBuilder<'a> {
 pub struct ModelSessionBuffers {
     parameters: BTreeMap<String, Buffer>,
     states: BTreeMap<String, Buffer>,
+}
+
+pub(crate) struct AppliedStates {
+    slots: Vec<(String, StateSlot)>,
+    initial: Vec<Tensor>,
+}
+
+impl AppliedStates {
+    pub(crate) fn new(slots: Vec<(String, StateSlot)>, initial: Vec<Tensor>) -> Self {
+        debug_assert_eq!(slots.len(), initial.len());
+        Self { slots, initial }
+    }
 }
 
 /// One optimizer/transform-owned resident state slot appended after model tracing.
@@ -330,7 +343,7 @@ impl ModelSession {
 impl AppliedModel {
     pub(crate) fn new(
         state_graph: StateGraph,
-        states: Vec<(String, StateSlot)>,
+        states: AppliedStates,
         outputs: Vec<Tensor>,
         taps: BTreeMap<String, Tensor>,
         parameters: Vec<Tensor>,
@@ -341,7 +354,8 @@ impl AppliedModel {
         Self {
             graph,
             state_graph,
-            states,
+            states: states.slots,
+            initial_states: states.initial,
             outputs,
             taps,
             parameters,
@@ -405,6 +419,24 @@ impl AppliedModel {
 
     pub fn states(&self) -> impl ExactSizeIterator<Item = (&str, &StateSlot)> {
         self.states.iter().map(|(path, slot)| (path.as_str(), slot))
+    }
+
+    /// Step-start values of model-declared state in schema order.
+    ///
+    /// These precede forward effects such as BatchNorm running-stat updates and
+    /// exclude transform-owned state appended after tracing.
+    pub fn initial_model_state_tensors(&self) -> &[Tensor] {
+        &self.initial_states
+    }
+
+    /// Current symbolic values of model-declared state in schema order.
+    /// This observes forward writes and excludes transform-owned state.
+    pub fn current_model_state_tensors(&self) -> Result<Vec<Tensor>> {
+        self.states
+            .iter()
+            .take(self.schema.states().len())
+            .map(|(_, slot)| Ok(self.state_graph.read(slot)?))
+            .collect()
     }
 
     /// Resident parameter identities in schema order.

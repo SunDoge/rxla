@@ -500,16 +500,20 @@ fn main() -> Result<()> {
             let packed = model_ema
                 .packed_buffer(&training_session)?
                 .to_vec::<f32>()?;
-            let ema_buffers = model_ema
-                .parameters()
-                .iter()
-                .map(|parameter| {
-                    Ok((
-                        parameter.path().to_owned(),
-                        client.buffer(parameter.shape(), &packed[parameter.range()])?,
-                    ))
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let mut ema_buffers =
+                Vec::with_capacity(model_ema.parameters().len() + model_ema.states().len());
+            for parameter in model_ema.parameters() {
+                ema_buffers.push((
+                    parameter.path().to_owned(),
+                    client.buffer(parameter.shape(), &packed[parameter.range()])?,
+                ));
+            }
+            for state in model_ema.states() {
+                ema_buffers.push((
+                    state.path().to_owned(),
+                    client.buffer(state.shape(), &packed[state.range()])?,
+                ));
+            }
             let mut buffers = ema_buffers
                 .iter()
                 .map(|(path, buffer)| (path.as_str(), buffer))
@@ -519,6 +523,13 @@ fn main() -> Result<()> {
                 .into_iter()
                 .collect::<HashMap<_, _>>();
             for spec in training.schema().states() {
+                if model_ema
+                    .states()
+                    .iter()
+                    .any(|state| state.path() == spec.path())
+                {
+                    continue;
+                }
                 let buffer = states
                     .get(spec.path())
                     .copied()

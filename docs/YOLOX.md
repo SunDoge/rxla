@@ -202,13 +202,15 @@ one stateful device program, with no parameter download between them; the
 export path writes EMA parameters under their canonical model names. The EMA
 values are packed into one logical F32 vector for the hot update and split only
 when a checkpoint is requested. On the same seeded 100-step BF16 workload, the
-initial per-parameter implementation reached `447.6 images/s`; packing raised
-that to `470.6 images/s`, versus `492.6 images/s` with
-`--disable-model-ema`. Late observed device time was `11.0 ms` with packed EMA,
-equal to that particular no-EMA run, while total throughput still includes
-first-step and host scheduling variance. BatchNorm running state currently
-remains the live training value in exported checkpoints rather than an EMA
-copy.
+initial per-parameter implementation reached `447.6 images/s`; packing
+parameters raised that to `470.6 images/s`. After folding floating model state
+into the same packed operation, a subsequent run reached `490.8 images/s`,
+versus `492.6 images/s` with `--disable-model-ema`. Late observed device time
+was `10.9 ms` with packed EMA and `11.1 ms` in that no-EMA run, so the remaining
+total-throughput difference is below the noise of these short end-to-end runs.
+BatchNorm running statistics are initialized from their exact pre-forward
+values, share the packed EMA update, and are exported under canonical state
+paths; non-floating counters and RNG state are not averaged.
 
 Run the comparable RXLA side with:
 

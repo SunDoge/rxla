@@ -30,6 +30,27 @@ pub struct ModelEmaParameter {
     elements: usize,
 }
 
+pub struct ModelEmaState {
+    path: String,
+    shape: Vec<i64>,
+    offset: usize,
+    elements: usize,
+}
+
+impl ModelEmaState {
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn shape(&self) -> &[i64] {
+        &self.shape
+    }
+
+    pub fn range(&self) -> std::ops::Range<usize> {
+        self.offset..self.offset + self.elements
+    }
+}
+
 impl ModelEmaParameter {
     pub fn path(&self) -> &str {
         &self.path
@@ -46,10 +67,11 @@ impl ModelEmaParameter {
 
 /// Device-resident EMA state produced by [`apply_model_ema`].
 ///
-/// The state paths are transform-private; `parameter_buffers` exposes them
-/// under canonical model parameter paths for inference checkpoint export.
+/// Its resident storage is transform-private; [`Self::parameters`] and
+/// [`Self::states`] describe canonical slices for inference checkpoint export.
 pub struct ModelEma {
     parameters: Vec<ModelEmaParameter>,
+    states: Vec<ModelEmaState>,
     values: TransformState,
     updates: TransformState,
 }
@@ -57,6 +79,10 @@ pub struct ModelEma {
 impl ModelEma {
     pub fn parameters(&self) -> &[ModelEmaParameter] {
         &self.parameters
+    }
+
+    pub fn states(&self) -> &[ModelEmaState] {
+        &self.states
     }
 
     pub fn updates_state(&self) -> &TransformState {
@@ -104,6 +130,8 @@ pub fn apply_model_ema(
 
     let initial_parameters = model.parameter_tensors(selection)?;
     let current_parameters = model.current_resident_parameter_tensors(selection)?;
+    let initial_states = model.initial_model_state_tensors().to_vec();
+    let current_states = model.current_model_state_tensors()?;
     let updates = model.transform_state("__model_ema.updates", &[], DType::F32)?;
     let next_updates = updates.value().add_scalar(1.0)?;
     let effective_decay = next_updates
@@ -117,6 +145,7 @@ pub fn apply_model_ema(
     let mut initial_flat = Vec::with_capacity(selection.len());
     let mut current_flat = Vec::with_capacity(selection.len());
     let mut parameters = Vec::with_capacity(selection.len());
+    let mut states = Vec::new();
     let mut offset = 0usize;
     for (((_, spec), initial), current) in selection
         .parameters()
@@ -150,6 +179,45 @@ pub fn apply_model_ema(
         });
         offset = next_offset;
     }
+    for ((spec, initial), current) in model
+        .schema()
+        .states()
+        .iter()
+        .zip(initial_states)
+        .zip(current_states)
+    {
+        // Official ModelEMA updates floating entries from state_dict; integer
+        // counters and RNG state retain their ordinary model semantics.
+        if spec.dtype() != DType::F32 {
+            continue;
+        }
+        let elements_i64 = spec
+            .shape()
+            .iter()
+            .try_fold(1_i64, |product, &dimension| product.checked_mul(dimension))
+            .ok_or_else(|| ModelEmaError::ParameterSizeOverflow {
+                path: spec.path().to_owned(),
+            })?;
+        let elements =
+            usize::try_from(elements_i64).map_err(|_| ModelEmaError::ParameterSizeOverflow {
+                path: spec.path().to_owned(),
+            })?;
+        let next_offset =
+            offset
+                .checked_add(elements)
+                .ok_or_else(|| ModelEmaError::ParameterSizeOverflow {
+                    path: spec.path().to_owned(),
+                })?;
+        initial_flat.push(initial.reshape([elements_i64])?);
+        current_flat.push(current.reshape([elements_i64])?);
+        states.push(ModelEmaState {
+            path: spec.path().to_owned(),
+            shape: spec.shape().to_vec(),
+            offset,
+            elements,
+        });
+        offset = next_offset;
+    }
     // Express EMA arithmetic once over one logical parameter vector. XLA can
     // fuse this into a large bandwidth-efficient update instead of launching a
     // separate tiny elementwise fusion for every bias and BatchNorm vector.
@@ -173,6 +241,7 @@ pub fn apply_model_ema(
 
     Ok(ModelEma {
         parameters,
+        states,
         values,
         updates,
     })
@@ -262,6 +331,62 @@ mod tests {
             .unwrap()[0];
         let decay2 = 0.9998 * (1.0 - (-2.0_f32 / 2000.0).exp());
         let expected2 = expected1 * decay2 + 0.04 * (1.0 - decay2);
+        assert!((second - expected2).abs() < 1e-6, "{second} != {expected2}");
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
+    fn ema_tracks_model_state_from_its_pre_forward_value() {
+        fn stateful_loss(cx: Cx) -> Result<Tensor> {
+            let input = cx.input([1, 1])?;
+            let running = cx.state("running", [1], DType::F32)?;
+            running.add_(&cx, &cx.constant([1], [2.0])?)?;
+            let prediction = input.apply(&cx.named_layer("linear", Linear::new(1).bias(false))?)?;
+            Ok(prediction.square()?.sum([0, 1], false)?)
+        }
+
+        let client = unsafe {
+            Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
+        }
+        .expect("load CPU plugin");
+        let (selection, mut model) = Model::new(stateful_loss).trace_resident_all().unwrap();
+        let loss = model.outputs()[0].clone();
+        apply_model_sgd(&mut model, &selection, &loss, 0.0).unwrap();
+        let ema = apply_model_ema(&mut model, &selection, 0.9998).unwrap();
+        assert_eq!(ema.states().len(), 1);
+        assert_eq!(ema.states()[0].path(), "running");
+        let state_range = ema.states()[0].range();
+        let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+        let program = model.compile_stateful(&mut compiler).unwrap();
+        let weight = client.buffer(&[1, 1], &[1.0]).unwrap();
+        let mut session = program
+            .session()
+            .parameter("linear.weight", weight)
+            .unwrap()
+            .build()
+            .unwrap();
+        let input = client.buffer(&[1, 1], &[1.0]).unwrap();
+
+        let _: Buffer = session.run(&input).unwrap();
+        let packed = ema
+            .packed_buffer(session.raw())
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let first = packed[state_range.clone()][0];
+        let decay1 = 0.9998 * (1.0 - (-1.0_f32 / 2000.0).exp());
+        let expected1 = 2.0 * (1.0 - decay1);
+        assert!((first - expected1).abs() < 1e-6, "{first} != {expected1}");
+
+        let _: Buffer = session.run(&input).unwrap();
+        let packed = ema
+            .packed_buffer(session.raw())
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let second = packed[state_range][0];
+        let decay2 = 0.9998 * (1.0 - (-2.0_f32 / 2000.0).exp());
+        let expected2 = expected1 * decay2 + 4.0 * (1.0 - decay2);
         assert!((second - expected2).abs() < 1e-6, "{second} != {expected2}");
     }
 }
