@@ -202,7 +202,11 @@ impl YoloLrSchedule {
         }
     }
 
-    pub fn at(self, step: usize) -> SimOtaResult<f32> {
+    /// Return the rate for a one-based optimizer update number.
+    ///
+    /// YOLOX evaluates its schedule with `progress_in_iter + 1`; rejecting zero
+    /// prevents callers from silently inserting an extra zero-rate update.
+    pub fn at_update(self, update: usize) -> SimOtaResult<f32> {
         ensure!(
             self.base_learning_rate.is_finite()
                 && self.base_learning_rate >= 0.0
@@ -212,12 +216,13 @@ impl YoloLrSchedule {
                 && self.warmup_learning_rate >= 0.0
                 && self.minimum_ratio.is_finite()
                 && (0.0..=1.0).contains(&self.minimum_ratio)
-                && step < self.total_steps,
+                && update > 0
+                && update <= self.total_steps,
             ConfigurationSnafu
         );
         let minimum = self.base_learning_rate * self.minimum_ratio;
-        if self.warmup_steps > 0 && step < self.warmup_steps {
-            let progress = step as f32 / self.warmup_steps as f32;
+        if self.warmup_steps > 0 && update <= self.warmup_steps {
+            let progress = update as f32 / self.warmup_steps as f32;
             return Ok(
                 (self.base_learning_rate - self.warmup_learning_rate) * progress * progress
                     + self.warmup_learning_rate,
@@ -226,10 +231,10 @@ impl YoloLrSchedule {
         let cosine_steps = self
             .total_steps
             .saturating_sub(self.warmup_steps + self.minimum_rate_steps);
-        if cosine_steps == 0 || step >= self.total_steps - self.minimum_rate_steps {
+        if cosine_steps == 0 || update >= self.total_steps - self.minimum_rate_steps {
             return Ok(minimum);
         }
-        let progress = (step - self.warmup_steps) as f32 / cosine_steps as f32;
+        let progress = (update - self.warmup_steps) as f32 / cosine_steps as f32;
         Ok(minimum
             + 0.5
                 * (self.base_learning_rate - minimum)
@@ -640,12 +645,14 @@ mod tests {
             .warmup_steps(10)
             .minimum_rate_steps(10)
             .minimum_ratio(0.05);
-        assert_eq!(schedule.at(0).unwrap(), 0.0);
-        assert!((schedule.at(5).unwrap() - 0.25).abs() < 1e-6);
-        assert!((schedule.at(10).unwrap() - 1.0).abs() < 1e-6);
-        assert!((schedule.at(50).unwrap() - 0.525).abs() < 1e-6);
-        assert_eq!(schedule.at(90).unwrap(), 0.05);
-        assert_eq!(schedule.at(99).unwrap(), 0.05);
-        assert!(schedule.at(100).is_err());
+        assert!(schedule.at_update(0).is_err());
+        assert!((schedule.at_update(1).unwrap() - 0.01).abs() < 1e-6);
+        assert!((schedule.at_update(5).unwrap() - 0.25).abs() < 1e-6);
+        assert!((schedule.at_update(10).unwrap() - 1.0).abs() < 1e-6);
+        assert!((schedule.at_update(50).unwrap() - 0.525).abs() < 1e-6);
+        assert_eq!(schedule.at_update(90).unwrap(), 0.05);
+        assert_eq!(schedule.at_update(99).unwrap(), 0.05);
+        assert_eq!(schedule.at_update(100).unwrap(), 0.05);
+        assert!(schedule.at_update(101).is_err());
     }
 }

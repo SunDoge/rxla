@@ -86,7 +86,7 @@ struct Args {
     /// Limit updates in this invocation while retaining the global --steps schedule.
     #[arg(long)]
     run_steps: Option<usize>,
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 416)]
     size: i64,
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
@@ -96,8 +96,8 @@ struct Args {
     /// Per-image padded target capacity; official YOLOX uses 120.
     #[arg(long, default_value_t = MAX_TARGETS)]
     target_capacity: usize,
-    /// Use YOLOX's random 32-pixel-multiple input size every 10 steps.
-    #[arg(long)]
+    /// Whether to use YOLOX-tiny's random 320..640 input size every 10 steps.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     random_resize: bool,
     #[arg(long, default_value_t = 10)]
     random_size_min: u32,
@@ -853,7 +853,10 @@ fn main() -> Result<()> {
         let staging_started = Instant::now();
         let input = client.buffer(&[batch, args.size, args.size, 3], &pixels)?;
         let image_upload_ms = staging_started.elapsed().as_secs_f64() * 1e3;
-        let step_learning_rate = schedule.at(completed)?;
+        // The official trainer calls update_lr(progress_in_iter + 1) before
+        // optimizer.step(), so update numbers are one-based even though our
+        // completed-step counter is zero-based.
+        let step_learning_rate = schedule.at_update(completed + 1)?;
         let learning_rate = client.buffer(&[], &[step_learning_rate])?;
         let use_l1 = no_augmentation_steps != 0
             && completed >= total_steps.saturating_sub(no_augmentation_steps);
@@ -2036,6 +2039,25 @@ fn letterbox(image: &RgbImage, size: u32) -> std::result::Result<(Vec<u8>, f32),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_defaults_to_the_official_tiny_input_recipe() {
+        let args = Args::try_parse_from([
+            "yolox_coco_train_step",
+            "plugin.so",
+            "weights.safetensors",
+            "coco",
+            "instances.json",
+            "images",
+            "1",
+        ])
+        .unwrap();
+        assert_eq!(args.size, 416);
+        assert!(args.random_resize);
+        assert_eq!((args.random_size_min, args.random_size_max), (10, 20));
+        assert_eq!(args.mosaic_probability, 1.0);
+        assert_eq!(args.mixup_probability, 0.0);
+    }
 
     #[test]
     fn official_epoch_recipe_keeps_data_and_lr_boundaries_distinct() {

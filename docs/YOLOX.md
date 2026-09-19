@@ -128,6 +128,13 @@ Assignments are detached before entering the differentiable loss. The output
 checkpoint excludes optimizer moments but includes parameters and model
 BatchNorm state, so it can be passed directly to `yolox_infer`.
 
+The default training size is YOLOX-tiny's 416×416. Multiscale training is also
+enabled by default and selects a 32-pixel multiple in 320..640 every ten
+optimizer updates; pass `--random-resize false` only for controlled experiments.
+The learning-rate scheduler follows the official trainer's one-based update
+counter, so the first optimizer update uses the quadratic-warmup value at
+iteration one rather than an artificial zero-rate update.
+
 The default total learning rate follows the official trainer and scales
 `basic_lr_per_img = 0.01 / 64` by the effective batch size. For example,
 `--batch-size 8 --gradient-accumulation 8` represents batch 64 and uses `0.01`.
