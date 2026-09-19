@@ -968,11 +968,15 @@ fn prepare_single(
     batch: usize,
     rng: SampleRng,
 ) -> std::result::Result<(String, Vec<u8>, Vec<DetectionTarget>), String> {
-    let mut image = decode_sample(&sample)?;
-    let mut boxes = sample.boxes.clone();
-    train_transform(&mut image, &mut boxes, rng);
-    let (pixels, ratio) = letterbox(&image, size);
-    let targets = detection_targets(&boxes, &sample.classes, ratio, batch);
+    let image = decode_sample(&sample)?;
+    let (pixels, targets) = finish_training_sample(
+        image,
+        sample.boxes.clone(),
+        &sample.classes,
+        size,
+        batch,
+        rng,
+    );
     Ok((sample.id, pixels, targets))
 }
 
@@ -1044,38 +1048,20 @@ fn prepare_mosaic(
         ids.push(sample.id);
     }
 
-    let (matrix, affine_scale) = random_affine_matrix(size, rng);
+    let matrix = random_affine_matrix(size, rng);
     let mut image = warp_affine(&canvas, size, matrix);
     let transformed = boxes
         .iter()
         .copied()
         .map(|bbox| transform_box(bbox, matrix, size as f32))
         .collect::<Vec<_>>();
-    let mut retained_boxes = Vec::with_capacity(transformed.len());
-    let mut retained_classes = Vec::with_capacity(classes.len());
-    for ((source, transformed), class) in boxes.into_iter().zip(transformed).zip(classes) {
-        if affine_box_candidate(source, transformed, affine_scale) {
-            retained_boxes.push(transformed);
-            retained_classes.push(class);
-        }
-    }
-    let mut transformed = retained_boxes;
-    let mut classes = retained_classes;
+    let mut transformed = transformed;
     if let Some(mixup) = mixup {
         ids.push(format!("mixup:{}", mixup.id));
         apply_mixup(&mut image, &mut transformed, &mut classes, mixup, size, rng)?;
     }
-    train_transform(&mut image, &mut transformed, rng);
-    let mut targets = detection_targets(&transformed, &classes, 1.0, batch);
-    targets.retain(|target| target.cxcywh[2] > 1.0 && target.cxcywh[3] > 1.0);
-    Ok((
-        ids.join("+"),
-        image
-            .pixels()
-            .flat_map(|pixel| pixel.0.into_iter().rev())
-            .collect(),
-        targets,
-    ))
+    let (pixels, targets) = finish_training_sample(image, transformed, &classes, size, batch, rng);
+    Ok((ids.join("+"), pixels, targets))
 }
 
 fn apply_mixup(
@@ -1184,6 +1170,43 @@ fn detection_targets(
             ],
         })
         .collect()
+}
+
+fn finish_training_sample(
+    mut image: RgbImage,
+    mut boxes: Vec<[f32; 4]>,
+    classes: &[usize],
+    size: u32,
+    batch: usize,
+    rng: SampleRng,
+) -> (Vec<u8>, Vec<DetectionTarget>) {
+    let ratio = (size as f32 / image.width() as f32).min(size as f32 / image.height() as f32);
+    let valid = boxes
+        .iter()
+        .map(|bbox| ((bbox[2] - bbox[0]) * ratio, (bbox[3] - bbox[1]) * ratio))
+        .map(|(width, height)| width.min(height) > 1.0)
+        .collect::<Vec<_>>();
+
+    // Official TrainTransform falls back to the original, unaugmented image
+    // and labels when augmentation would leave no box larger than one pixel.
+    // The validity predicate is invariant under HSV and horizontal flip, so
+    // avoid cloning/mutating the image when the fallback is already known.
+    if !boxes.is_empty() && !valid.iter().any(|&keep| keep) {
+        let (pixels, ratio) = letterbox(&image, size);
+        return (pixels, detection_targets(&boxes, classes, ratio, batch));
+    }
+    if boxes.is_empty() {
+        return (letterbox(&image, size).0, Vec::new());
+    }
+
+    train_transform(&mut image, &mut boxes, rng);
+    let (pixels, ratio) = letterbox(&image, size);
+    let targets = detection_targets(&boxes, classes, ratio, batch)
+        .into_iter()
+        .zip(valid)
+        .filter_map(|(target, keep)| keep.then_some(target))
+        .collect();
+    (pixels, targets)
 }
 
 fn train_transform(image: &mut RgbImage, boxes: &mut [[f32; 4]], rng: SampleRng) {
@@ -1348,7 +1371,7 @@ fn mosaic_coordinates(
     }
 }
 
-fn random_affine_matrix(size: u32, rng: SampleRng) -> ([[f32; 3]; 2], f32) {
+fn random_affine_matrix(size: u32, rng: SampleRng) -> [[f32; 3]; 2] {
     let angle = (-10.0 + 20.0 * rng.uniform(2, 0)).to_radians();
     // YOLOX-tiny overrides the base recipe's 0.1..2.0 range with 0.5..1.5.
     let scale = 0.5 + rng.uniform(2, 1);
@@ -1357,7 +1380,7 @@ fn random_affine_matrix(size: u32, rng: SampleRng) -> ([[f32; 3]; 2], f32) {
     let alpha = scale * angle.cos();
     let beta = scale * angle.sin();
     let extent = size as f32;
-    let matrix = [
+    [
         [
             alpha - shear_y * beta,
             beta + shear_y * alpha,
@@ -1368,20 +1391,7 @@ fn random_affine_matrix(size: u32, rng: SampleRng) -> ([[f32; 3]; 2], f32) {
             alpha + shear_x * beta,
             (-0.1 + 0.2 * rng.uniform(2, 5)) * extent,
         ],
-    ];
-    (matrix, scale)
-}
-
-fn affine_box_candidate(source: [f32; 4], transformed: [f32; 4], scale: f32) -> bool {
-    let source_width = (source[2] - source[0]) * scale;
-    let source_height = (source[3] - source[1]) * scale;
-    let width = transformed[2] - transformed[0];
-    let height = transformed[3] - transformed[1];
-    let aspect_ratio = (width / (height + 1e-16)).max(height / (width + 1e-16));
-    width > 2.0
-        && height > 2.0
-        && width * height / (source_width * source_height + 1e-16) > 0.2
-        && aspect_ratio < 20.0
+    ]
 }
 
 fn transform_box(bbox: [f32; 4], matrix: [[f32; 3]; 2], extent: f32) -> [f32; 4] {
@@ -1675,6 +1685,38 @@ mod tests {
     }
 
     #[test]
+    fn train_transform_falls_back_when_every_box_is_tiny() {
+        let image = RgbImage::from_pixel(2, 2, Rgb([10, 20, 30]));
+        let (pixels, targets) = finish_training_sample(
+            image,
+            vec![[0.0, 0.0, 0.5, 0.5]],
+            &[7],
+            2,
+            0,
+            DataRng::new(3).sample(0, 0),
+        );
+        assert_eq!(pixels, [30, 20, 10].repeat(4));
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].class, 7);
+        assert_eq!(targets[0].cxcywh, [0.25, 0.25, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn train_transform_filters_tiny_boxes_when_another_box_survives() {
+        let image = RgbImage::from_pixel(8, 8, Rgb([10, 20, 30]));
+        let (_, targets) = finish_training_sample(
+            image,
+            vec![[0.0, 0.0, 0.5, 0.5], [1.0, 1.0, 5.0, 5.0]],
+            &[7, 8],
+            8,
+            0,
+            DataRng::new(3).sample(0, 0),
+        );
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].class, 8);
+    }
+
+    #[test]
     fn mosaic_regions_have_matching_valid_source_and_destination_extents() {
         for quadrant in 0..4 {
             for center_x in [208, 416, 624] {
@@ -1701,15 +1743,6 @@ mod tests {
         );
         let image = RgbImage::from_fn(8, 8, |x, y| Rgb([x as u8, y as u8, 3]));
         assert_eq!(warp_affine(&image, 8, matrix), image);
-    }
-
-    #[test]
-    fn affine_candidates_match_yolox_geometry_thresholds() {
-        let source = [0.0, 0.0, 10.0, 10.0];
-        assert!(affine_box_candidate(source, source, 1.0));
-        assert!(!affine_box_candidate(source, [0.0, 0.0, 1.0, 10.0], 1.0));
-        assert!(!affine_box_candidate(source, [0.0, 0.0, 3.0, 3.0], 1.0));
-        assert!(!affine_box_candidate(source, [0.0, 0.0, 100.0, 3.0], 1.0));
     }
 
     #[test]

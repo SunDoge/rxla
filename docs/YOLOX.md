@@ -144,10 +144,12 @@ and YOLOX-tiny's `0.5..1.5` affine scale range. Tiny disables MixUp by default;
 when enabled explicitly, it draws another nonempty sample from the same pool
 with `0.5..1.5` jitter, optional flip, crop, and a 50/50 blend. HSV
 perturbation and a 0.5-probability horizontal flip then run on the composite.
-Post-affine boxes use the official candidate filter: both dimensions must exceed
-2 pixels, transformed area must retain more than 20% of the scaled source box,
-and aspect ratio must remain below 20. This prevents clipped slivers from
-entering SimOTA while keeping class labels aligned with the retained boxes.
+Post-affine boxes follow the current YOLOX 0.3 training path: affine itself
+retains clipped boxes, then `TrainTransform` removes boxes whose scaled minimum
+side is at most one pixel. If that would remove every label, it falls back to
+the pre-HSV/pre-flip image and labels. The stricter width/area/aspect candidate
+filter belonged to YOLOX 0.1's older `random_perspective` path and is not mixed
+into the current recipe.
 The final no-augmentation phase consumes one image, disables Mosaic/MixUp, and
 enables the official raw-box L1 loss. Its weight is a runtime scalar, so the
 phase transition reuses the same compiled forward/backward/SGD program. Decoded
