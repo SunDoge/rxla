@@ -281,6 +281,17 @@ under XLA code generation. The default remains 120 for recipe compatibility;
 this knob is fixed per compiled variant and does not create an automatic bucket
 cross-product with multi-scale image sizes.
 
+The trainer reports both the largest unpadded per-image target count and the
+number of targets dropped by the selected capacity. This makes a lower capacity
+an observable, dataset-specific optimization instead of a silent semantic
+change. In a deterministic 200-step COCO/Mosaic run at 416x416, batch 8, and
+BF16, the observed maximum was 67 targets per image. Capacity 64 dropped three
+targets and reached `466.3 images/s`; capacity 80 dropped none and reached
+`464.4 images/s`; the matching capacity-120 run reached `451.7 images/s`.
+Capacity 80 therefore improved this short workload by 2.8% without changing its
+targets, but it is not a replacement for the recipe-compatible default: a
+different dataset, seed, or augmentation stream can have a higher maximum.
+
 `--random-resize` enables YOLOX's ten-step multi-scale schedule. It selects a
 square 32-pixel multiple in the inclusive `--random-size-min` to
 `--random-size-max` range (official defaults `10..20`), precompiles only the

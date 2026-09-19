@@ -216,6 +216,19 @@ struct PreparedBatch {
     load_ms: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TargetPaddingStats {
+    maximum_per_image: usize,
+    dropped: usize,
+}
+
+struct PaddedTargets {
+    boxes: Vec<f32>,
+    classes: Vec<i32>,
+    valid: Vec<f32>,
+    stats: TargetPaddingStats,
+}
+
 struct TrainingVariant {
     model: AppliedModel,
     program: StateProgram,
@@ -650,6 +663,9 @@ fn main() -> Result<()> {
         .warmup_steps(warmup_steps)
         .no_augmentation_steps(no_augmentation_steps);
     let mut completed = resumed_at;
+    let mut maximum_targets_per_image = 0;
+    let mut dropped_targets = 0;
+    let mut warned_about_dropped_targets = false;
     let run_started = Instant::now();
     let mut profiler = None;
     loop {
@@ -690,12 +706,24 @@ fn main() -> Result<()> {
             0.0
         };
         let l1_weight = client.buffer(&[], &[l1_weight_value])?;
-        let (target_boxes, target_classes, target_valid) =
-            padded_targets(args.batch_size, args.target_capacity, 80, &targets)?;
+        let padded = padded_targets(args.batch_size, args.target_capacity, 80, &targets)?;
+        let target_stats = padded.stats;
+        maximum_targets_per_image = maximum_targets_per_image.max(target_stats.maximum_per_image);
+        dropped_targets += target_stats.dropped;
+        if target_stats.dropped != 0 && !warned_about_dropped_targets {
+            eprintln!(
+                "warning: --target-capacity={} dropped {} targets at step {}; observed {} targets in one image",
+                args.target_capacity,
+                target_stats.dropped,
+                completed + 1,
+                target_stats.maximum_per_image,
+            );
+            warned_about_dropped_targets = true;
+        }
         let capacity = i64::try_from(args.target_capacity)?;
-        let target_boxes = client.buffer(&[batch, capacity, 4], &target_boxes)?;
-        let target_classes = client.buffer(&[batch, capacity, 1], &target_classes)?;
-        let target_valid = client.buffer(&[batch, capacity, 1], &target_valid)?;
+        let target_boxes = client.buffer(&[batch, capacity, 4], &padded.boxes)?;
+        let target_classes = client.buffer(&[batch, capacity, 1], &padded.classes)?;
+        let target_valid = client.buffer(&[batch, capacity, 1], &padded.valid)?;
         let train_started = Instant::now();
         let outputs = training_session.run(&[
             &input,
@@ -725,9 +753,11 @@ fn main() -> Result<()> {
         if let Some(losses) = losses {
             let foreground = losses[5] as usize;
             println!(
-                "step={completed} size={size} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} l1={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} train_ms={train_ms:.1}",
+                "step={completed} size={size} image_id={} targets={} max_targets={} dropped_targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} l1={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} train_ms={train_ms:.1}",
                 sample_ids.join(","),
                 targets.len(),
+                target_stats.maximum_per_image,
+                target_stats.dropped,
                 foreground,
                 losses[0],
                 losses[1],
@@ -820,7 +850,7 @@ fn main() -> Result<()> {
     let cache = compiler.stats();
     let executed = completed - resumed_at;
     println!(
-        "completed={completed} resumed_at={resumed_at} images={} run_ms={:.1} images_per_second={:.1} replay_ms={replay_ms:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
+        "completed={completed} resumed_at={resumed_at} images={} maximum_targets_per_image={maximum_targets_per_image} dropped_targets={dropped_targets} run_ms={:.1} images_per_second={:.1} replay_ms={replay_ms:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
         executed * args.batch_size,
         run_seconds * 1e3,
         executed as f64 * args.batch_size as f64 / run_seconds,
@@ -1631,7 +1661,7 @@ fn padded_targets(
     max_targets: usize,
     classes: usize,
     targets: &[DetectionTarget],
-) -> Result<(Vec<f32>, Vec<i32>, Vec<f32>)> {
+) -> Result<PaddedTargets> {
     let mut boxes = vec![0.0; batch * max_targets * 4];
     let mut class_indices = vec![0; batch * max_targets];
     let mut valid = vec![0.0; batch * max_targets];
@@ -1641,16 +1671,29 @@ fn padded_targets(
             return Err("target batch or class is out of range".into());
         }
         let slot = counts[target.batch];
-        if slot == max_targets {
+        counts[target.batch] += 1;
+        if slot >= max_targets {
             continue;
         }
-        counts[target.batch] += 1;
         let row = target.batch * max_targets + slot;
         boxes[row * 4..row * 4 + 4].copy_from_slice(&target.cxcywh);
         class_indices[row] = i32::try_from(target.class)?;
         valid[row] = 1.0;
     }
-    Ok((boxes, class_indices, valid))
+    let maximum_per_image = counts.iter().copied().max().unwrap_or(0);
+    let dropped = counts
+        .into_iter()
+        .map(|count| count.saturating_sub(max_targets))
+        .sum();
+    Ok(PaddedTargets {
+        boxes,
+        classes: class_indices,
+        valid,
+        stats: TargetPaddingStats {
+            maximum_per_image,
+            dropped,
+        },
+    })
 }
 
 fn letterbox(image: &RgbImage, size: u32) -> (Vec<u8>, f32) {
@@ -1690,10 +1733,17 @@ mod tests {
                 cxcywh: [5.0, 6.0, 7.0, 8.0],
             },
         ];
-        let (boxes, classes, valid) = padded_targets(2, 1, 3, &targets).unwrap();
-        assert_eq!(&boxes[4..8], &[1.0, 2.0, 3.0, 4.0]);
-        assert_eq!(classes, [0, 2]);
-        assert_eq!(valid, [0.0, 1.0]);
+        let padded = padded_targets(2, 1, 3, &targets).unwrap();
+        assert_eq!(&padded.boxes[4..8], &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(padded.classes, [0, 2]);
+        assert_eq!(padded.valid, [0.0, 1.0]);
+        assert_eq!(
+            padded.stats,
+            TargetPaddingStats {
+                maximum_per_image: 2,
+                dropped: 1,
+            }
+        );
     }
 
     #[test]
