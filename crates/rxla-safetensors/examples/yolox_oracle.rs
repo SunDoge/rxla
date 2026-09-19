@@ -3,7 +3,8 @@
 use clap::Parser;
 use rxla_core::{Buffer, CacheLimits, Client, Compiler};
 use rxla_models::{
-    YoloAssignments, YoloConfig, YoloLossConfig, yolo_forward, yolox_loss_with_l1_weight,
+    YoloConfig, YoloLossConfig, YoloSimOtaConfig, YoloTargets, yolo_forward,
+    yolox_loss_with_l1_weight, yolox_simota,
 };
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
@@ -105,38 +106,45 @@ fn main() -> Result<()> {
             },
         ],
     )?;
-    write_f32(
-        &args.output.join("assignment_boxes.f32"),
-        &assignments.boxes,
-    )?;
-    write_f32(
-        &args.output.join("assignment_objectness.f32"),
-        &assignments.objectness,
-    )?;
-    write_f32(
-        &args.output.join("assignment_classes.f32"),
-        &assignments.classes,
-    )?;
-
-    let anchors = i64::try_from(assignments.anchors)?;
     let loss_definition = Model::new(
-        |_cx: Cx, head0, head1, head2, boxes, objectness, classes, l1_weight| {
+        |_cx: Cx,
+         head0: rxla_core::Tensor,
+         head1: rxla_core::Tensor,
+         head2: rxla_core::Tensor,
+         boxes: rxla_core::Tensor,
+         classes: rxla_core::Tensor,
+         valid: rxla_core::Tensor,
+         l1_weight: rxla_core::Tensor| {
+            let assignments = yolox_simota(
+                &[head0.clone(), head1.clone(), head2.clone()],
+                &YoloTargets {
+                    boxes,
+                    classes,
+                    valid,
+                },
+                YoloSimOtaConfig::default(),
+            )?;
             let loss = yolox_loss_with_l1_weight(
                 &[head0, head1, head2],
-                &YoloAssignments {
-                    boxes,
-                    objectness,
-                    classes,
-                },
+                &assignments,
                 YoloLossConfig::default(),
                 &l1_weight,
             )?;
+            let metrics = rxla_core::Tensor::stack(
+                &[
+                    loss.total,
+                    loss.boxes,
+                    loss.objectness,
+                    loss.classes,
+                    loss.l1,
+                ],
+                0,
+            )?;
             Ok::<_, rxla_models::Error>((
-                loss.total,
-                loss.boxes,
-                loss.objectness,
-                loss.classes,
-                loss.l1,
+                assignments.boxes,
+                assignments.objectness,
+                assignments.classes,
+                metrics,
             ))
         },
     )
@@ -144,35 +152,55 @@ fn main() -> Result<()> {
         ModelInput::new(model_shapes[0]),
         ModelInput::new(model_shapes[1]),
         ModelInput::new(model_shapes[2]),
-        ModelInput::new([1, anchors, 4]),
-        ModelInput::new([1, anchors, 1]),
-        ModelInput::new([1, anchors, 80]),
+        ModelInput::new([1, 2, 4]),
+        ModelInput::new([1, 2, 80]),
+        ModelInput::new([1, 2, 1]),
         ModelInput::new([]),
     ))
     .inference();
     let (_, loss_model) = loss_definition.trace_resident_all()?;
-    let metrics = rxla_core::Tensor::stack(loss_model.outputs(), 0)?;
-    let loss_program = loss_model.compile_stateful_tensors(&mut compiler, &[metrics])?;
-    let mut loss_session = loss_model
-        .session(&loss_program)
-        .initialize_parameters(0)?
-        .build()?;
-    let boxes = client.buffer(&[1, anchors, 4], &assignments.boxes)?;
-    let objectness = client.buffer(&[1, anchors, 1], &assignments.objectness)?;
-    let classes = client.buffer(&[1, anchors, 80], &assignments.classes)?;
+    let loss_program = loss_model.compile_stateful(&mut compiler)?;
+    let mut loss_session = loss_program.session().initialize_parameters(0)?.build()?;
+    let target_boxes = client.buffer(
+        &[1, 2, 4],
+        &[20.0_f32, 20.0, 12.0, 16.0, 44.0, 42.0, 18.0, 14.0],
+    )?;
+    let mut target_classes = vec![0.0_f32; 160];
+    target_classes[0] = 1.0;
+    target_classes[80 + 7] = 1.0;
+    let target_classes = client.buffer(&[1, 2, 80], &target_classes)?;
+    let valid = client.buffer(&[1, 2, 1], &[1.0_f32, 1.0])?;
     let l1_weight = client.buffer(&[], &[1.0_f32])?;
-    let loss_outputs = loss_session.run(&[
+    let loss_outputs: [Buffer; 4] = loss_session.run([
         &outputs[8],
         &outputs[9],
         &outputs[10],
-        &boxes,
-        &objectness,
-        &classes,
+        &target_boxes,
+        &target_classes,
+        &valid,
         &l1_weight,
     ])?;
+    let device_boxes = loss_outputs[0].to_vec::<f32>()?;
+    let device_objectness = loss_outputs[1].to_vec::<f32>()?;
+    let device_classes = loss_outputs[2].to_vec::<f32>()?;
+    if device_boxes != assignments.boxes
+        || device_objectness != assignments.objectness
+        || device_classes
+            .iter()
+            .zip(&assignments.classes)
+            .any(|(left, right)| (left - right).abs() > 1e-6)
+    {
+        return Err("device SimOTA differs from the host reference".into());
+    }
+    write_f32(&args.output.join("assignment_boxes.f32"), &device_boxes)?;
+    write_f32(
+        &args.output.join("assignment_objectness.f32"),
+        &device_objectness,
+    )?;
+    write_f32(&args.output.join("assignment_classes.f32"), &device_classes)?;
     write_f32(
         &args.output.join("loss.f32"),
-        &loss_outputs[0].to_vec::<f32>()?,
+        &loss_outputs[3].to_vec::<f32>()?,
     )?;
     println!("output={} size={}", args.output.display(), args.size);
     Ok(())

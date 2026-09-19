@@ -722,6 +722,39 @@ impl Tensor {
         self.add(&scattered)
     }
 
+    /// Add values selected independently at every non-axis position.
+    ///
+    /// `self`, `indices`, and `updates` have equal rank and matching non-axis
+    /// dimensions; `indices` and `updates` have identical shapes. Repeated
+    /// indices sum. This is the scatter-add counterpart of
+    /// [`Self::take_along_axis`].
+    pub fn index_add_along_axis(
+        &self,
+        axis: usize,
+        indices: &Tensor,
+        updates: &Self,
+    ) -> Result<Self> {
+        validate_take_along_axis(self.graph(), self.shape(), indices, axis)?;
+        if !Arc::ptr_eq(&self.graph().0, &updates.graph().0)
+            || self.dtype() != DType::F32
+            || updates.dtype() != DType::F32
+            || updates.shape() != indices.shape()
+        {
+            return Err(err(
+                "index_add_along_axis requires F32 base/updates and matching I32 indices",
+            ));
+        }
+        let scattered = self.graph().node(
+            Op::GatherGradient {
+                axis,
+                batched: true,
+            },
+            vec![updates.node_id(), indices.node_id()],
+            self.shape(),
+        )?;
+        self.add(&scattered)
+    }
+
     /// Rebind this handle to the result of [`Self::index_add`].
     pub fn index_add_(
         &mut self,

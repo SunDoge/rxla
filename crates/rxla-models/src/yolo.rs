@@ -590,6 +590,259 @@ pub struct YoloAssignments {
     pub classes: Tensor,
 }
 
+/// Fixed-shape ground truth consumed by device-side SimOTA.
+///
+/// Rows with a zero `valid` value are padding. `classes` contains one-hot class
+/// targets, which keeps the matcher entirely in F32 StableHLO.
+pub struct YoloTargets {
+    pub boxes: Tensor,
+    pub classes: Tensor,
+    pub valid: Tensor,
+}
+
+/// Constants used by the official YOLOX dynamic matcher.
+#[derive(Clone, Copy, Debug, Setters)]
+#[setters(generate = false)]
+pub struct YoloSimOtaConfig {
+    #[setters(generate)]
+    center_radius: f32,
+    #[setters(generate)]
+    candidate_top_k: usize,
+    #[setters(generate)]
+    iou_weight: f32,
+    #[setters(generate)]
+    outside_penalty: f32,
+}
+
+impl Default for YoloSimOtaConfig {
+    fn default() -> Self {
+        Self {
+            center_radius: 1.5,
+            candidate_top_k: 10,
+            iou_weight: 3.0,
+            outside_penalty: 1_000_000.0,
+        }
+    }
+}
+
+/// Build official-compatible SimOTA assignment as a static-shape XLA graph.
+///
+/// Matching is nondifferentiable, but keeping it on device avoids downloading
+/// raw heads, a second model forward, and uploading dense assignments.
+pub fn yolox_simota(
+    outputs: &[Tensor; 3],
+    targets: &YoloTargets,
+    config: YoloSimOtaConfig,
+) -> Result<YoloAssignments> {
+    let [batch, _, _, channels] =
+        <[i64; 4]>::try_from(outputs[0].shape()).map_err(|_| Error::InvalidModel {
+            kind: ModelDefinitionError::InvalidYoloAssignments,
+        })?;
+    let classes = channels - 5;
+    let [target_batch, max_targets, coordinates] = <[i64; 3]>::try_from(targets.boxes.shape())
+        .map_err(|_| Error::InvalidModel {
+            kind: ModelDefinitionError::InvalidYoloAssignments,
+        })?;
+    let valid_heads = outputs.iter().all(|output| {
+        matches!(output.shape(), [b, h, w, c]
+            if *b == batch && *h > 0 && *w > 0 && *c == channels)
+            && output.dtype() == DType::F32
+    });
+    if !valid_heads
+        || classes <= 0
+        || max_targets <= 0
+        || coordinates != 4
+        || target_batch != batch
+        || targets.classes.shape() != [batch, max_targets, classes]
+        || targets.valid.shape() != [batch, max_targets, 1]
+        || targets.boxes.dtype() != DType::F32
+        || targets.classes.dtype() != DType::F32
+        || targets.valid.dtype() != DType::F32
+        || !config.center_radius.is_finite()
+        || config.center_radius <= 0.0
+        || config.candidate_top_k == 0
+        || !config.iou_weight.is_finite()
+        || config.iou_weight < 0.0
+        || !config.outside_penalty.is_finite()
+        || config.outside_penalty < 0.0
+    {
+        return Err(Error::InvalidModel {
+            kind: ModelDefinitionError::InvalidYoloAssignments,
+        });
+    }
+
+    let mut decoded = Vec::with_capacity(3);
+    let mut objectness = Vec::with_capacity(3);
+    let mut class_logits = Vec::with_capacity(3);
+    let mut centers = Vec::with_capacity(3);
+    let mut strides = Vec::with_capacity(3);
+    for (output, stride) in outputs.iter().zip([8, 16, 32]) {
+        let [_, height, width, _] = <[i64; 4]>::try_from(output.shape()).unwrap();
+        let head_anchors = height * width;
+        let x = output.iota_i32(&[1, height, width, 1], 2)?.to_f32()?;
+        let y = output.iota_i32(&[1, height, width, 1], 1)?.to_f32()?;
+        let grid = Tensor::concatenate(&[x, y], 3)?;
+        let raw_box = output.narrow(3, 0, 4)?;
+        let xy = raw_box
+            .narrow(3, 0, 2)?
+            .add(&grid.broadcast_to([batch, height, width, 2])?)?
+            .mul_scalar(stride as f32)?;
+        let wh = raw_box.narrow(3, 2, 2)?.exp()?.mul_scalar(stride as f32)?;
+        decoded.push(Tensor::concatenate(&[xy, wh], 3)?.reshape([batch, head_anchors, 4])?);
+        objectness.push(output.narrow(3, 4, 1)?.reshape([batch, head_anchors, 1])?);
+        class_logits.push(
+            output
+                .narrow(3, 5, classes)?
+                .reshape([batch, head_anchors, classes])?,
+        );
+        centers.push(grid.add_scalar(0.5)?.mul_scalar(stride as f32)?.reshape([
+            1,
+            head_anchors,
+            2,
+        ])?);
+        strides.push(
+            output
+                .scalar(stride as f32)?
+                .broadcast_to([1, head_anchors, 1])?,
+        );
+    }
+    let decoded = Tensor::concatenate(&decoded, 1)?;
+    let objectness = Tensor::concatenate(&objectness, 1)?;
+    let class_logits = Tensor::concatenate(&class_logits, 1)?;
+    let centers = Tensor::concatenate(&centers, 1)?;
+    let strides = Tensor::concatenate(&strides, 1)?;
+    let anchors = decoded.shape()[1];
+    let candidate_top_k = config
+        .candidate_top_k
+        .min(usize::try_from(anchors).unwrap());
+    let pair_shape = [batch, max_targets, anchors];
+    let pair_boxes_shape = [batch, max_targets, anchors, 4];
+    let predicted_boxes = decoded.unsqueeze(1)?.broadcast_to(pair_boxes_shape)?;
+    let target_boxes = targets.boxes.unsqueeze(2)?.broadcast_to(pair_boxes_shape)?;
+    let pairwise_iou = pairwise_cxcywh_iou(&predicted_boxes, &target_boxes)?;
+    let valid = targets.valid.broadcast_to(pair_shape)?;
+    let center_shape = [batch, max_targets, anchors, 2];
+    let target_centers = targets
+        .boxes
+        .narrow(2, 0, 2)?
+        .unsqueeze(2)?
+        .broadcast_to(center_shape)?;
+    let anchor_centers = centers.unsqueeze(1)?.broadcast_to(center_shape)?;
+    let radius = strides
+        .unsqueeze(1)?
+        .mul_scalar(config.center_radius)?
+        .broadcast_to(center_shape)?;
+    let center_axes = anchor_centers
+        .sub(&target_centers)?
+        .abs()?
+        .lt_mask(&radius)?;
+    let in_center = center_axes
+        .narrow(3, 0, 1)?
+        .mul(&center_axes.narrow(3, 1, 1)?)?
+        .reshape(pair_shape)?
+        .mul(&valid)?;
+    let candidate = in_center
+        .sum([1], true)?
+        .gt_mask(&decoded.scalar(0.0)?.broadcast_to([batch, 1, anchors])?)?
+        .broadcast_to(pair_shape)?;
+    let dynamic_iou = pairwise_iou.mul(&candidate)?.mul(&valid)?;
+    let dynamic_k = dynamic_iou
+        .topk(candidate_top_k, 2)?
+        .0
+        .sum([2], true)?
+        .floor()?
+        .maximum(&decoded.scalar(1.0)?.broadcast_to([batch, max_targets, 1])?)?
+        .mul(&targets.valid)?;
+
+    let probability = class_logits
+        .sigmoid()?
+        .mul(
+            &objectness
+                .sigmoid()?
+                .broadcast_to([batch, anchors, classes])?,
+        )?
+        .sqrt()?
+        .clamp(1e-8, 1.0 - 1e-8)?;
+    let negative_class_cost = probability.neg()?.log1p()?.neg()?;
+    let positive_delta = probability.log()?.neg()?.sub(&negative_class_cost)?;
+    let classification_cost = negative_class_cost
+        .sum([2], false)?
+        .unsqueeze(1)?
+        .broadcast_to(pair_shape)?
+        .add(&targets.classes.einsum("bmc,bac->bma", &positive_delta)?)?;
+    let cost = classification_cost
+        .sub(
+            &pairwise_iou
+                .add_scalar(1e-8)?
+                .log()?
+                .mul_scalar(config.iou_weight)?,
+        )?
+        .add(
+            &in_center
+                .neg()?
+                .add_scalar(1.0)?
+                .mul_scalar(config.outside_penalty)?,
+        )?
+        .add(
+            &valid
+                .neg()?
+                .add_scalar(1.0)?
+                .mul_scalar(config.outside_penalty * 2.0)?,
+        )?;
+    let selected = cost.neg()?.topk(candidate_top_k, 2)?.1;
+    let rank = decoded
+        .iota_i32(&[1, 1, candidate_top_k as i64], 2)?
+        .to_f32()?
+        .broadcast_to([batch, max_targets, candidate_top_k as i64])?;
+    let selected_mask =
+        rank.lt_mask(&dynamic_k.broadcast_to([batch, max_targets, candidate_top_k as i64])?)?;
+    let matching = decoded
+        .scalar(0.0)?
+        .broadcast_to(pair_shape)?
+        .index_add_along_axis(2, &selected, &selected_mask)?
+        .clamp(0.0, 1.0)?;
+    let selected_cost = matching.select(
+        &cost,
+        &decoded
+            .scalar(config.outside_penalty * 4.0)?
+            .broadcast_to(pair_shape)?,
+    )?;
+    let winner = selected_cost.neg()?.argmax(1, true)?.to_f32()?;
+    let target_index = decoded
+        .iota_i32(&[1, max_targets, 1], 1)?
+        .to_f32()?
+        .broadcast_to(pair_shape)?;
+    let chosen = target_index
+        .eq_mask(&winner.broadcast_to(pair_shape)?)?
+        .mul(&matching)?
+        .mul(&valid)?;
+    let foreground = chosen.sum([1], false)?.unsqueeze(2)?;
+    let boxes = chosen
+        .unsqueeze(3)?
+        .broadcast_to(pair_boxes_shape)?
+        .mul(&targets.boxes.unsqueeze(2)?.broadcast_to(pair_boxes_shape)?)?
+        .sum([1], false)?;
+    let matched_iou = chosen.mul(&pairwise_iou)?.unsqueeze(3)?.broadcast_to([
+        batch,
+        max_targets,
+        anchors,
+        classes,
+    ])?;
+    let classes = matched_iou
+        .mul(&targets.classes.unsqueeze(2)?.broadcast_to([
+            batch,
+            max_targets,
+            anchors,
+            classes,
+        ])?)?
+        .sum([1], false)?;
+    Ok(YoloAssignments {
+        boxes: boxes.detach()?,
+        objectness: foreground.detach()?,
+        classes: classes.detach()?,
+    })
+}
+
 /// Weights for the differentiable half of the YOLOX objective.
 #[derive(Clone, Copy, Debug, Setters)]
 #[setters(generate = false)]
@@ -801,6 +1054,37 @@ fn aligned_cxcywh_iou(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
     )?)
 }
 
+fn pairwise_cxcywh_iou(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    let axis = lhs.shape().len() - 1;
+    let lhs_xy = lhs.narrow(axis, 0, 2)?;
+    let lhs_half = lhs.narrow(axis, 2, 2)?.mul_scalar(0.5)?;
+    let rhs_xy = rhs.narrow(axis, 0, 2)?;
+    let rhs_half = rhs.narrow(axis, 2, 2)?.mul_scalar(0.5)?;
+    let intersection_min = lhs_xy.sub(&lhs_half)?.maximum(&rhs_xy.sub(&rhs_half)?)?;
+    let intersection_max = lhs_xy.add(&lhs_half)?.minimum(&rhs_xy.add(&rhs_half)?)?;
+    let intersection_wh = intersection_max
+        .sub(&intersection_min)?
+        .maximum(&lhs.scalar(0.0)?.broadcast_to(intersection_max.shape())?)?;
+    let intersection = intersection_wh
+        .narrow(axis, 0, 1)?
+        .mul(&intersection_wh.narrow(axis, 1, 1)?)?
+        .squeeze(axis)?;
+    let lhs_area = lhs
+        .narrow(axis, 2, 1)?
+        .mul(&lhs.narrow(axis, 3, 1)?)?
+        .squeeze(axis)?;
+    let rhs_area = rhs
+        .narrow(axis, 2, 1)?
+        .mul(&rhs.narrow(axis, 3, 1)?)?
+        .squeeze(axis)?;
+    Ok(intersection.div(
+        &lhs_area
+            .add(&rhs_area)?
+            .sub(&intersection)?
+            .add_scalar(1e-8)?,
+    )?)
+}
+
 fn pair_product(input: &Tensor) -> Result<Tensor> {
     let shape = [input.shape()[0], input.shape()[1]];
     input
@@ -916,5 +1200,38 @@ mod tests {
         assert!(loss.l1.shape().is_empty());
         let gradients = loss.total.grad(&outputs).unwrap();
         assert_eq!(gradients.len(), 3);
+    }
+
+    #[test]
+    fn device_simota_lowers_static_matching_to_stablehlo() {
+        let graph = Tracer::default();
+        let outputs = [
+            graph.input([1, 2, 2, 7]).unwrap(),
+            graph.input([1, 1, 1, 7]).unwrap(),
+            graph.input([1, 1, 1, 7]).unwrap(),
+        ];
+        let assignments = yolox_simota(
+            &outputs,
+            &YoloTargets {
+                boxes: graph.input([1, 3, 4]).unwrap(),
+                classes: graph.input([1, 3, 2]).unwrap(),
+                valid: graph.input([1, 3, 1]).unwrap(),
+            },
+            YoloSimOtaConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(assignments.boxes.shape(), [1, 6, 4]);
+        assert_eq!(assignments.objectness.shape(), [1, 6, 1]);
+        assert_eq!(assignments.classes.shape(), [1, 6, 2]);
+        let stablehlo = graph
+            .stablehlo_many(&[
+                assignments.boxes,
+                assignments.objectness,
+                assignments.classes,
+            ])
+            .unwrap();
+        assert!(stablehlo.contains("stablehlo.sort"));
+        assert!(stablehlo.contains("stablehlo.scatter"));
+        assert!(!stablehlo.contains("custom_call"));
     }
 }

@@ -1,17 +1,20 @@
-//! Train YOLOX on real COCO samples with host SimOTA and resident momentum SGD.
+//! Train YOLOX on real COCO samples with device SimOTA and resident momentum SGD.
 
 use clap::{Parser, Subcommand};
 use fory::{ForyRow, from_row};
 use image::{Rgb, RgbImage, imageops::FilterType};
 use rayon::prelude::*;
-use rxla_core::{Buffer, CacheLimits, Client, Compiler, Tensor};
-use rxla_models::{YoloAssignments, YoloConfig, YoloLossConfig, yolo, yolox_loss_with_l1_weight};
+use rxla_core::{CacheLimits, Client, Compiler, Tensor};
+use rxla_models::{
+    YoloConfig, YoloLossConfig, YoloSimOtaConfig, YoloTargets, yolo, yolox_loss_with_l1_weight,
+    yolox_simota,
+};
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::{SafeTensors, save_model_new};
 use rxla_tfrecord::Reader as TfrecordReader;
 use rxla_train::{
-    BoundedPipeline, DataRng, DecodedYoloBatch, DetectionTarget, SampleRng, SgdOptions,
-    ShufflePool, SimOtaConfig, YoloHead, YoloLrSchedule, apply_model_sgd_with_learning_rate,
+    BoundedPipeline, DataRng, DetectionTarget, SampleRng, SgdOptions, ShufflePool, YoloLrSchedule,
+    apply_model_sgd_with_learning_rate,
 };
 use serde::Deserialize;
 use std::{
@@ -21,6 +24,8 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+const MAX_TARGETS: usize = 120;
 
 #[derive(Parser)]
 #[command(about = "Run consecutive real COCO YOLOX training steps")]
@@ -46,10 +51,10 @@ struct Args {
     shuffle_buffer: usize,
     #[arg(long, default_value_t = 7)]
     seed: u64,
+    #[arg(long, default_value_t = 1.0)]
+    mosaic_probability: f32,
     /// Official YOLOX-tiny disables MixUp; set to 1 for the base recipe.
     #[arg(long, default_value_t = 0.0)]
-    mosaic_probability: f32,
-    #[arg(long, default_value_t = 1.0)]
     mixup_probability: f32,
     #[arg(long, default_value_t = 0.00015625)]
     learning_rate: f32,
@@ -211,34 +216,30 @@ fn main() -> Result<()> {
     let pipeline = BoundedPipeline::from_iter(args.prefetch, batches)?;
     let batch = i64::try_from(args.batch_size)?;
     let client = unsafe { Client::load(&args.plugin) }?;
-    let config = YoloConfig::yolox_tiny(80);
-    let inference = Model::new(move |cx: Cx, image| yolo(cx, &image, &config))
-        .inputs(ModelInput::new([batch, args.size, args.size, 3]))
-        .inference();
-    let (_, inference) = inference.trace_resident_all()?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let inference_program = inference.compile_stateful_program(&mut compiler)?;
-    let anchors = head_shapes(1, args.size, 85)
-        .iter()
-        .map(|shape| shape[1] * shape[2])
-        .sum::<usize>() as i64;
     let training_config = YoloConfig::yolox_tiny(80);
     let training = Model::new(
         move |cx: Cx,
               image: Tensor,
-              boxes: Tensor,
-              objectness: Tensor,
-              classes: Tensor,
+              target_boxes: Tensor,
+              target_classes: Tensor,
+              target_valid: Tensor,
               learning_rate: Tensor,
               l1_weight: Tensor| {
             let outputs = yolo(cx, &image, &training_config)?;
+            let assignments = yolox_simota(
+                &outputs,
+                &YoloTargets {
+                    boxes: target_boxes,
+                    classes: target_classes,
+                    valid: target_valid,
+                },
+                YoloSimOtaConfig::default(),
+            )?;
+            let foreground = assignments.objectness.sum([0, 1, 2], false)?;
             let loss = yolox_loss_with_l1_weight(
                 &outputs,
-                &YoloAssignments {
-                    boxes,
-                    objectness,
-                    classes,
-                },
+                &assignments,
                 YoloLossConfig::default(),
                 &l1_weight,
             )?;
@@ -248,24 +249,25 @@ fn main() -> Result<()> {
                 loss.objectness,
                 loss.classes,
                 loss.l1,
+                foreground,
                 learning_rate,
             ))
         },
     )
     .inputs((
         ModelInput::new([batch, args.size, args.size, 3]),
-        ModelInput::new([batch, anchors, 4]),
-        ModelInput::new([batch, anchors, 1]),
-        ModelInput::new([batch, anchors, 80]),
+        ModelInput::new([batch, MAX_TARGETS as i64, 4]),
+        ModelInput::new([batch, MAX_TARGETS as i64, 80]),
+        ModelInput::new([batch, MAX_TARGETS as i64, 1]),
         ModelInput::new([]),
         ModelInput::new([]),
     ))
     .training();
     let (trainable, mut training) = training.trace_resident_all()?;
     let checkpoint_schema = training.schema().clone();
-    let metrics = Tensor::stack(&training.outputs()[..5], 0)?;
+    let metrics = Tensor::stack(&training.outputs()[..6], 0)?;
     let loss = training.outputs()[0].clone();
-    let learning_rate = training.outputs()[5].clone();
+    let learning_rate = training.outputs()[6].clone();
     apply_model_sgd_with_learning_rate(
         &mut training,
         &trainable,
@@ -317,71 +319,40 @@ fn main() -> Result<()> {
             0.0
         };
         let l1_weight = client.buffer(&[], &[l1_weight_value])?;
-
-        // Buffer clones share their PJRT allocation. The inference detour sees
-        // the current weights while the original snapshot retains SGD state.
-        let snapshot = training.take_session(training_session)?;
-        let mut inference_session = snapshot
-            .clone()
-            .restore_model(inference.session(&inference_program))?
-            .build()?;
-        let infer_started = Instant::now();
-        let outputs: [Buffer; 3] =
-            inference_session
-                .run(&[&input])?
-                .try_into()
-                .map_err(|outputs: Vec<Buffer>| {
-                    format!("inference returned {} outputs instead of 3", outputs.len())
-                })?;
-        let infer_ms = infer_started.elapsed().as_secs_f64() * 1e3;
-        training_session = snapshot
-            .restore_model(training.session(&program))?
-            .build()?;
-
-        let match_started = Instant::now();
-        let heads = outputs
-            .iter()
-            .map(Buffer::to_vec::<f32>)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let shapes = head_shapes(batch, args.size, 85);
-        let decoded = DecodedYoloBatch::from_heads([
-            YoloHead::new(&heads[0], shapes[0]).stride(8),
-            YoloHead::new(&heads[1], shapes[1]).stride(16),
-            YoloHead::new(&heads[2], shapes[2]).stride(32),
+        let (target_boxes, target_classes, target_valid) =
+            padded_targets(args.batch_size, MAX_TARGETS, 80, &targets)?;
+        let target_boxes = client.buffer(&[batch, MAX_TARGETS as i64, 4], &target_boxes)?;
+        let target_classes = client.buffer(&[batch, MAX_TARGETS as i64, 80], &target_classes)?;
+        let target_valid = client.buffer(&[batch, MAX_TARGETS as i64, 1], &target_valid)?;
+        let train_started = Instant::now();
+        let outputs = training_session.run(&[
+            &input,
+            &target_boxes,
+            &target_classes,
+            &target_valid,
+            &learning_rate,
+            &l1_weight,
         ])?;
-        let assignments = SimOtaConfig::default().assign(&decoded.input(), &targets)?;
-        let match_ms = match_started.elapsed().as_secs_f64() * 1e3;
-        if assignments.foreground == 0 {
+        let train_ms = train_started.elapsed().as_secs_f64() * 1e3;
+        let losses = outputs[0].to_vec::<f32>()?;
+        if losses.len() != 6 || losses.iter().any(|value| !value.is_finite()) {
+            return Err("training produced invalid losses".into());
+        }
+        let foreground = losses[5] as usize;
+        if foreground == 0 {
             return Err(format!(
                 "SimOTA produced no foreground anchors for image {}",
                 sample_ids.join(",")
             )
             .into());
         }
-        let boxes = client.buffer(&[batch, anchors, 4], &assignments.boxes)?;
-        let objectness = client.buffer(&[batch, anchors, 1], &assignments.objectness)?;
-        let classes = client.buffer(&[batch, anchors, 80], &assignments.classes)?;
-        let train_started = Instant::now();
-        let outputs = training_session.run(&[
-            &input,
-            &boxes,
-            &objectness,
-            &classes,
-            &learning_rate,
-            &l1_weight,
-        ])?;
-        let train_ms = train_started.elapsed().as_secs_f64() * 1e3;
-        let losses = outputs[0].to_vec::<f32>()?;
-        if losses.len() != 5 || losses.iter().any(|value| !value.is_finite()) {
-            return Err("training produced invalid losses".into());
-        }
         completed += 1;
         if completed == 1 || completed % args.log_every == 0 || completed == args.steps {
             println!(
-                "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} l1={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} infer_ms={infer_ms:.1} match_ms={match_ms:.1} train_ms={train_ms:.1}",
+                "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} l1={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} train_ms={train_ms:.1}",
                 sample_ids.join(","),
                 targets.len(),
-                assignments.foreground,
+                foreground,
                 losses[0],
                 losses[1],
                 losses[2],
@@ -1137,15 +1108,31 @@ const COCO_CATEGORY_IDS: [u64; 80] = [
 const DETECTION_SCHEMA_SHA256: &str =
     "237f2fa5b001dbed66bc326f618b90fdeba67d2d284357a38274612d007d455f";
 
-fn head_shapes(batch: i64, size: i64, channels: usize) -> [[usize; 4]; 3] {
-    [8, 16, 32].map(|stride| {
-        [
-            batch as usize,
-            (size / stride) as usize,
-            (size / stride) as usize,
-            channels,
-        ]
-    })
+fn padded_targets(
+    batch: usize,
+    max_targets: usize,
+    classes: usize,
+    targets: &[DetectionTarget],
+) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>)> {
+    let mut boxes = vec![0.0; batch * max_targets * 4];
+    let mut one_hot = vec![0.0; batch * max_targets * classes];
+    let mut valid = vec![0.0; batch * max_targets];
+    let mut counts = vec![0; batch];
+    for target in targets {
+        if target.batch >= batch || target.class >= classes {
+            return Err("target batch or class is out of range".into());
+        }
+        let slot = counts[target.batch];
+        if slot == max_targets {
+            continue;
+        }
+        counts[target.batch] += 1;
+        let row = target.batch * max_targets + slot;
+        boxes[row * 4..row * 4 + 4].copy_from_slice(&target.cxcywh);
+        one_hot[row * classes + target.class] = 1.0;
+        valid[row] = 1.0;
+    }
+    Ok((boxes, one_hot, valid))
 }
 
 fn letterbox(image: &RgbImage, size: u32) -> (Vec<f32>, f32) {
@@ -1168,6 +1155,26 @@ fn letterbox(image: &RgbImage, size: u32) -> (Vec<f32>, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn targets_are_padded_one_hot_and_capped_per_image() {
+        let targets = [
+            DetectionTarget {
+                batch: 1,
+                class: 2,
+                cxcywh: [1.0, 2.0, 3.0, 4.0],
+            },
+            DetectionTarget {
+                batch: 1,
+                class: 1,
+                cxcywh: [5.0, 6.0, 7.0, 8.0],
+            },
+        ];
+        let (boxes, classes, valid) = padded_targets(2, 1, 3, &targets).unwrap();
+        assert_eq!(&boxes[4..8], &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(&classes[3..6], &[0.0, 0.0, 1.0]);
+        assert_eq!(valid, [0.0, 1.0]);
+    }
 
     #[test]
     fn mosaic_regions_have_matching_valid_source_and_destination_extents() {

@@ -35,6 +35,46 @@ fn rejects_incompatible_indices() {
 }
 
 #[test]
+fn index_add_along_axis_validates_parallel_shapes() {
+    let g = Tracer::default();
+    let base = g.input([2, 4]).unwrap();
+    let indices = g.input_i32([2, 3]).unwrap();
+    let updates = g.input([2, 3]).unwrap();
+    assert_eq!(
+        base.index_add_along_axis(1, &indices, &updates)
+            .unwrap()
+            .shape(),
+        [2, 4]
+    );
+    assert!(base.index_add_along_axis(0, &indices, &updates).is_err());
+    assert!(
+        base.index_add_along_axis(1, &indices, &g.input([2, 2]).unwrap())
+            .is_err()
+    );
+}
+
+#[test]
+#[ignore = "requires trusted PJRT_PLUGIN_PATH"]
+fn real_index_add_along_axis_sums_repeated_per_row_updates() {
+    let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
+    let g = Tracer::default();
+    let base = g.input([2, 4]).unwrap();
+    let indices = g.input_i32([2, 3]).unwrap();
+    let updates = g.input([2, 3]).unwrap();
+    let output = base.index_add_along_axis(1, &indices, &updates).unwrap();
+    let exe = g.compile(&client, &output).unwrap();
+    let buffers = [
+        client.buffer(&[2, 4], &[1.; 8]).unwrap(),
+        client.buffer(&[2, 3], &[0_i32, 2, 2, 1, 1, 3]).unwrap(),
+        client.buffer(&[2, 3], &[2., 3., 4., 5., 6., 7.]).unwrap(),
+    ];
+    let actual = exe.execute(&buffers.iter().collect::<Vec<_>>()).unwrap()[0]
+        .to_vec::<f32>()
+        .unwrap();
+    assert_eq!(actual, [3., 1., 8., 1., 1., 12., 1., 8.]);
+}
+
+#[test]
 #[ignore = "requires trusted PJRT_PLUGIN_PATH"]
 fn real_integer_gather_preserves_bits_all_axes_and_empty_outputs() {
     let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();

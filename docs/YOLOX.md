@@ -62,19 +62,19 @@ cargo run -p rxla-safetensors --release --features model \
   391895
 ```
 
-The model is compiled once. Each step runs the current weights through the
-inference graph, computes dynamic SimOTA assignments on the host, then executes
-the loss, backward pass, BatchNorm updates, and SGD update as one stateful XLA
-program. Switching between the inference and training programs clones shared
-PJRT buffer handles rather than copying parameter payloads. The output excludes
-optimizer moments but includes parameters and model BatchNorm state, so it can
-be passed directly to `yolox_infer`.
+The model is compiled once. One stateful XLA program executes the model forward,
+device-side SimOTA assignment, loss, backward pass, BatchNorm updates, and SGD
+update. SimOTA receives at most 120 padded targets per image, matching the
+official training transform, and lowers center filtering, pairwise IoU,
+classification cost, dynamic-k selection, and conflict resolution to StableHLO.
+Assignments are detached before entering the differentiable loss. The output
+checkpoint excludes optimizer moments but includes parameters and model
+BatchNorm state, so it can be passed directly to `yolox_infer`.
 
 The example accepts a static `--batch-size`; variable numbers of targets are
-kept in host-side records and SimOTA emits dense assignment tensors for the
-compiled batch. JPEG decode and letterboxing run across the batch with Rayon,
-and SimOTA assigns each image in parallel. Dataset shuffling, augmentation, and
-prefetch belong in the data pipeline rather than the YOLO model definition.
+padded and masked before transfer. JPEG decode and augmentation run across the
+batch with Rayon. Dataset shuffling, augmentation, and prefetch remain in the
+data pipeline rather than the YOLO model definition.
 
 For sequential training, COCO can instead be stored as standard TFRecord
 framing with Apache Fory Standard Row payloads. The JPEG remains compressed;
@@ -113,29 +113,22 @@ input pipeline before entering the model.
 
 ## Verified baseline
 
-On an RTX 5080 with JAX's CUDA 13 PJRT plugin, a 64×64 two-step COCO smoke run
-produced finite losses on both steps. After warmup, inference for assignment was
-3.1 ms and the fused training update was 9.1 ms. The same run passed with the
-ZML CPU PJRT plugin; its warm step measured 8.5 ms for inference and 24.6 ms for
-training. These are smoke-test timings, not throughput benchmarks.
+On an RTX 5080 with JAX's CUDA 13 PJRT plugin, device SimOTA selects exactly the
+same oracle assignments as the official-compatible PyTorch implementation and
+the retained Rust host reference. At 416×416 and batch size 8, a 20-step run
+over the Fory TFRecord with default Mosaic, no MixUp, and two final
+no-augmentation/L1 steps processed 160 output images in 869.0 ms, including
+first-step execution warmup: 184.1 images/s. The unified
+forward/SimOTA/loss/backward/SGD graph took 36.4–37.2 ms after warmup. A bounded
+three-batch producer hid the 39–51 ms Mosaic preparation time; measured consumer
+wait remained 0.0 ms. Compilation took 12.4 seconds. Timings vary with image
+contents, target counts, host CPU, and PJRT/XLA versions.
 
-At 416×416 and batch size 8, a twenty-step run over the Fory TFRecord measured
-about 7.5–8.5 ms for assignment inference and 36.4–36.5 ms for the fused
-forward/backward/SGD program after warmup (roughly 180 images/s for device work).
-Parallel JPEG decode plus letterboxing took 12–16 ms and host SimOTA typically
-took 12–15 ms. The bounded producer keeps two prepared batches ahead, reducing
-consumer wait to 0.0 ms after the first batch. The complete 160-image measured
-region, including first-step execution warmup, took 1.377 seconds (116.2
-images/s), compared with roughly 96–111 images/s when input preparation was
-sequential. Moving matching onto the device remains the largest pipeline-level
-opportunity. Timings vary with image contents, target counts, host CPU, and
-PJRT/XLA versions.
-
-After replacing full per-target sorts with bounded top-k selection and writing
-parallel image assignments directly into the final dense buffers, a
-default-Mosaic, no-MixUp 20-step run reached 124.9 images/s. Steady-state host
-matching was typically 9–11 ms; inference and the fused training update remained
-about 8 ms and 36–37 ms respectively.
+For comparison, the preceding host-SimOTA design reached 124.9 images/s on the
+same hardware. It required an additional approximately 8 ms inference pass,
+9–11 ms of host matching, a raw-head download, and dense-target uploads per
+step. Moving matching into XLA improved measured end-to-end throughput by about
+47% while preserving oracle assignments and losses.
 
 With Mosaic, affine, MixUp, HSV, and flip all enabled, the corresponding
 twenty-step run took 1.482 seconds for 160 output images (107.9 images/s),
