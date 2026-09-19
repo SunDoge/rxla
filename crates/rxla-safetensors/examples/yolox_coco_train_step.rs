@@ -36,8 +36,15 @@ fn default_learning_rate(batch_size: usize) -> f32 {
 
 fn default_augmentation_workers() -> usize {
     std::thread::available_parallelism()
-        .map(|threads| (threads.get() * 2 / 3).max(1))
+        // A batch already fans out over Rayon's global pool. These workers
+        // overlap a few batches; scaling them with every host core only
+        // oversubscribes JPEG decoding and the nested image transforms.
+        .map(|threads| threads.get().min(4))
         .unwrap_or(1)
+}
+
+fn default_prefetch() -> usize {
+    default_augmentation_workers() * 8
 }
 
 #[derive(Parser)]
@@ -70,7 +77,7 @@ struct Args {
     #[arg(long, default_value_t = 20)]
     random_size_max: u32,
     /// Number of prepared host batches retained ahead of the device.
-    #[arg(long, default_value_t = default_augmentation_workers())]
+    #[arg(long, default_value_t = default_prefetch())]
     prefetch: usize,
     /// Concurrent ordered host batches submitted to the augmentation pool.
     #[arg(long, default_value_t = default_augmentation_workers())]
@@ -850,8 +857,10 @@ fn main() -> Result<()> {
     let cache = compiler.stats();
     let executed = completed - resumed_at;
     println!(
-        "completed={completed} resumed_at={resumed_at} images={} maximum_targets_per_image={maximum_targets_per_image} dropped_targets={dropped_targets} run_ms={:.1} images_per_second={:.1} replay_ms={replay_ms:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
+        "completed={completed} resumed_at={resumed_at} images={} augmentation_workers={} prefetch={} maximum_targets_per_image={maximum_targets_per_image} dropped_targets={dropped_targets} run_ms={:.1} images_per_second={:.1} replay_ms={replay_ms:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
         executed * args.batch_size,
+        args.augmentation_workers,
+        args.prefetch,
         run_seconds * 1e3,
         executed as f64 * args.batch_size as f64 / run_seconds,
         variants.len(),

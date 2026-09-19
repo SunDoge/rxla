@@ -292,6 +292,19 @@ Capacity 80 therefore improved this short workload by 2.8% without changing its
 targets, but it is not a replacement for the recipe-compatible default: a
 different dataset, seed, or augmentation stream can have a higher maximum.
 
+Host augmentation uses two independent controls. `--augmentation-workers`
+sets the number of batches prepared concurrently, while `--prefetch` bounds the
+ready-batch queue. A batch already parallelizes its images and pixel transforms
+through Rayon, so the automatic worker count is capped at four rather than
+scaling a second level of parallelism to most host cores; the default prefetch
+depth is eight batches per worker. On the same 24-core host and deterministic
+200-step workload, the former automatic 16-worker/16-prefetch configuration
+reached `466.9` and `467.5 images/s` in two interleaved runs. The new
+4-worker/32-prefetch configuration reached `478.5` and `482.7 images/s`, a
+2.5%-3.3% improvement. Prepared pixels are retained as bytes, but large images
+or batches can still make a deep queue costly; both values remain explicit CLI
+overrides for memory-constrained hosts.
+
 `--random-resize` enables YOLOX's ten-step multi-scale schedule. It selects a
 square 32-pixel multiple in the inclusive `--random-size-min` to
 `--random-size-max` range (official defaults `10..20`), precompiles only the
