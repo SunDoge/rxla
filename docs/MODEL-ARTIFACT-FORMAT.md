@@ -18,8 +18,8 @@ model.rxla/
 │   ├── inference.stablehlo.mlirbc
 │   └── train-lora.stablehlo.mlirbc
 ├── tensors/
-│   ├── model-00000.safetensors
-│   └── model-00001.safetensors
+│   ├── model-00000.rxt
+│   └── model-00001.rxt
 ├── assets/
 └── native/                         # optional, disposable variants
 ```
@@ -51,10 +51,19 @@ more cumbersome, unions and defaults require care during evolution, and the
 manifest still needs independent bounds, digest, and semantic validation.
 FlatBuffers does not make an incompatible schema compatible by itself.
 
-Schema-less JSON, MessagePack, Fory, CBOR, `bincode`, and `rkyv` are not the
-canonical manifest encoding. JSON may be emitted as a diagnostic view. The
-others are useful local encodings but do not offer a better cross-language,
-long-lived schema contract than Protobuf for this small control-plane object.
+Schema-less JSON, MessagePack, CBOR, `bincode`, and `rkyv` are not the canonical
+manifest encoding. JSON may be emitted as a diagnostic view. The others are
+useful local encodings but do not offer a better cross-language, long-lived
+schema contract than Protobuf for this small control-plane object.
+
+Fory is a serious option, but solves a different problem. Its xlang object
+format is useful when peers reconstruct object graphs, and Standard Row is
+useful for schema-driven random access to many structured records. An RXLA
+manifest is one small control-plane value, while weights are large typed byte
+ranges. Making either depend on Fory would add a runtime/schema dependency
+without improving the hot weight-loading path. Fory remains a candidate for
+datasets, event streams, and structured opaque assets; it is not part of the
+version 1 model ABI.
 
 ## Payload choices
 
@@ -62,7 +71,7 @@ long-lived schema contract than Protobuf for this small control-plane object.
 | --- | --- | --- |
 | Manifest | Protobuf | Cross-language schema evolution |
 | Portable program | StableHLO MLIR bytecode | Typed portable compiler boundary |
-| Model tensors | SafeTensors shards | Existing ecosystem, bounded header, mmap/range-friendly payloads |
+| Model tensors | RXLA tensor arena shards | Aligned raw bytes, mmap/range reads, aliases, and explicit integrity |
 | Small opaque assets | Raw blob with declared media type | Tokenizers, labels, configs, lookup tables |
 | Native executable | Backend-owned bytes, optional | Startup cache only; never the sole model representation |
 | Human inspection | Derived JSON/text | Not authoritative and not hashed as the manifest |
@@ -105,9 +114,11 @@ message Tensor {
   DType dtype = 3;
   repeated uint64 shape = 4;
   uint64 blob_id = 5;
-  string safetensors_key = 6;
+  uint64 byte_offset = 6;
   TensorRole role = 7;
   optional uint64 alias_of = 8;
+  uint64 byte_length = 9;
+  TensorEncoding encoding = 10;
 }
 
 message Program {
@@ -126,6 +137,45 @@ message Program {
 
 The sketch is not permission to serialize Rust structs mechanically. Every
 field needs a language-independent semantic definition and loader limits.
+
+## Tensor arena
+
+RXLA owns the tensor payload format. It borrows the useful idea from
+SafeTensors--a bounded metadata layer describes slices of contiguous raw
+bytes--without adopting JSON metadata or making an ecosystem interchange
+format the model's storage ABI.
+
+In the directory representation, an `.rxt` shard is an immutable byte arena.
+Tensor descriptors live in `manifest.pb`; the shard does not repeat names,
+shapes, or arbitrary string metadata. Each descriptor gives a blob ID, checked
+64-bit offset and length, dtype, shape, and encoding. Version 1 tensors are:
+
+- dense, row-major, and little-endian;
+- stored without compression in the normal serving path;
+- naturally aligned to at least 64 bytes, with writers optionally using page
+  alignment for independently mapped or fetched components;
+- addressable through HTTP/S3 range reads as well as local mmap;
+- immutable after publication.
+
+The blob digest protects the whole shard. A tensor may additionally carry a
+digest when independent range verification is required. A small fixed shard
+header records magic, format version, artifact UUID, and shard UUID so that
+files from different artifacts cannot be mixed accidentally. The manifest
+binds those UUIDs to the shard digest; the header cannot contain the manifest
+digest because that would create a digest cycle. Offsets must begin after this
+header, satisfy the declared alignment, stay within the declared blob length,
+and never overlap unless the tensors explicitly share one storage identity.
+
+Tensor tying does not duplicate bytes. Multiple bindings refer to the same
+tensor ID; representational views refer to a storage tensor plus a checked byte
+range and view metadata. Version 1 does not persist arbitrary strides. A writer
+materializes unsupported layouts, keeping runtime loading predictable and
+allowing one mapped range to become a host buffer directly.
+
+Compression is a blob transport concern, not a tensor encoding default. A
+compressed archive must be expanded before mmap and partial fetching are
+possible. Future encodings such as quantized blocks must have a named,
+versioned binary contract and may not be smuggled through opaque metadata.
 
 ## Paths, trees, and aliasing
 
@@ -278,7 +328,7 @@ Readers enforce limits before allocation:
 8. Bind tensors/state by declared IDs and ABI positions.
 9. Publish the initialized session only after every check succeeds.
 
-No loader guesses missing metadata from a StableHLO module or SafeTensors file.
+No loader guesses missing metadata from a StableHLO module or tensor shard.
 
 ## Remote and single-file storage
 
@@ -286,11 +336,13 @@ The v1 directory maps naturally to local files, S3/R2 object prefixes, HTTP
 range-addressable blobs, and OCI layers. Tensor shards are sized independently
 so a serving system can fetch only the selected precision or component.
 
-A future single-file form may use a small fixed header, a bounded Protobuf
-manifest near the front, aligned immutable blob ranges, and a checksummed footer.
-It must preserve the same logical manifest and blob IDs. Do not use inline
-Protobuf `bytes` for multi-gigabyte weights, and do not invent this container
-until mmap, range-read, atomic publication, and corruption tests justify it.
+The directory already uses tensor arenas, but the package itself remains a
+directory. A future single-file package may use a small fixed header, a bounded
+Protobuf manifest near the front, aligned immutable blob ranges, and a
+checksummed footer. It must preserve the same logical manifest and blob IDs. Do
+not use inline Protobuf `bytes` for multi-gigabyte weights, and do not define
+the package container until mmap, range-read, atomic publication, and corruption
+tests justify it.
 
 ## Publication
 
@@ -304,12 +356,14 @@ publishes the root manifest/reference last.
 
 1. Add `rxla-artifact` containing generated Protobuf types plus semantic
    validation independent of PJRT.
-2. Export one YOLOX inference artifact with StableHLO, EMA SafeTensors, ABI, and
+2. Implement the minimal `.rxt` arena writer/reader with checked offsets,
+   alignment, mmap, range reads, and corruption tests.
+3. Export one YOLOX inference artifact with StableHLO, EMA weights, ABI, and
    COCO class metadata; load it through RXLA and JAX and compare raw heads.
-3. Add sharding, LoRA overlays, and training-checkpoint manifests.
-4. Add target/capability selection and optional native executable variants.
-5. Only then evaluate a single-file blob arena and signature envelope.
+4. Add sharding, LoRA overlays, and training-checkpoint manifests.
+5. Add target/capability selection and optional native executable variants.
+6. Only then evaluate a single-file package and signature envelope.
 
-The first implementation must keep the current SafeTensors APIs usable. The
-artifact layer composes them; it does not turn `rxla-safetensors` into a general
-model/runtime crate.
+The current SafeTensors APIs remain an import/export compatibility bridge for
+existing checkpoints. The artifact format does not depend on them, and
+`rxla-safetensors` does not become a general model/runtime crate.
