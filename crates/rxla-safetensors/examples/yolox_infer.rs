@@ -60,7 +60,11 @@ fn main() -> Result<()> {
     let mut input = vec![114.0_f32; (SIZE * SIZE * 3) as usize];
     for (x, y, pixel) in resized.enumerate_pixels() {
         let offset = ((y * SIZE + x) * 3) as usize;
-        input[offset..offset + 3].copy_from_slice(&pixel.0.map(f32::from));
+        input[offset..offset + 3].copy_from_slice(&[
+            f32::from(pixel[2]),
+            f32::from(pixel[1]),
+            f32::from(pixel[0]),
+        ]);
     }
     let input = client.buffer(&[1, i64::from(SIZE), i64::from(SIZE), 3], &input)?;
     let inference_started = Instant::now();

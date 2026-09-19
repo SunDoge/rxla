@@ -2,7 +2,7 @@
 
 use clap::{Parser, Subcommand};
 use fory::{ForyRow, from_row};
-use image::{RgbImage, imageops::FilterType};
+use image::{Rgb, RgbImage, imageops::FilterType};
 use rayon::prelude::*;
 use rxla_core::{Buffer, CacheLimits, Client, Compiler, Tensor};
 use rxla_models::{YoloAssignments, YoloConfig, YoloLossConfig, yolo, yolox_loss};
@@ -10,8 +10,8 @@ use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::{SafeTensors, save_model_new};
 use rxla_tfrecord::Reader as TfrecordReader;
 use rxla_train::{
-    BoundedPipeline, DecodedYoloBatch, DetectionTarget, SgdOptions, ShufflePool, SimOtaConfig,
-    YoloHead, YoloLrSchedule, apply_model_sgd_with_learning_rate,
+    BoundedPipeline, DataRng, DecodedYoloBatch, DetectionTarget, SampleRng, SgdOptions,
+    ShufflePool, SimOtaConfig, YoloHead, YoloLrSchedule, apply_model_sgd_with_learning_rate,
 };
 use serde::Deserialize;
 use std::{
@@ -46,6 +46,8 @@ struct Args {
     shuffle_buffer: usize,
     #[arg(long, default_value_t = 7)]
     seed: u64,
+    #[arg(long, default_value_t = 1.0)]
+    mosaic_probability: f32,
     #[arg(long, default_value_t = 0.00015625)]
     learning_rate: f32,
     /// Override warmup duration (default: 5/300 of all steps).
@@ -140,8 +142,12 @@ struct SourceSamples(TrainingSource);
 struct PreparedBatches<I> {
     samples: I,
     remaining: usize,
+    step: usize,
+    mosaic_steps: usize,
+    mosaic_probability: f32,
     batch_size: usize,
     size: u32,
+    rng: DataRng,
 }
 
 enum TrainingSource {
@@ -168,13 +174,29 @@ fn main() -> Result<()> {
         || args.batch_size == 0
         || args.prefetch == 0
         || args.shuffle_buffer == 0
+        || !(0.0..=1.0).contains(&args.mosaic_probability)
     {
         return Err(
-            "size must be a positive multiple of 32; learning rate must be finite; steps, batch-size, prefetch, shuffle-buffer and log-every must be non-zero"
+            "size must be a positive multiple of 32; learning rate must be finite; steps, batch-size, prefetch, shuffle-buffer and log-every must be non-zero; mosaic-probability must be in [0, 1]"
                 .into(),
         );
     }
     let source = TrainingSource::open(args.source)?;
+    let no_augmentation_steps = args.no_augmentation_steps.unwrap_or(args.steps / 20);
+    let samples = ShufflePool::new(SourceSamples(source), args.shuffle_buffer, args.seed)?;
+    let batches = PreparedBatches {
+        samples,
+        remaining: args.steps,
+        step: 0,
+        mosaic_steps: args.steps.saturating_sub(no_augmentation_steps),
+        mosaic_probability: args.mosaic_probability,
+        batch_size: args.batch_size,
+        size: u32::try_from(args.size)?,
+        rng: DataRng::new(args.seed),
+    };
+    // Host input preparation starts before XLA compilation so initial pool fill
+    // and the first augmented batches are normally hidden by compilation.
+    let pipeline = BoundedPipeline::from_iter(args.prefetch, batches)?;
     let batch = i64::try_from(args.batch_size)?;
     let client = unsafe { Client::load(&args.plugin) }?;
     let config = YoloConfig::yolox_tiny(80);
@@ -253,15 +275,7 @@ fn main() -> Result<()> {
         .build()?;
     let schedule = YoloLrSchedule::new(args.learning_rate, args.steps)
         .warmup_steps(args.warmup_steps.unwrap_or(args.steps / 60))
-        .no_augmentation_steps(args.no_augmentation_steps.unwrap_or(args.steps / 20));
-    let samples = ShufflePool::new(SourceSamples(source), args.shuffle_buffer, args.seed)?;
-    let batches = PreparedBatches {
-        samples,
-        remaining: args.steps,
-        batch_size: args.batch_size,
-        size: u32::try_from(args.size)?,
-    };
-    let pipeline = BoundedPipeline::from_iter(args.prefetch, batches)?;
+        .no_augmentation_steps(no_augmentation_steps);
     let mut completed = 0;
     let run_started = Instant::now();
     loop {
@@ -394,50 +408,60 @@ where
             return None;
         }
         let load_started = Instant::now();
-        let mut samples = Vec::with_capacity(self.batch_size);
-        for _ in 0..self.batch_size {
-            match self.samples.next() {
-                Some(Ok(sample)) => samples.push(sample),
-                None => {
-                    self.remaining = 0;
-                    return Some(Err(format!(
-                        "dataset ended with only {} of {} samples in the next batch",
-                        samples.len(),
-                        self.batch_size
-                    )));
-                }
-                Some(Err(error)) => {
-                    self.remaining = 0;
-                    return Some(Err(error));
+        let mut groups = Vec::with_capacity(self.batch_size);
+        let mut consumed = 0;
+        for batch_index in 0..self.batch_size {
+            let sample_rng = self
+                .rng
+                .sample(0, (self.step * self.batch_size + batch_index) as u64);
+            let mosaic = self.step < self.mosaic_steps
+                && sample_rng.bernoulli(0, 0, self.mosaic_probability);
+            let count = if mosaic { 4 } else { 1 };
+            let mut samples = Vec::with_capacity(count);
+            for _ in 0..count {
+                match self.samples.next() {
+                    Some(Ok(sample)) => {
+                        samples.push(sample);
+                        consumed += 1;
+                    }
+                    None => {
+                        self.remaining = 0;
+                        return Some(Err(format!(
+                            "dataset ended after {consumed} source samples in the next batch"
+                        )));
+                    }
+                    Some(Err(error)) => {
+                        self.remaining = 0;
+                        return Some(Err(error));
+                    }
                 }
             }
+            groups.push((samples, sample_rng));
         }
         self.remaining -= 1;
-        Some(prepare_batch(samples, self.size, load_started))
+        self.step += 1;
+        Some(prepare_batch(groups, self.size, load_started))
     }
 }
 
 fn prepare_batch(
-    samples: Vec<DetectionSample>,
+    groups: Vec<(Vec<DetectionSample>, SampleRng)>,
     size: u32,
     load_started: Instant,
 ) -> std::result::Result<PreparedBatch, String> {
-    let prepared = samples
+    let prepared = groups
         .into_par_iter()
         .enumerate()
-        .map(|(batch_index, sample)| {
-            let image = image::load_from_memory(&sample.encoded_image)
-                .map_err(|error| error.to_string())?
-                .into_rgb8();
-            if sample
-                .dimensions
-                .is_some_and(|dimensions| dimensions != [image.width(), image.height()])
-            {
-                return Err("image dimensions do not match Fory metadata".to_owned());
+        .map(|(batch_index, (samples, rng))| {
+            if samples.len() == 4 {
+                prepare_mosaic(samples, size, batch_index, rng)
+            } else {
+                let sample = samples
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| "empty augmentation sample group".to_owned())?;
+                prepare_single(sample, size, batch_index)
             }
-            let (pixels, ratio) = letterbox(&image, size);
-            let targets = sample.targets(ratio, batch_index);
-            Ok((sample.id, pixels, targets))
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
     let mut pixels = Vec::with_capacity(prepared.len() * (size * size * 3) as usize);
@@ -454,6 +478,260 @@ fn prepare_batch(
         targets,
         load_ms: load_started.elapsed().as_secs_f64() * 1e3,
     })
+}
+
+fn prepare_single(
+    sample: DetectionSample,
+    size: u32,
+    batch: usize,
+) -> std::result::Result<(String, Vec<f32>, Vec<DetectionTarget>), String> {
+    let image = decode_sample(&sample)?;
+    let (pixels, ratio) = letterbox(&image, size);
+    let targets = sample.targets(ratio, batch);
+    Ok((sample.id, pixels, targets))
+}
+
+fn prepare_mosaic(
+    samples: Vec<DetectionSample>,
+    size: u32,
+    batch: usize,
+    rng: SampleRng,
+) -> std::result::Result<(String, Vec<f32>, Vec<DetectionTarget>), String> {
+    let canvas_size = size * 2;
+    let center_x = (size as f32 * (0.5 + rng.uniform(1, 0))) as i32;
+    let center_y = (size as f32 * (0.5 + rng.uniform(1, 1))) as i32;
+    let mut canvas = RgbImage::from_pixel(canvas_size, canvas_size, Rgb([114; 3]));
+    let mut boxes = Vec::new();
+    let mut classes = Vec::new();
+    let mut ids = Vec::with_capacity(4);
+
+    for (quadrant, sample) in samples.into_iter().enumerate() {
+        let image = decode_sample(&sample)?;
+        let scale = (size as f32 / image.height() as f32).min(size as f32 / image.width() as f32);
+        let width = (image.width() as f32 * scale) as u32;
+        let height = (image.height() as f32 * scale) as u32;
+        let resized = image::imageops::resize(&image, width, height, FilterType::Triangle);
+        let (large, small) = mosaic_coordinates(
+            quadrant,
+            center_x,
+            center_y,
+            width as i32,
+            height as i32,
+            canvas_size as i32,
+        );
+        let [lx1, ly1, lx2, ly2] = large;
+        let [sx1, sy1, _, _] = small;
+        for y in ly1..ly2 {
+            for x in lx1..lx2 {
+                let pixel = resized.get_pixel((sx1 + x - lx1) as u32, (sy1 + y - ly1) as u32);
+                canvas.put_pixel(x as u32, y as u32, *pixel);
+            }
+        }
+        let pad_x = (lx1 - sx1) as f32;
+        let pad_y = (ly1 - sy1) as f32;
+        for (bbox, class) in sample.boxes.iter().zip(&sample.classes) {
+            boxes.push([
+                (bbox[0] * scale + pad_x).clamp(0.0, canvas_size as f32),
+                (bbox[1] * scale + pad_y).clamp(0.0, canvas_size as f32),
+                (bbox[2] * scale + pad_x).clamp(0.0, canvas_size as f32),
+                (bbox[3] * scale + pad_y).clamp(0.0, canvas_size as f32),
+            ]);
+            classes.push(*class);
+        }
+        ids.push(sample.id);
+    }
+
+    let matrix = random_affine_matrix(size, rng);
+    let image = warp_affine(&canvas, size, matrix);
+    let mut targets = Vec::new();
+    for (bbox, class) in boxes.into_iter().zip(classes) {
+        let bbox = transform_box(bbox, matrix, size as f32);
+        let width = bbox[2] - bbox[0];
+        let height = bbox[3] - bbox[1];
+        if width > 1.0 && height > 1.0 {
+            targets.push(DetectionTarget {
+                batch,
+                class,
+                cxcywh: [
+                    (bbox[0] + bbox[2]) * 0.5,
+                    (bbox[1] + bbox[3]) * 0.5,
+                    width,
+                    height,
+                ],
+            });
+        }
+    }
+    Ok((
+        ids.join("+"),
+        image
+            .pixels()
+            .flat_map(|pixel| pixel.0.into_iter().rev().map(f32::from))
+            .collect(),
+        targets,
+    ))
+}
+
+fn decode_sample(sample: &DetectionSample) -> std::result::Result<RgbImage, String> {
+    let image = image::load_from_memory(&sample.encoded_image)
+        .map_err(|error| error.to_string())?
+        .into_rgb8();
+    if sample
+        .dimensions
+        .is_some_and(|dimensions| dimensions != [image.width(), image.height()])
+    {
+        return Err("image dimensions do not match Fory metadata".to_owned());
+    }
+    Ok(image)
+}
+
+fn mosaic_coordinates(
+    quadrant: usize,
+    center_x: i32,
+    center_y: i32,
+    width: i32,
+    height: i32,
+    canvas: i32,
+) -> ([i32; 4], [i32; 4]) {
+    match quadrant {
+        0 => {
+            let large = [
+                (center_x - width).max(0),
+                (center_y - height).max(0),
+                center_x,
+                center_y,
+            ];
+            let small = [
+                width - (large[2] - large[0]),
+                height - (large[3] - large[1]),
+                width,
+                height,
+            ];
+            (large, small)
+        }
+        1 => {
+            let large = [
+                center_x,
+                (center_y - height).max(0),
+                (center_x + width).min(canvas),
+                center_y,
+            ];
+            let small = [
+                0,
+                height - (large[3] - large[1]),
+                (large[2] - large[0]).min(width),
+                height,
+            ];
+            (large, small)
+        }
+        2 => {
+            let large = [
+                (center_x - width).max(0),
+                center_y,
+                center_x,
+                (center_y + height).min(canvas),
+            ];
+            let small = [
+                width - (large[2] - large[0]),
+                0,
+                width,
+                (large[3] - large[1]).min(height),
+            ];
+            (large, small)
+        }
+        _ => {
+            let large = [
+                center_x,
+                center_y,
+                (center_x + width).min(canvas),
+                (center_y + height).min(canvas),
+            ];
+            let small = [
+                0,
+                0,
+                (large[2] - large[0]).min(width),
+                (large[3] - large[1]).min(height),
+            ];
+            (large, small)
+        }
+    }
+}
+
+fn random_affine_matrix(size: u32, rng: SampleRng) -> [[f32; 3]; 2] {
+    let angle = (-10.0 + 20.0 * rng.uniform(2, 0)).to_radians();
+    let scale = 0.1 + 1.9 * rng.uniform(2, 1);
+    let shear_x = (-2.0 + 4.0 * rng.uniform(2, 2)).to_radians().tan();
+    let shear_y = (-2.0 + 4.0 * rng.uniform(2, 3)).to_radians().tan();
+    let alpha = scale * angle.cos();
+    let beta = scale * angle.sin();
+    let extent = size as f32;
+    [
+        [
+            alpha - shear_y * beta,
+            beta + shear_y * alpha,
+            (-0.1 + 0.2 * rng.uniform(2, 4)) * extent,
+        ],
+        [
+            -beta + shear_x * alpha,
+            alpha + shear_x * beta,
+            (-0.1 + 0.2 * rng.uniform(2, 5)) * extent,
+        ],
+    ]
+}
+
+fn transform_box(bbox: [f32; 4], matrix: [[f32; 3]; 2], extent: f32) -> [f32; 4] {
+    let corners = [
+        [bbox[0], bbox[1]],
+        [bbox[2], bbox[3]],
+        [bbox[0], bbox[3]],
+        [bbox[2], bbox[1]],
+    ]
+    .map(|[x, y]| {
+        [
+            matrix[0][0] * x + matrix[0][1] * y + matrix[0][2],
+            matrix[1][0] * x + matrix[1][1] * y + matrix[1][2],
+        ]
+    });
+    let xs = corners.map(|point| point[0]);
+    let ys = corners.map(|point| point[1]);
+    [
+        xs.iter()
+            .copied()
+            .fold(f32::INFINITY, f32::min)
+            .clamp(0.0, extent),
+        ys.iter()
+            .copied()
+            .fold(f32::INFINITY, f32::min)
+            .clamp(0.0, extent),
+        xs.iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max)
+            .clamp(0.0, extent),
+        ys.iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max)
+            .clamp(0.0, extent),
+    ]
+}
+
+fn warp_affine(image: &RgbImage, size: u32, matrix: [[f32; 3]; 2]) -> RgbImage {
+    let determinant = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
+    let inverse = [
+        [matrix[1][1] / determinant, -matrix[0][1] / determinant],
+        [-matrix[1][0] / determinant, matrix[0][0] / determinant],
+    ];
+    let mut output = RgbImage::from_pixel(size, size, Rgb([114; 3]));
+    for y in 0..size {
+        for x in 0..size {
+            let translated_x = x as f32 - matrix[0][2];
+            let translated_y = y as f32 - matrix[1][2];
+            let source_x = inverse[0][0] * translated_x + inverse[0][1] * translated_y;
+            let source_y = inverse[1][0] * translated_x + inverse[1][1] * translated_y;
+            if let Some(pixel) = image::imageops::interpolate_bilinear(image, source_x, source_y) {
+                output.put_pixel(x, y, pixel);
+            }
+        }
+    }
+    output
 }
 
 impl DetectionSample {
@@ -647,7 +925,45 @@ fn letterbox(image: &RgbImage, size: u32) -> (Vec<f32>, f32) {
     let mut output = vec![114.0; (size * size * 3) as usize];
     for (x, y, pixel) in resized.enumerate_pixels() {
         let offset = ((y * size + x) * 3) as usize;
-        output[offset..offset + 3].copy_from_slice(&pixel.0.map(f32::from));
+        output[offset..offset + 3].copy_from_slice(&[
+            f32::from(pixel[2]),
+            f32::from(pixel[1]),
+            f32::from(pixel[0]),
+        ]);
     }
     (output, ratio)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mosaic_regions_have_matching_valid_source_and_destination_extents() {
+        for quadrant in 0..4 {
+            for center_x in [208, 416, 624] {
+                for center_y in [208, 416, 624] {
+                    let (large, small) =
+                        mosaic_coordinates(quadrant, center_x, center_y, 333, 277, 832);
+                    assert_eq!(large[2] - large[0], small[2] - small[0]);
+                    assert_eq!(large[3] - large[1], small[3] - small[1]);
+                    assert!(large[0] >= 0 && large[1] >= 0);
+                    assert!(large[2] <= 832 && large[3] <= 832);
+                    assert!(small[0] >= 0 && small[1] >= 0);
+                    assert!(small[2] <= 333 && small[3] <= 277);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identity_affine_preserves_boxes_and_pixels() {
+        let matrix = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        assert_eq!(
+            transform_box([1.0, 2.0, 5.0, 7.0], matrix, 8.0),
+            [1.0, 2.0, 5.0, 7.0]
+        );
+        let image = RgbImage::from_fn(8, 8, |x, y| Rgb([x as u8, y as u8, 3]));
+        assert_eq!(warp_affine(&image, 8, matrix), image);
+    }
 }
