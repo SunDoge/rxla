@@ -609,6 +609,75 @@ mod tests {
 
     #[test]
     #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
+    fn resident_nesterov_matches_three_step_reference() {
+        fn regression_loss(cx: Cx) -> Result<Tensor> {
+            let input = cx.input(&[1, 1])?;
+            let target = cx.input(&[1, 1])?;
+            let prediction = input.apply(&cx.named_layer("linear", Linear::new(1).bias(false))?)?;
+            let error = prediction.sub(&target)?;
+            Ok(error.mul(&error)?.sum(&[0, 1], false)?)
+        }
+
+        let client = unsafe {
+            Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
+        }
+        .expect("load CPU plugin");
+        let definition = Model::new(regression_loss);
+        let (selection, mut model) = definition.trace_resident_under("linear").unwrap();
+        let loss = model.outputs()[0].clone();
+        apply_model_sgd_with_options(&mut model, &selection, &loss, 0.1, |_| {
+            SgdOptions::default().momentum(0.9).nesterov(true)
+        })
+        .unwrap();
+        let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+        let program = model.compile_stateful(&mut compiler).unwrap();
+        let mut session = program
+            .session()
+            .parameter("linear.weight", client.buffer(&[1, 1], &[0.0_f32]).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+        let input = client.buffer(&[1, 1], &[2.0_f32]).unwrap();
+        let target = client.buffer(&[1, 1], &[4.0_f32]).unwrap();
+        let parameter_slot = model.resident_parameters().next().unwrap().2;
+        let momentum_slot = model
+            .states()
+            .find(|(path, _)| *path == "__optimizer.sgd.linear.weight.momentum")
+            .unwrap()
+            .1;
+
+        let mut expected_weight = 0.0_f32;
+        let mut expected_momentum = 0.0_f32;
+        for _ in 0..3 {
+            let expected_loss = (2.0 * expected_weight - 4.0).powi(2);
+            let actual_loss = session
+                .run::<_, Buffer>(&[&input, &target])
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap()[0];
+            let gradient = 4.0 * (2.0 * expected_weight - 4.0);
+            expected_momentum = 0.9 * expected_momentum + gradient;
+            expected_weight -= 0.1 * (gradient + 0.9 * expected_momentum);
+            let actual_weight = session
+                .raw()
+                .state(parameter_slot)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap()[0];
+            let actual_momentum = session
+                .raw()
+                .state(momentum_slot)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap()[0];
+            assert!((actual_loss - expected_loss).abs() < 1e-5);
+            assert!((actual_weight - expected_weight).abs() < 1e-5);
+            assert!((actual_momentum - expected_momentum).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
     fn stateful_sgd_executes_update_and_state_transition_together() {
         fn stateful_loss(cx: Cx) -> Result<Tensor> {
             let input = cx.input(&[1, 1])?;

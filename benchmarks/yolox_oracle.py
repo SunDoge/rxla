@@ -18,6 +18,9 @@ class Args(TypedArgs):
     weights: Annotated[Path, Arg(help="converted RXLA safetensors")]
     output: Annotated[Path, Arg(help="directory for RXLA raw heads")]
     size: Annotated[int, Arg(help="positive multiple-of-32 input size")] = 64
+    training_steps: Annotated[
+        int, Arg("--training-steps", help="resident optimizer trajectory length")
+    ] = 1
     atol: Annotated[float, Arg(help="maximum accepted absolute error")] = 5e-5
     rtol: Annotated[float, Arg(help="training-gradient relative tolerance")] = 2e-3
     yolox_source: Annotated[
@@ -273,25 +276,8 @@ def pytorch_loss_from_heads(
     )
 
 
-def pytorch_model_gradients(
-    model: torch.nn.Module,
-    size: int,
-    loss_assignments: tuple[np.ndarray, np.ndarray, np.ndarray],
-    paths: tuple[str, ...],
-    learning_rate: float,
-) -> tuple[
-    float,
-    tuple[np.ndarray, np.ndarray, np.ndarray],
-    dict[str, np.ndarray],
-    dict[str, np.ndarray],
-    dict[str, np.ndarray],
-    dict[str, np.ndarray],
-]:
-    captured: dict[str, list[torch.Tensor]] = {
-        "reg": [],
-        "obj": [],
-        "cls": [],
-    }
+def pytorch_training_heads(model: torch.nn.Module, size: int) -> list[torch.Tensor]:
+    captured: dict[str, list[torch.Tensor]] = {"reg": [], "obj": [], "cls": []}
     handles = []
     for name, modules in (
         ("reg", model.head.reg_preds),
@@ -306,9 +292,6 @@ def pytorch_model_gradients(
                     )
                 )
             )
-
-    model.train()
-    model.zero_grad(set_to_none=True)
     elements = size * size * 3
     nhwc = ((torch.arange(elements, dtype=torch.int64) * 17 + 13) % 256).float()
     nchw = nhwc.reshape(1, size, size, 3).permute(0, 3, 1, 2).contiguous()
@@ -321,7 +304,7 @@ def pytorch_model_gradients(
         model.head.cls_preds[index](model.head.cls_convs[index](stem))
     for handle in handles:
         handle.remove()
-    heads = [
+    return [
         torch.cat(
             [captured["reg"][index], captured["obj"][index], captured["cls"][index]],
             1,
@@ -330,6 +313,26 @@ def pytorch_model_gradients(
         .contiguous()
         for index in range(3)
     ]
+
+
+def pytorch_model_gradients(
+    model: torch.nn.Module,
+    size: int,
+    loss_assignments: tuple[np.ndarray, np.ndarray, np.ndarray],
+    paths: tuple[str, ...],
+    learning_rate: float,
+) -> tuple[
+    float,
+    tuple[np.ndarray, np.ndarray, np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
+    torch.optim.SGD,
+]:
+    model.train()
+    model.zero_grad(set_to_none=True)
+    heads = pytorch_training_heads(model, size)
     detached_heads = {
         f"head{index}": head.detach().numpy() for index, head in enumerate(heads)
     }
@@ -373,13 +376,35 @@ def pytorch_model_gradients(
         path: parameters[path].detach().numpy().copy() - originals[path]
         for path in paths
     }
-    return float(loss.detach()), assignments, gradients, states, originals, updates
+    return (
+        float(loss.detach()),
+        assignments,
+        gradients,
+        states,
+        originals,
+        updates,
+        optimizer,
+    )
+
+
+def pytorch_model_step(
+    model: torch.nn.Module,
+    optimizer: torch.optim.SGD,
+    size: int,
+    assignments: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> float:
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    loss = pytorch_loss_from_heads(pytorch_training_heads(model, size), assignments)[0]
+    loss.backward()
+    optimizer.step()
+    return float(loss.detach())
 
 
 def main() -> None:
     args = Args.parse_args()
-    if args.size <= 0 or args.size % 32:
-        raise ValueError("size must be a positive multiple of 32")
+    if args.size <= 0 or args.size % 32 or args.training_steps <= 0:
+        raise ValueError("size must be a positive multiple of 32 and steps nonzero")
     subprocess.run(
         [
             "cargo",
@@ -397,6 +422,8 @@ def main() -> None:
             os.fspath(args.output),
             "--size",
             str(args.size),
+            "--training-steps",
+            str(args.training_steps),
         ],
         check=True,
     )
@@ -490,6 +517,7 @@ def main() -> None:
         expected_model_states,
         original_model_parameters,
         expected_model_updates,
+        optimizer,
     ) = pytorch_model_gradients(
         model,
         args.size,
@@ -570,6 +598,91 @@ def main() -> None:
             f"relative_l2={relative_l2:.8g}"
         )
         failed |= not np.isfinite(difference).all() or relative_l2 > args.rtol
+    for step in range(2, args.training_steps + 1):
+        step_assignment = (
+            np.fromfile(
+                args.output / f"model_step_{step}_assignment_boxes.f32",
+                dtype="<f4",
+            ).reshape(anchors, 4),
+            np.fromfile(
+                args.output / f"model_step_{step}_assignment_objectness.f32",
+                dtype="<f4",
+            ).reshape(anchors),
+            np.fromfile(
+                args.output / f"model_step_{step}_assignment_classes.f32",
+                dtype="<f4",
+            ).reshape(anchors, 80),
+        )
+        reference_loss = pytorch_model_step(
+            model, optimizer, args.size, step_assignment
+        )
+        actual_loss = np.fromfile(
+            args.output / f"model_step_{step}_loss.f32", dtype="<f4"
+        )
+        difference = abs(float(actual_loss[0]) - reference_loss)
+        print(
+            f"model_trajectory_diagnostic_step={step} "
+            f"actual_loss={float(actual_loss[0]):.8g} "
+            f"expected_loss={reference_loss:.8g} max_abs={difference:.8g}"
+        )
+
+    parameters = dict(model.named_parameters())
+    for path in model_gradient_paths:
+        reference = parameters[path].detach().numpy()
+        actual = np.fromfile(
+            args.output / f"model_final_parameter_{path.replace('.', '_')}.f32",
+            dtype="<f4",
+        ).reshape(reference.shape)
+        difference = actual - reference
+        relative_l2 = float(
+            np.linalg.norm(difference.reshape(-1))
+            / max(np.linalg.norm(reference.reshape(-1)), args.atol)
+        )
+        print(f"model_final_parameter={path} relative_l2={relative_l2:.8g}")
+        if args.training_steps == 1:
+            failed |= not np.isfinite(difference).all() or relative_l2 > args.rtol
+
+        reference_momentum = optimizer.state[parameters[path]]["momentum_buffer"]
+        reference_momentum = reference_momentum.detach().numpy()
+        actual_momentum = np.fromfile(
+            args.output / f"model_final_momentum_{path.replace('.', '_')}.f32",
+            dtype="<f4",
+        ).reshape(reference_momentum.shape)
+        momentum_difference = actual_momentum - reference_momentum
+        momentum_relative_l2 = float(
+            np.linalg.norm(momentum_difference.reshape(-1))
+            / max(np.linalg.norm(reference_momentum.reshape(-1)), args.atol)
+        )
+        print(
+            f"model_final_momentum={path} relative_l2={momentum_relative_l2:.8g}"
+        )
+        if args.training_steps == 1:
+            failed |= (
+                not np.isfinite(momentum_difference).all()
+                or momentum_relative_l2 > args.rtol
+            )
+
+    final_state = model.state_dict()
+    for path, torch_path in (
+        (
+            "backbone.backbone.stem.conv.bn.running_mean",
+            "backbone.backbone.stem.conv.bn.running_mean",
+        ),
+        (
+            "backbone.backbone.stem.conv.bn.running_variance",
+            "backbone.backbone.stem.conv.bn.running_var",
+        ),
+    ):
+        reference = final_state[torch_path].numpy()
+        actual = np.fromfile(
+            args.output / f"model_final_state_{path.replace('.', '_')}.f32",
+            dtype="<f4",
+        ).reshape(reference.shape)
+        difference = np.abs(actual - reference)
+        maximum = float(difference.max(initial=0.0))
+        print(f"model_final_state={path} max_abs={maximum:.8g}")
+        if args.training_steps == 1:
+            failed |= not np.allclose(actual, reference, atol=args.atol, rtol=args.rtol)
     if failed:
         raise SystemExit(f"YOLOX oracle exceeded atol={args.atol}")
 

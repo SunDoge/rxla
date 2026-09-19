@@ -28,12 +28,17 @@ struct Args {
     output: PathBuf,
     #[arg(long, default_value_t = 64)]
     size: i64,
+    /// Number of resident optimizer steps used by the trajectory oracle.
+    #[arg(long, default_value_t = 1)]
+    training_steps: usize,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    if args.size <= 0 || args.size % 32 != 0 {
-        return Err("size must be a positive multiple of 32".into());
+    if args.size <= 0 || args.size % 32 != 0 || args.training_steps == 0 {
+        return Err(
+            "size must be a positive multiple of 32 and training steps must be nonzero".into(),
+        );
     }
     let client = unsafe { Client::load(&args.plugin) }?;
     let definition = Model::new(|cx: Cx, image| {
@@ -371,7 +376,85 @@ fn main() -> Result<()> {
             &buffer.to_vec::<f32>()?,
         )?;
     }
-    println!("output={} size={}", args.output.display(), args.size);
+
+    // Replay more updates in the same resident session. Each step exports its
+    // device-selected assignment so the Python oracle can use exactly the same
+    // detached targets and isolate forward/BatchNorm/SGD trajectory semantics
+    // from SimOTA's intentionally discontinuous matching decisions.
+    for step in 2..=args.training_steps {
+        let outputs: Vec<Buffer> = full_session.run(&[
+            &input,
+            &target_boxes,
+            &target_classes,
+            &valid,
+            &l1_weight,
+            &learning_rate,
+        ])?;
+        write_f32(
+            &args.output.join(format!("model_step_{step}_loss.f32")),
+            &outputs[0].to_vec::<f32>()?,
+        )?;
+        for (name, value) in ["boxes", "objectness", "classes"]
+            .into_iter()
+            .zip(&outputs[1..4])
+        {
+            write_f32(
+                &args
+                    .output
+                    .join(format!("model_step_{step}_assignment_{name}.f32")),
+                &value.to_vec::<f32>()?,
+            )?;
+        }
+    }
+    for (path, buffer) in
+        full_model.selected_resident_parameter_buffers(&full_session, &selected)?
+    {
+        write_f32(
+            &args.output.join(format!(
+                "model_final_parameter_{}.f32",
+                path.replace('.', "_")
+            )),
+            &buffer.to_vec::<f32>()?,
+        )?;
+    }
+    let state = full_model.state_buffers(&full_session)?;
+    for path in [
+        "backbone.backbone.stem.conv.bn.running_mean",
+        "backbone.backbone.stem.conv.bn.running_variance",
+    ] {
+        let buffer = state
+            .iter()
+            .find(|(candidate, _)| *candidate == path)
+            .ok_or_else(|| format!("missing final training state {path}"))?
+            .1;
+        write_f32(
+            &args
+                .output
+                .join(format!("model_final_state_{}.f32", path.replace('.', "_"))),
+            &buffer.to_vec::<f32>()?,
+        )?;
+    }
+    for path in &selected_paths {
+        let state_path = format!("__optimizer.sgd.{path}.momentum");
+        let buffer = state
+            .iter()
+            .find(|(candidate, _)| *candidate == state_path)
+            .ok_or_else(|| format!("missing final optimizer state {state_path}"))?
+            .1;
+        write_f32(
+            &args.output.join(format!(
+                "model_final_momentum_{}.f32",
+                path.replace('.', "_")
+            )),
+            &buffer.to_vec::<f32>()?,
+        )?;
+    }
+    println!(
+        "output={} size={} training_steps={}",
+        args.output.display(),
+        args.size,
+        args.training_steps
+    );
     Ok(())
 }
 

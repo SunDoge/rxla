@@ -43,11 +43,24 @@ sampled at the stem, immediately before and after the SPP max-pool branches,
 and at the first class predictor. Their largest observed relative L2 errors
 were both `7.59e-4` (`rtol=2e-3`); the training loss differed by `1.44e-5`.
 The optimizer comparison uses the training configuration's `0.9` momentum,
-Nesterov update, and `5e-4` decay for non-BatchNorm weights. The stem running
-mean and variance differed by at most `9.54e-7` and `2.45e-4`, respectively.
-RXLA applies the same Bessel correction as PyTorch when updating running
-variance while retaining population variance for the current batch's
-normalization.
+Nesterov update, and `5e-4` decay for non-BatchNorm weights. It now checks the
+resident momentum buffers themselves as well as the resulting parameters.
+Their largest observed relative L2 error was `7.59e-4`. The stem running mean
+and variance differed by at most `9.54e-7` and `2.45e-4`, respectively. RXLA
+applies the same Bessel correction as PyTorch when updating running variance
+while retaining population variance for the current batch's normalization.
+
+Passing `--training-steps N` additionally emits a multi-step diagnostic. Every
+RXLA step exports its detached device SimOTA assignment and PyTorch replays the
+same assignment, separating optimizer/state drift from discrete matcher
+changes. This is deliberately not a strict gate: nonlinear training trajectories
+amplify backend convolution rounding. At 416x416, step-one selected gradients
+were within `4.90e-5` relative L2, while step-two and step-three losses differed
+by `0.00457` and `0.06859`; final selected momentum buffers differed by
+1.8%-4.7%. At the artificial 64x64, batch-one oracle size the amplification is
+larger. A separate three-step scalar Nesterov runtime test checks loss,
+parameter, and momentum against the closed-form recurrence at every step, so
+the diagnostic drift is not silently accepted as optimizer semantics.
 
 ## Inference
 
