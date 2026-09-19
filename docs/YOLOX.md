@@ -435,6 +435,16 @@ the exported EMA reached `AP=0.049`, `AP50=0.109`, and `AR@100=0.190`. The EMA
 gain and nonzero localization metrics establish genuine early convergence.
 They do not yet satisfy or replace the final 300-epoch AP gate.
 
+The supervised v4 accuracy run exercises the production checkpoint/evaluation
+loop every ten epochs. At update 18,490 (epoch 10), its EMA reached
+`AP=0.1061`, `AP50=0.2169`, `AP75=0.0932`, and `AR@100=0.2720` on all 5,000
+val2017 images. Evaluation took 58.5 seconds on the same RTX 5080 while the
+trainer remained paused with its CUDA context resident. The milestone produced
+an immutable resumable snapshot, a finalized evaluation MCAP, and the exact
+inference StableHLO/ABI fixture; the trainer then resumed the unchanged
+300-epoch run. This is an intermediate convergence point, not the final AP
+claim.
+
 The remaining intentional data-order difference is accepted by the training
 quality contract. Official YOLOX permutes one primary sample per output and
 draws the other three Mosaic images uniformly with replacement. The sequential
