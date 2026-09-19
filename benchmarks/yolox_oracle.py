@@ -188,6 +188,22 @@ def pytorch_losses(
     outputs: dict[str, np.ndarray],
     assignments: tuple[np.ndarray, np.ndarray, np.ndarray],
 ) -> tuple[np.ndarray, list[np.ndarray]]:
+    head_tensors = [
+        torch.tensor(outputs[f"head{index}"], requires_grad=True)
+        for index in range(3)
+    ]
+    losses = pytorch_loss_from_heads(head_tensors, assignments)
+    losses[0].backward()
+    return (
+        losses.detach().numpy(),
+        [head.grad.detach().numpy() for head in head_tensors],
+    )
+
+
+def pytorch_loss_from_heads(
+    head_tensors: list[torch.Tensor],
+    assignments: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> torch.Tensor:
     decoded = []
     raw_boxes = []
     objectness_logits = []
@@ -197,10 +213,7 @@ def pytorch_losses(
     foreground = torch.from_numpy(assignments[1]).reshape(1, -1, 1)
     classes_target = torch.from_numpy(assignments[2]).unsqueeze(0)
     anchor_offset = 0
-    head_tensors = []
-    for index, stride in enumerate((8, 16, 32)):
-        raw = torch.tensor(outputs[f"head{index}"], requires_grad=True)
-        head_tensors.append(raw)
+    for raw, stride in zip(head_tensors, (8, 16, 32), strict=True):
         batch, height, width, channels = raw.shape
         flat = raw.reshape(batch, height * width, channels)
         y, x = torch.meshgrid(torch.arange(height), torch.arange(width), indexing="ij")
@@ -254,12 +267,62 @@ def pytorch_losses(
         reduction="sum",
     ) / normalizer
     total = 5.0 * box_loss + objectness_loss + class_loss + l1_loss
-    losses = torch.stack([total, box_loss, objectness_loss, class_loss, l1_loss])
-    total.backward()
-    return (
-        losses.detach().numpy(),
-        [head.grad.detach().numpy() for head in head_tensors],
+    return torch.stack(
+        [total, box_loss, objectness_loss, class_loss, l1_loss]
     )
+
+
+def pytorch_model_gradients(
+    model: torch.nn.Module,
+    size: int,
+    assignments: tuple[np.ndarray, np.ndarray, np.ndarray],
+    paths: tuple[str, ...],
+) -> dict[str, np.ndarray]:
+    captured: dict[str, list[torch.Tensor]] = {
+        "reg": [],
+        "obj": [],
+        "cls": [],
+    }
+    handles = []
+    for name, modules in (
+        ("reg", model.head.reg_preds),
+        ("obj", model.head.obj_preds),
+        ("cls", model.head.cls_preds),
+    ):
+        for module in modules:
+            handles.append(
+                module.register_forward_hook(
+                    lambda _module, _inputs, output, name=name: captured[name].append(
+                        output
+                    )
+                )
+            )
+
+    model.zero_grad(set_to_none=True)
+    elements = size * size * 3
+    nhwc = ((torch.arange(elements, dtype=torch.int64) * 17 + 13) % 256).float()
+    nchw = nhwc.reshape(1, size, size, 3).permute(0, 3, 1, 2).contiguous()
+    model(nchw)
+    for handle in handles:
+        handle.remove()
+    heads = [
+        torch.cat(
+            [captured["reg"][index], captured["obj"][index], captured["cls"][index]],
+            1,
+        )
+        .permute(0, 2, 3, 1)
+        .contiguous()
+        for index in range(3)
+    ]
+    pytorch_loss_from_heads(heads, assignments)[0].backward()
+    parameters = dict(model.named_parameters())
+    gradients = {}
+    for path in paths:
+        gradient = parameters[path].grad
+        if gradient is None:
+            raise RuntimeError(f"parameter did not receive a gradient: {path}")
+        gradients[path] = gradient.detach().numpy()
+    return gradients
 
 
 def main() -> None:
@@ -349,6 +412,28 @@ def main() -> None:
         mean = float(difference.mean())
         print(
             f"gradient=head{index} shape={reference.shape} "
+            f"max_abs={maximum:.8g} mean_abs={mean:.8g}"
+        )
+        failed |= not np.isfinite(difference).all() or maximum > args.atol * 5
+    model_gradient_paths = (
+        "backbone.backbone.stem.conv.conv.weight",
+        "backbone.backbone.dark5.1.conv1.conv.weight",
+        "backbone.backbone.dark5.1.conv2.conv.weight",
+        "head.cls_preds.0.weight",
+    )
+    expected_model_gradients = pytorch_model_gradients(
+        model, args.size, expected_assignment, model_gradient_paths
+    )
+    for path, reference in expected_model_gradients.items():
+        actual = np.fromfile(
+            args.output / f"model_gradient_{path.replace('.', '_')}.f32",
+            dtype="<f4",
+        ).reshape(reference.shape)
+        difference = np.abs(actual - reference)
+        maximum = float(difference.max(initial=0.0))
+        mean = float(difference.mean())
+        print(
+            f"model_gradient={path} shape={reference.shape} "
             f"max_abs={maximum:.8g} mean_abs={mean:.8g}"
         )
         failed |= not np.isfinite(difference).all() or maximum > args.atol * 5

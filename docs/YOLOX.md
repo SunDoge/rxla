@@ -19,9 +19,9 @@ The converter records the `rxla-yolox-v1` format marker and maps PyTorch
 BatchNorm state names to RXLA's model schema.
 
 The deterministic training oracle checks the converted checkpoint, model
-topology, SimOTA matcher, losses, and reverse-mode head gradients against the
-official-compatible PyTorch implementation without image resize or decoding
-differences:
+topology, SimOTA matcher, losses, reverse-mode head gradients, and selected
+full-model parameter gradients against the official-compatible PyTorch
+implementation without image resize or decoding differences:
 
 ```sh
 uv run --no-sync python benchmarks/yolox_oracle.py \
@@ -35,7 +35,11 @@ objectness, and class assignments plus total, IoU, objectness, class, and L1
 losses. On the CUDA 13 PJRT plugin, the largest observed raw-head absolute error
 was `2.10e-5`, the assignments selected the same two foreground anchors, and
 the largest loss error was `4.30e-6`. The largest absolute gradient error over
-all three raw heads was `2.54e-7` (default tensor tolerance `5e-5`).
+all three raw heads was `2.54e-7`. Parameter gradients are checked at the stem,
+immediately before and after the SPP max-pool branches, and at the first class
+predictor. Their largest observed absolute error was `1.67e-5` (default tensor
+tolerance `5e-5`). This full-model comparison runs BatchNorm in inference mode
+so that it isolates model/autodiff parity from training-state semantics.
 
 ## Inference
 

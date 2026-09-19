@@ -3,7 +3,7 @@
 use clap::Parser;
 use rxla_core::{Buffer, CacheLimits, Client, Compiler};
 use rxla_models::{
-    YoloConfig, YoloLossConfig, YoloSimOtaConfig, YoloTargets, yolo_forward,
+    YoloConfig, YoloLossConfig, YoloSimOtaConfig, YoloTargets, yolo, yolo_forward,
     yolox_loss_with_l1_weight, yolox_simota,
 };
 use rxla_nn::{Cx, Model, ModelInput};
@@ -210,6 +210,88 @@ fn main() -> Result<()> {
     for (index, gradient) in loss_outputs[4..].iter().enumerate() {
         write_f32(
             &args.output.join(format!("head{index}_gradient.f32")),
+            &gradient.to_vec::<f32>()?,
+        )?;
+    }
+
+    // The head-gradient oracle above isolates loss and SimOTA semantics. This
+    // second graph differentiates through the actual model, including all three
+    // SPP max-pool branches, and catches backbone/autodiff mismatches that raw
+    // head cotangents cannot observe.
+    const MODEL_GRADIENT_PATHS: [&str; 4] = [
+        "backbone.backbone.stem.conv.conv.weight",
+        "backbone.backbone.dark5.1.conv1.conv.weight",
+        "backbone.backbone.dark5.1.conv2.conv.weight",
+        "head.cls_preds.0.weight",
+    ];
+    let full_definition = Model::new(
+        |cx: Cx,
+         image: rxla_core::Tensor,
+         boxes: rxla_core::Tensor,
+         classes: rxla_core::Tensor,
+         valid: rxla_core::Tensor,
+         l1_weight: rxla_core::Tensor| {
+            let heads = yolo(cx, &image, &YoloConfig::yolox_tiny(80))?;
+            let assignments = yolox_simota(
+                &heads,
+                &YoloTargets {
+                    boxes,
+                    classes,
+                    valid,
+                },
+                YoloSimOtaConfig::default(),
+            )?;
+            let loss = yolox_loss_with_l1_weight(
+                &heads,
+                &assignments,
+                YoloLossConfig::default(),
+                &l1_weight,
+            )?;
+            Ok::<_, rxla_models::Error>(loss.total)
+        },
+    )
+    .inputs((
+        ModelInput::new([1, args.size, args.size, 3]),
+        ModelInput::new([1, 2, 4]),
+        ModelInput::new([1, 2, 80]),
+        ModelInput::new([1, 2, 1]),
+        ModelInput::new([]),
+    ))
+    .inference();
+    let (all_parameters, full_model) = full_definition.trace_resident_all()?;
+    let selected =
+        all_parameters.matching(|_, parameter| MODEL_GRADIENT_PATHS.contains(&parameter.path()));
+    if selected.len() != MODEL_GRADIENT_PATHS.len() {
+        return Err("full-model gradient oracle paths do not match the model schema".into());
+    }
+    let selected_paths = selected
+        .parameters()
+        .map(|(_, parameter)| parameter.path().to_owned())
+        .collect::<Vec<_>>();
+    let parameter_tensors = full_model.parameter_tensors(&selected)?;
+    let gradients = full_model.outputs()[0].grad(&parameter_tensors)?;
+    let full_program = full_model.compile_stateful_tensors(&mut compiler, &gradients)?;
+    let full_weights = checkpoint.load_model_schema(&client, full_model.schema())?;
+    let mut full_session = full_weights
+        .initialize_raw(full_model.session(&full_program))?
+        .build()?;
+    let full_gradients =
+        full_session.run(&[&input, &target_boxes, &target_classes, &valid, &l1_weight])?;
+    for ((path, expected_path), gradient) in selected_paths
+        .iter()
+        .zip(MODEL_GRADIENT_PATHS)
+        .zip(&full_gradients)
+    {
+        if path != expected_path {
+            return Err(format!(
+                "gradient schema order mismatch: expected {expected_path}, got {path}"
+            )
+            .into());
+        }
+        write_f32(
+            &args
+                .output
+                .join(format!("model_gradient_{}.f32", path.replace('.', "_"))),
             &gradient.to_vec::<f32>()?,
         )?;
     }
