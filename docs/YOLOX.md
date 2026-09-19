@@ -161,6 +161,36 @@ at the beginning. TFRecord input reopens the same validated file. A genuinely
 empty source still terminates with an error rather than spinning forever, and
 the bounded shuffle pool remains continuous across storage rollovers.
 
+Long runs can write and resume the complete training transformation, rather
+than only inference weights. `--training-output state.safetensors` includes
+parameters, BatchNorm state, SGD momentum, packed model EMA, and the EMA update
+counter. `--resume state.safetensors` validates the global schedule, model and
+data-pipeline configuration before restoring exact dtypes and shapes. Use
+`--run-steps N` to stop after `N` updates while retaining `--steps` as the
+global learning-rate/no-augmentation schedule:
+
+```sh
+# First invocation performs 1,000 updates of a 90,000-step schedule.
+yolox_coco_train_step PLUGIN WEIGHTS \
+  --steps 90000 --run-steps 1000 \
+  --training-output step-1000.safetensors \
+  tfrecord train.tfrecord
+
+# Continue the same schedule and deterministic sample stream.
+yolox_coco_train_step PLUGIN --resume step-1000.safetensors \
+  --steps 90000 \
+  --training-output step-90000.safetensors \
+  tfrecord train.tfrecord
+```
+
+To reconstruct the shuffle pool and variable Mosaic/MixUp consumption exactly,
+resume replays the sampling plan from the beginning without decoding or
+augmenting images. The source and its ordering must therefore remain unchanged.
+This costs sequential compressed-record reads but does not repeat device work.
+In a CUDA check, a one-step snapshot resumed for step two produced all 630
+parameter, BatchNorm, optimizer, and EMA tensors bit-identically to an
+uninterrupted two-step run; replaying the first TFRecord step took 1.7 ms.
+
 ## Verified baseline
 
 On an RTX 5080 with JAX's CUDA 13 PJRT plugin, device SimOTA selects exactly the

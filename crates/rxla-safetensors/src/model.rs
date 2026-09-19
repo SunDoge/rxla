@@ -56,6 +56,38 @@ impl SchemaBuffers {
 }
 
 impl<R: Read + Seek> SafeTensors<R> {
+    /// Restore every resident parameter plus model- and transform-owned state.
+    ///
+    /// `template` supplies the exact runtime ABI, including optimizer moments,
+    /// EMA values and counters appended after model tracing. Unlike inference
+    /// loading, dtype conversion is forbidden: resuming must preserve state
+    /// bit-for-bit. Extra checkpoint tensors are permitted.
+    pub fn load_training_state(
+        &mut self,
+        client: &Client,
+        model: &rxla_nn::AppliedModel,
+        template: &rxla_core::Session,
+    ) -> Result<SchemaBuffers> {
+        let parameter_specs = model
+            .resident_parameter_buffers(template)
+            .map_err(|source| Error::Model { source })?;
+        let state_specs = model
+            .state_buffers(template)
+            .map_err(|source| Error::Model { source })?;
+        for (path, buffer) in parameter_specs.iter().chain(state_specs.iter()) {
+            validate_runtime_tensor_info(self, path, buffer)?;
+        }
+        let parameters = parameter_specs
+            .into_iter()
+            .map(|(path, buffer)| Ok((path.to_owned(), upload_exact(self, client, path, buffer)?)))
+            .collect::<Result<Vec<_>>>()?;
+        let states = state_specs
+            .into_iter()
+            .map(|(path, buffer)| Ok((path.to_owned(), upload_exact(self, client, path, buffer)?)))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(SchemaBuffers { parameters, states })
+    }
+
     /// Load an exact selected parameter subset, such as a standalone LoRA
     /// adapter checkpoint. Every selected path is validated before upload;
     /// tensors outside the selection are ignored.
@@ -304,11 +336,72 @@ fn upload_typed<R: Read + Seek>(
         .dtype;
     match dtype {
         DType::U8 => checkpoint.upload_u8(client, path),
+        DType::I32 => checkpoint.upload_i32(client, path),
         DType::F32 => checkpoint.upload_f32(client, path),
         DType::F16 => checkpoint.upload_f16(client, path),
         DType::BF16 if source_dtype == Dtype::BF16 => checkpoint.upload_bf16(client, path),
         DType::BF16 => checkpoint.upload_bf16_converted(client, path),
         dtype => Err(invalid(format!("unsupported schema dtype {dtype:?}"))),
+    }
+}
+
+fn validate_runtime_tensor_info<R: Read + Seek>(
+    checkpoint: &SafeTensors<R>,
+    path: &str,
+    expected: &Buffer,
+) -> Result<()> {
+    let info = checkpoint
+        .info(path)
+        .ok_or_else(|| invalid(format!("missing training-state tensor {path:?}")))?;
+    let dimensions = expected
+        .dimensions()
+        .map_err(|source| Error::Runtime { source })?
+        .into_iter()
+        .map(|dimension| {
+            usize::try_from(dimension).map_err(|_| invalid("runtime dimension exceeds usize"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let dtype = match expected
+        .dtype()
+        .map_err(|source| Error::Runtime { source })?
+    {
+        DType::U8 => Dtype::U8,
+        DType::I32 => Dtype::I32,
+        DType::F16 => Dtype::F16,
+        DType::BF16 => Dtype::BF16,
+        DType::F32 => Dtype::F32,
+        dtype => {
+            return Err(invalid(format!(
+                "unsupported training-state dtype {dtype:?}"
+            )));
+        }
+    };
+    if info.shape != dimensions || info.dtype != dtype {
+        return Err(invalid(format!(
+            "training-state tensor {path:?} does not match the runtime ABI"
+        )));
+    }
+    Ok(())
+}
+
+fn upload_exact<R: Read + Seek>(
+    checkpoint: &mut SafeTensors<R>,
+    client: &Client,
+    path: &str,
+    expected: &Buffer,
+) -> Result<Buffer> {
+    match expected
+        .dtype()
+        .map_err(|source| Error::Runtime { source })?
+    {
+        DType::U8 => checkpoint.upload_u8(client, path),
+        DType::I32 => checkpoint.upload_i32(client, path),
+        DType::F16 => checkpoint.upload_f16(client, path),
+        DType::BF16 => checkpoint.upload_bf16(client, path),
+        DType::F32 => checkpoint.upload_f32(client, path),
+        dtype => Err(invalid(format!(
+            "unsupported training-state dtype {dtype:?}"
+        ))),
     }
 }
 
@@ -359,4 +452,112 @@ pub fn save_model_new(
         buffers.push((spec.path(), buffer));
     }
     super::save_buffers_new(path, &buffers, metadata)
+}
+
+/// Atomically save every resident parameter and every named resident state.
+///
+/// Unlike [`save_model_new`], this includes transform-owned state such as
+/// optimizer moments and EMA counters, and is therefore suitable for resuming
+/// the same compiled training transformation. Configuration and data cursors
+/// remain caller-owned metadata.
+#[cfg(feature = "export")]
+pub fn save_training_state_new(
+    path: impl AsRef<std::path::Path>,
+    model: &rxla_nn::AppliedModel,
+    session: &rxla_core::Session,
+    metadata: Option<&std::collections::HashMap<String, String>>,
+) -> Result<()> {
+    let parameters = model
+        .resident_parameter_buffers(session)
+        .map_err(|source| Error::Model { source })?;
+    let states = model
+        .state_buffers(session)
+        .map_err(|source| Error::Model { source })?;
+    let mut buffers = Vec::with_capacity(parameters.len() + states.len());
+    buffers.extend(parameters);
+    buffers.extend(states);
+    super::save_buffers_new(path, &buffers, metadata)
+}
+
+#[cfg(all(test, feature = "export"))]
+mod tests {
+    use super::*;
+    use rxla_core::{CacheLimits, Compiler, Tensor};
+    use rxla_nn::{Cx, Linear, Model, TensorApply};
+    use rxla_train::{SgdOptions, apply_model_ema, apply_model_sgd_with_options};
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
+    fn training_state_round_trips_optimizer_and_ema() {
+        let client = unsafe {
+            Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
+        }
+        .expect("load CPU plugin");
+        let (selection, mut model) = Model::new(|cx: Cx, input: Tensor| {
+            let prediction = input.apply(&cx.named_layer("linear", Linear::new(1).bias(false))?)?;
+            Ok::<_, rxla_nn::Error>(prediction.square()?.sum([0, 1], false)?)
+        })
+        .inputs(rxla_nn::ModelInput::new([1, 1]))
+        .trace_resident_all()
+        .unwrap();
+        let loss = model.outputs()[0].clone();
+        apply_model_sgd_with_options(&mut model, &selection, &loss, 0.1, |_| {
+            SgdOptions::default().momentum(0.9).nesterov(true)
+        })
+        .unwrap();
+        apply_model_ema(&mut model, &selection, 0.9998).unwrap();
+
+        let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+        let compiled = model.compile_stateful(&mut compiler).unwrap();
+        let mut session = compiled.initialize_session(7).unwrap();
+        let input = client.buffer(&[1, 1], &[2.0_f32]).unwrap();
+        let _: Buffer = session.run(&input).unwrap();
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("training.safetensors");
+        save_training_state_new(&path, &model, session.raw(), None).unwrap();
+
+        let expected_parameters = model
+            .resident_parameter_buffers(session.raw())
+            .unwrap()
+            .into_iter()
+            .map(|(path, value)| (path.to_owned(), value.to_vec::<f32>().unwrap()))
+            .collect::<HashMap<_, _>>();
+        let expected_states = model
+            .state_buffers(session.raw())
+            .unwrap()
+            .into_iter()
+            .map(|(path, value)| (path.to_owned(), value.to_vec::<f32>().unwrap()))
+            .collect::<HashMap<_, _>>();
+        assert!(expected_states.keys().any(|path| path.contains("momentum")));
+        assert!(
+            expected_states
+                .keys()
+                .any(|path| path.contains("model_ema"))
+        );
+
+        let mut checkpoint = SafeTensors::open(&path).unwrap();
+        let loaded = checkpoint
+            .load_training_state(&client, &model, session.raw())
+            .unwrap();
+        let restored = loaded
+            .initialize(compiled.session())
+            .unwrap()
+            .build()
+            .unwrap();
+        let actual_parameters = model
+            .resident_parameter_buffers(restored.raw())
+            .unwrap()
+            .into_iter()
+            .map(|(path, value)| (path.to_owned(), value.to_vec::<f32>().unwrap()))
+            .collect::<HashMap<_, _>>();
+        let actual_states = model
+            .state_buffers(restored.raw())
+            .unwrap()
+            .into_iter()
+            .map(|(path, value)| (path.to_owned(), value.to_vec::<f32>().unwrap()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(actual_parameters, expected_parameters);
+        assert_eq!(actual_states, expected_states);
+    }
 }

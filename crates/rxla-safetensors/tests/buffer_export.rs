@@ -57,12 +57,22 @@ fn real_mixed_export_roundtrip_validation_and_partial_writer_failure() {
     let floats = client.buffer(&[2, 2], &values).unwrap();
     let integer = client.buffer(&[], &[16_777_217]).unwrap();
     let indices = client.buffer(&[3], &[i32::MIN, 0, i32::MAX]).unwrap();
+    let bytes_buffer = client.buffer(&[3], &[0_u8, 127, 255]).unwrap();
+    let halves = client
+        .buffer(&[2], &[half::f16::from_f32(-1.5), half::f16::NAN])
+        .unwrap();
+    let brain_halves = client
+        .buffer(&[2], &[half::bf16::from_f32(2.5), half::bf16::INFINITY])
+        .unwrap();
     let empty = client.buffer::<f32>(&[0, 2], &[]).unwrap();
     let mut bytes = Vec::new();
     let entries = [
         ("weights", &floats),
         ("count", &integer),
         ("indices", &indices),
+        ("bytes", &bytes_buffer),
+        ("halves", &halves),
+        ("brain_halves", &brain_halves),
         ("empty", &empty),
     ];
     write_buffers(&mut bytes, &entries).unwrap();
@@ -72,7 +82,28 @@ fn real_mixed_export_roundtrip_validation_and_partial_writer_failure() {
         checkpoint.read_i32("indices").unwrap().values,
         [i32::MIN, 0, i32::MAX]
     );
-    assert_eq!(checkpoint.read_i32("empty").unwrap().shape, [0, 2]);
+    assert_eq!(checkpoint.read_f32("empty").unwrap().shape, [0, 2]);
+    assert_eq!(checkpoint.read_u8("bytes").unwrap().values, [0, 127, 255]);
+    assert_eq!(
+        checkpoint
+            .read_f16("halves")
+            .unwrap()
+            .values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        [half::f16::from_f32(-1.5), half::f16::NAN].map(half::f16::to_bits)
+    );
+    assert_eq!(
+        checkpoint
+            .read_bf16("brain_halves")
+            .unwrap()
+            .values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        [half::bf16::from_f32(2.5), half::bf16::INFINITY].map(half::bf16::to_bits)
+    );
     assert_eq!(
         checkpoint
             .read_f32("weights")
@@ -90,6 +121,17 @@ fn real_mixed_export_roundtrip_validation_and_partial_writer_failure() {
             .to_vec::<i32>()
             .unwrap(),
         [16_777_217]
+    );
+    assert_eq!(
+        checkpoint
+            .upload_f16(&client, "halves")
+            .unwrap()
+            .to_vec::<half::f16>()
+            .unwrap()
+            .into_iter()
+            .map(half::f16::to_bits)
+            .collect::<Vec<_>>(),
+        [half::f16::from_f32(-1.5), half::f16::NAN].map(half::f16::to_bits)
     );
     let mut reversed = Vec::new();
     write_buffers(

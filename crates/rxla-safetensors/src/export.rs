@@ -44,7 +44,7 @@ pub fn save_buffers_new(
     Ok(())
 }
 
-/// Stream explicitly named F32/I32/BF16 buffers as one safetensors file. Names must
+/// Stream explicitly named U8/I32/F16/BF16/F32 buffers as one safetensors file. Names must
 /// be nonempty, unique and not `__metadata__`; entries are sorted by name.
 /// Shapes/dtypes/header are checked before any write or download. Shared buffer
 /// references under different names are saved separately, not deduplicated.
@@ -91,7 +91,9 @@ fn write_buffers_inner(
         }
         previous = Some(name);
         let dtype = match buffer.dtype().map_err(|source| Error::Runtime { source })? {
+            rxla_pjrt::DType::U8 => Dtype::U8,
             rxla_pjrt::DType::F32 => Dtype::F32,
+            rxla_pjrt::DType::F16 => Dtype::F16,
             rxla_pjrt::DType::I32 => Dtype::I32,
             rxla_pjrt::DType::BF16 => Dtype::BF16,
             dtype => return Err(invalid(format!("unsupported export dtype {dtype:?}"))),
@@ -105,7 +107,14 @@ fn write_buffers_inner(
         let bytes = shape
             .iter()
             .try_fold(1usize, |n, &d| n.checked_mul(d))
-            .and_then(|n| n.checked_mul(if dtype == Dtype::BF16 { 2 } else { 4 }))
+            .and_then(|n| {
+                n.checked_mul(match dtype {
+                    Dtype::U8 => 1,
+                    Dtype::F16 | Dtype::BF16 => 2,
+                    Dtype::F32 | Dtype::I32 => 4,
+                    _ => unreachable!(),
+                })
+            })
             .ok_or_else(|| invalid("export tensor size overflow"))?;
         let end = offset
             .checked_add(bytes)
@@ -139,6 +148,14 @@ fn write_buffers_inner(
     writer.write_all(&header).map_err(io)?;
     for (dtype, buffer) in pending {
         match dtype {
+            Dtype::U8 => write_words(
+                writer,
+                buffer
+                    .to_vec::<u8>()
+                    .map_err(|source| Error::Runtime { source })?
+                    .into_iter()
+                    .map(|value| [value]),
+            )?,
             Dtype::F32 => write_words(
                 writer,
                 buffer
@@ -154,6 +171,14 @@ fn write_buffers_inner(
                     .map_err(|source| Error::Runtime { source })?
                     .into_iter()
                     .map(i32::to_le_bytes),
+            )?,
+            Dtype::F16 => write_words(
+                writer,
+                buffer
+                    .to_vec::<half::f16>()
+                    .map_err(|source| Error::Runtime { source })?
+                    .into_iter()
+                    .map(|value| value.to_bits().to_le_bytes()),
             )?,
             Dtype::BF16 => write_words(
                 writer,

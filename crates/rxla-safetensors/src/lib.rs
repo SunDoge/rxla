@@ -13,7 +13,7 @@ use memmap2::{Mmap, MmapOptions};
 #[cfg(feature = "model")]
 pub use model::SchemaBuffers;
 #[cfg(all(feature = "model", feature = "export"))]
-pub use model::{save_model_new, save_parameter_selection_new};
+pub use model::{save_model_new, save_parameter_selection_new, save_training_state_new};
 #[cfg(feature = "model")]
 use rxla_pjrt::DType;
 use rxla_pjrt::{Buffer, Client};
@@ -61,6 +61,13 @@ pub struct HostF32 {
 pub struct HostI32 {
     pub shape: Vec<i64>,
     pub values: Vec<i32>,
+}
+
+/// Exact native F16 storage. No F32 conversion or NaN canonicalization is
+/// performed; callers can inspect encodings with [`f16::to_bits`].
+pub struct HostF16 {
+    pub shape: Vec<i64>,
+    pub values: Vec<f16>,
 }
 
 /// Exact native BF16 storage. No F32 conversion or NaN canonicalization is
@@ -424,6 +431,59 @@ impl<R: Read + Seek> SafeTensors<R> {
         Ok(HostBf16 { shape, values })
     }
 
+    /// Read the selected payload as native F16 values. Other dtypes are
+    /// rejected before payload I/O, not converted.
+    pub fn read_f16(&mut self, name: &str) -> Result<HostF16> {
+        let info = self
+            .metadata
+            .info(name)
+            .ok_or_else(|| invalid(format!("missing tensor {name:?}")))?;
+        if info.dtype != Dtype::F16 {
+            return Err(invalid(format!(
+                "tensor {name:?}: expected F16, got {:?}",
+                info.dtype
+            )));
+        }
+        let shape = info
+            .shape
+            .iter()
+            .map(|&d| i64::try_from(d).map_err(|_| invalid("dimension exceeds i64")))
+            .collect::<Result<Vec<_>>>()?;
+        let (start, end) = info.data_offsets;
+        let offset = self
+            .data_start
+            .checked_add(start as u64)
+            .ok_or_else(|| invalid("tensor offset overflow"))?;
+        let read_start = Instant::now();
+        self.reader.seek(SeekFrom::Start(offset)).map_err(io)?;
+        let elements = (end - start) / std::mem::size_of::<f16>();
+        let mut values = vec![f16::ZERO; elements];
+        let bytes = unsafe {
+            // `f16` is a transparent 16-bit value and every bit pattern is
+            // valid; the initialized allocation remains owned by `values`.
+            std::slice::from_raw_parts_mut(values.as_mut_ptr().cast::<u8>(), end - start)
+        };
+        self.reader.read_exact(bytes).map_err(io)?;
+        let read_time = read_start.elapsed();
+        let decode_start = Instant::now();
+        if cfg!(target_endian = "big") {
+            for value in &mut values {
+                *value = f16::from_bits(value.to_bits().swap_bytes());
+            }
+        }
+        self.stats.reads = self.stats.reads.saturating_add(1);
+        self.stats.payload_bytes = self
+            .stats
+            .payload_bytes
+            .saturating_add((end - start) as u64);
+        self.stats.read_time = self.stats.read_time.saturating_add(read_time);
+        self.stats.decode_time = self
+            .stats
+            .decode_time
+            .saturating_add(decode_start.elapsed());
+        Ok(HostF16 { shape, values })
+    }
+
     /// Upload BF16 without expanding to F32; uploaded byte statistics count two
     /// bytes per element. Does not mutate sessions or infer model key mappings.
     pub fn upload_bf16(&mut self, client: &Client, name: &str) -> Result<Buffer> {
@@ -492,6 +552,27 @@ impl<R: Read + Seek> SafeTensors<R> {
     /// Conversion happens once while loading, keeping parameter casts out of
     /// the compiled model's execution path.
     pub fn upload_f16(&mut self, client: &Client, name: &str) -> Result<Buffer> {
+        if self
+            .metadata
+            .info(name)
+            .is_some_and(|info| info.dtype == Dtype::F16)
+        {
+            let tensor = self.read_f16(name)?;
+            let upload_start = Instant::now();
+            let buffer = client
+                .buffer(&tensor.shape, &tensor.values)
+                .map_err(|source| Error::Runtime { source })?;
+            self.stats.uploads = self.stats.uploads.saturating_add(1);
+            self.stats.uploaded_bytes = self
+                .stats
+                .uploaded_bytes
+                .saturating_add((tensor.values.len() as u64).saturating_mul(2));
+            self.stats.upload_time = self
+                .stats
+                .upload_time
+                .saturating_add(upload_start.elapsed());
+            return Ok(buffer);
+        }
         let tensor = self.read_f32(name)?;
         let values = tensor
             .values

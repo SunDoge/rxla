@@ -12,7 +12,7 @@ use rxla_models::{
     yolox_simota,
 };
 use rxla_nn::{AppliedModel, Cx, Model, ModelInput};
-use rxla_safetensors::{SafeTensors, save_buffers_new, save_model_new};
+use rxla_safetensors::{SafeTensors, save_buffers_new, save_model_new, save_training_state_new};
 use rxla_tfrecord::Reader as TfrecordReader;
 use rxla_train::{
     BoundedPipeline, DataRng, DetectionTarget, ModelEma, SampleRng, SgdOptions, ShufflePool,
@@ -45,13 +45,16 @@ fn default_augmentation_workers() -> usize {
 struct Args {
     /// Trusted PJRT plugin shared library.
     plugin: PathBuf,
-    /// Checkpoint produced by benchmarks/convert_yolox.py.
-    weights: PathBuf,
+    /// Initial checkpoint produced by benchmarks/convert_yolox.py; omit with --resume.
+    weights: Option<PathBuf>,
     #[command(subcommand)]
     source: DataSource,
-    /// Number of consecutive annotated images to train on.
+    /// Total optimizer steps in the global training schedule.
     #[arg(long, default_value_t = 1)]
     steps: usize,
+    /// Limit updates in this invocation while retaining the global --steps schedule.
+    #[arg(long)]
+    run_steps: Option<usize>,
     #[arg(long, default_value_t = 64)]
     size: i64,
     #[arg(long, default_value_t = 1)]
@@ -107,6 +110,12 @@ struct Args {
     /// Write inference-ready trained parameters and BatchNorm state here.
     #[arg(long)]
     output: Option<PathBuf>,
+    /// Resume parameters, BatchNorm, SGD momentum, and EMA from a training snapshot.
+    #[arg(long)]
+    resume: Option<PathBuf>,
+    /// Write a resumable snapshot including optimizer and EMA state here.
+    #[arg(long)]
+    training_output: Option<PathBuf>,
     /// Synchronize, validate, and print metrics every N completed steps.
     #[arg(long, default_value_t = 10)]
     log_every: usize,
@@ -130,7 +139,7 @@ enum ConvolutionPrecision {
     Highest,
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 enum DataSource {
     /// Read individual JPEG files and COCO instances JSON.
     Coco {
@@ -385,6 +394,84 @@ fn build_training_variant(
     })
 }
 
+fn training_metadata(
+    args: &Args,
+    base_learning_rate: f32,
+    warmup_steps: usize,
+    no_augmentation_steps: usize,
+    completed_steps: usize,
+) -> HashMap<String, String> {
+    [
+        ("format", "rxla-yolox-training-v1".to_owned()),
+        ("completed_steps", completed_steps.to_string()),
+        ("total_steps", args.steps.to_string()),
+        ("batch_size", args.batch_size.to_string()),
+        ("base_learning_rate", base_learning_rate.to_string()),
+        ("warmup_steps", warmup_steps.to_string()),
+        ("no_augmentation_steps", no_augmentation_steps.to_string()),
+        ("size", args.size.to_string()),
+        ("random_resize", args.random_resize.to_string()),
+        ("random_size_min", args.random_size_min.to_string()),
+        ("random_size_max", args.random_size_max.to_string()),
+        ("seed", args.seed.to_string()),
+        ("shuffle_buffer", args.shuffle_buffer.to_string()),
+        ("mosaic_probability", args.mosaic_probability.to_string()),
+        ("mixup_probability", args.mixup_probability.to_string()),
+        ("compute_dtype", format!("{:?}", args.compute_dtype)),
+        (
+            "convolution_precision",
+            format!("{:?}", args.convolution_precision),
+        ),
+        ("model_ema", (!args.disable_model_ema).to_string()),
+        ("source", format!("{:?}", args.source)),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value))
+    .collect()
+}
+
+fn resume_step(
+    args: &Args,
+    base_learning_rate: f32,
+    warmup_steps: usize,
+    no_augmentation_steps: usize,
+) -> Result<usize> {
+    let Some(path) = &args.resume else {
+        return Ok(0);
+    };
+    let checkpoint = SafeTensors::open(path)?;
+    let metadata = checkpoint
+        .metadata()
+        .ok_or("training snapshot has no metadata")?;
+    let completed = metadata
+        .get("completed_steps")
+        .ok_or("training snapshot has no completed_steps")?
+        .parse::<usize>()?;
+    if completed > args.steps {
+        return Err(format!(
+            "training snapshot step {completed} exceeds requested total {}",
+            args.steps
+        )
+        .into());
+    }
+    let mut expected = training_metadata(
+        args,
+        base_learning_rate,
+        warmup_steps,
+        no_augmentation_steps,
+        completed,
+    );
+    expected.remove("completed_steps");
+    for (key, value) in expected {
+        if metadata.get(&key) != Some(&value) {
+            return Err(
+                format!("training snapshot metadata {key:?} does not match this run").into(),
+            );
+        }
+    }
+    Ok(completed)
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.size <= 0
@@ -393,6 +480,7 @@ fn main() -> Result<()> {
             .learning_rate
             .is_some_and(|learning_rate| !learning_rate.is_finite() || learning_rate < 0.0)
         || args.steps == 0
+        || args.run_steps == Some(0)
         || args.log_every == 0
         || args.batch_size == 0
         || args.prefetch == 0
@@ -403,9 +491,11 @@ fn main() -> Result<()> {
         || args.random_size_max > u32::MAX / 32
         || !(0.0..=1.0).contains(&args.mosaic_probability)
         || !(0.0..=1.0).contains(&args.mixup_probability)
+        || args.output.is_some() && args.output == args.training_output
+        || args.weights.is_none() && args.resume.is_none()
     {
         return Err(
-            "size must be a positive multiple of 32; learning rate must be finite and nonnegative; steps, batch-size, prefetch, augmentation-workers, shuffle-buffer, log-every and random-size-min must be non-zero; random-size-min must not exceed random-size-max; mosaic-probability and mixup-probability must be in [0, 1]"
+            "invalid training configuration: size must be a positive multiple of 32; rates/probabilities and counts must be in range; output paths must differ; initial weights or --resume is required"
                 .into(),
         );
     }
@@ -420,10 +510,20 @@ fn main() -> Result<()> {
     let base_learning_rate = args
         .learning_rate
         .unwrap_or_else(|| default_learning_rate(args.batch_size));
-    let source = TrainingSource::open(args.source)?;
     let no_augmentation_steps = args.no_augmentation_steps.unwrap_or(args.steps / 20);
+    let warmup_steps = args.warmup_steps.unwrap_or(args.steps / 60);
+    if warmup_steps + no_augmentation_steps > args.steps {
+        return Err("warmup and no-augmentation steps exceed total steps".into());
+    }
+    let resumed_at = resume_step(
+        &args,
+        base_learning_rate,
+        warmup_steps,
+        no_augmentation_steps,
+    )?;
+    let source = TrainingSource::open(args.source.clone())?;
     let samples = ShufflePool::new(SourceSamples(source), args.shuffle_buffer, args.seed)?;
-    let batches = PlannedBatches {
+    let mut batches = PlannedBatches {
         samples,
         remaining: args.steps,
         step: 0,
@@ -434,6 +534,17 @@ fn main() -> Result<()> {
         sizes: step_sizes.clone(),
         rng: DataRng::new(args.seed),
     };
+    let replay_started = Instant::now();
+    for step in 0..resumed_at {
+        batches
+            .next()
+            .ok_or_else(|| format!("training data ended while replaying step {step}"))??;
+    }
+    if let Some(run_steps) = args.run_steps {
+        batches.remaining = batches.remaining.min(run_steps);
+    }
+    let expected_completed = resumed_at + batches.remaining;
+    let replay_ms = replay_started.elapsed().as_secs_f64() * 1e3;
     // Host input preparation starts before XLA compilation so initial pool fill
     // and the first augmented batches are normally hidden by compilation.
     let pipeline = BoundedPipeline::from_iter(args.prefetch, batches)?.map_parallel_ordered(
@@ -480,7 +591,12 @@ fn main() -> Result<()> {
         .convolution_precision(convolution_precision);
     let train_compile_started = Instant::now();
     let mut variants = BTreeMap::new();
-    for size in step_sizes.iter().copied().collect::<BTreeSet<_>>() {
+    let active_sizes = if resumed_at < expected_completed {
+        &step_sizes[resumed_at..expected_completed]
+    } else {
+        &step_sizes[args.steps - 1..]
+    };
+    for size in active_sizes.iter().copied().collect::<BTreeSet<_>>() {
         let variant = build_training_variant(
             &mut compiler,
             batch,
@@ -491,20 +607,34 @@ fn main() -> Result<()> {
         variants.insert(size, variant);
     }
     let train_compile_ms = train_compile_started.elapsed().as_secs_f64() * 1e3;
-    let mut current_size = step_sizes[0];
+    let mut current_size = step_sizes[resumed_at.min(args.steps - 1)];
     let initial = variants
         .get(&current_size)
         .expect("the first scheduled size was compiled");
-    let mut checkpoint = SafeTensors::open(&args.weights)?;
+    let initial_checkpoint = args
+        .resume
+        .as_ref()
+        .or(args.weights.as_ref())
+        .expect("weights or resume validated");
+    let mut checkpoint = SafeTensors::open(initial_checkpoint)?;
     let weights = checkpoint.load_model_schema(&client, initial.model.schema())?;
-    let mut training_session = weights
+    let template = weights
         .initialize_raw(initial.model.session(&initial.program))?
         .initializer_seed(7)
         .build()?;
+    let mut training_session = if let Some(path) = &args.resume {
+        let mut checkpoint = SafeTensors::open(path)?;
+        checkpoint
+            .load_training_state(&client, &initial.model, &template)?
+            .initialize_raw(initial.model.session(&initial.program))?
+            .build()?
+    } else {
+        template
+    };
     let schedule = YoloLrSchedule::new(base_learning_rate, args.steps)
-        .warmup_steps(args.warmup_steps.unwrap_or(args.steps / 60))
+        .warmup_steps(warmup_steps)
         .no_augmentation_steps(no_augmentation_steps);
-    let mut completed = 0;
+    let mut completed = resumed_at;
     let run_started = Instant::now();
     let mut profiler = None;
     loop {
@@ -560,7 +690,9 @@ fn main() -> Result<()> {
             &l1_weight,
         ])?;
         completed += 1;
-        let observe = completed == 1 || completed % args.log_every == 0 || completed == args.steps;
+        let observe = completed == resumed_at + 1
+            || completed % args.log_every == 0
+            || completed == args.steps;
         let losses = if observe {
             let losses = outputs[0].to_vec::<f32>()?;
             if losses.len() != 6 || losses.iter().any(|value| !value.is_finite()) {
@@ -571,7 +703,7 @@ fn main() -> Result<()> {
             None
         };
         let train_ms = train_started.elapsed().as_secs_f64() * 1e3;
-        if completed == 1 && args.cuda_profile {
+        if completed == resumed_at + 1 && args.cuda_profile {
             profiler = Some(CudaProfiler::start(&args.cuda_runtime)?);
         }
         if let Some(losses) = losses {
@@ -591,12 +723,10 @@ fn main() -> Result<()> {
     }
     drop(profiler);
     pipeline.finish()?;
-    if completed != args.steps {
-        return Err(format!(
-            "only found {completed} annotated images for {} steps",
-            args.steps
-        )
-        .into());
+    if completed != expected_completed {
+        return Err(
+            format!("training stopped at step {completed}, expected {expected_completed}").into(),
+        );
     }
     let run_seconds = run_started.elapsed().as_secs_f64();
     if let Some(output) = &args.output {
@@ -658,12 +788,26 @@ fn main() -> Result<()> {
             save_model_new(output, &current.model, &training_session, Some(&metadata))?;
         }
     }
+    if let Some(output) = &args.training_output {
+        let metadata = training_metadata(
+            &args,
+            base_learning_rate,
+            warmup_steps,
+            no_augmentation_steps,
+            completed,
+        );
+        let current = variants
+            .get(&current_size)
+            .expect("current training size was compiled");
+        save_training_state_new(output, &current.model, &training_session, Some(&metadata))?;
+    }
     let cache = compiler.stats();
+    let executed = completed - resumed_at;
     println!(
-        "completed={completed} images={} run_ms={:.1} images_per_second={:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
-        completed * args.batch_size,
+        "completed={completed} resumed_at={resumed_at} images={} run_ms={:.1} images_per_second={:.1} replay_ms={replay_ms:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
+        executed * args.batch_size,
         run_seconds * 1e3,
-        completed as f64 * args.batch_size as f64 / run_seconds,
+        executed as f64 * args.batch_size as f64 / run_seconds,
         variants.len(),
         cache.misses,
         cache.disk_hits,
