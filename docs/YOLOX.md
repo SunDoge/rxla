@@ -131,9 +131,10 @@ BatchNorm state, so it can be passed directly to `yolox_infer`.
 The default training size is YOLOX-tiny's 416×416. Multiscale training is also
 enabled by default and selects a 32-pixel multiple in 320..640 every ten
 optimizer updates; pass `--random-resize false` only for controlled experiments.
-The learning-rate scheduler follows the official trainer's one-based update
-counter, so the first optimizer update uses the quadratic-warmup value at
-iteration one rather than an artificial zero-rate update.
+The learning-rate scheduler follows the official trainer's update ordering.
+SGD is initialized with the zero warmup rate, so the first optimizer update is
+a zero-rate update. The trainer then installs `update_lr(1)` for the second
+update and repeats that post-step ordering throughout training.
 
 The default total learning rate follows the official trainer and scales
 `basic_lr_per_img = 0.01 / 64` by the effective batch size. For example,
@@ -311,17 +312,18 @@ model, loss, gradient, BatchNorm, momentum-SGD, and EMA semantics, while a
 from-scratch run establishes that the real COCO input pipeline remains finite
 and resumable. Neither check substitutes for a complete training curve.
 
-The first full-dataset convergence checkpoint used the official 300-epoch
-schedule, effective batch 64 (`batch=8`, eight accumulated microbatches),
-default multi-scale training, Mosaic, and model EMA. At update 1,000 the loss
-had fallen from `17.845` to the `12`-`15` range. After resuming to update 2,000
-it was typically `10`-`12`. Both the raw model and EMA still rounded to
-`AP=0.000` on val2017, with `AR@100=0.002`. This checkpoint is only 1.08 epochs
-into the five-epoch quadratic warmup: its learning rate is `4.68e-4`, versus
-the eventual `1e-2`. It is therefore a pipeline/convergence smoke test, not
-accuracy evidence. The next accuracy gate is a matched PyTorch/RXLA curve at
-fixed milestones through the end of warmup, followed by a complete 300-epoch
-COCO AP run.
+A pre-v3 full-dataset diagnostic used the 300-epoch schedule, effective batch
+64 (`batch=8`, eight accumulated microbatches), default multi-scale training,
+Mosaic, and model EMA. At update 1,000 the loss had fallen from `17.845` to the
+`12`-`15` range; after resuming to update 2,000 it was typically `10`-`12`.
+Both the raw model and EMA rounded to `AP=0.000` on val2017, with
+`AR@100=0.002`. That run exposed a one-update LR-order mismatch: it used
+`update_lr(1)` for the first optimizer step, while official YOLOX initializes
+SGD at the zero warmup rate and installs `update_lr(1)` only after that step.
+Its snapshots are intentionally rejected by v3 and its AP is not accuracy
+evidence. The next accuracy gate is a matched PyTorch/RXLA curve at fixed
+milestones through the end of warmup, followed by a complete 300-epoch COCO AP
+run.
 
 The remaining intentional data-order difference is material to a strict
 reproduction claim. Official YOLOX permutes one primary sample per output and
@@ -552,9 +554,10 @@ counter buffers migrate between the size-specialized programs on the same PJRT
 client without a host tensor round-trip. A real CUDA/COCO check trained ten
 steps at 64×64, migrated the device input to 96×96, and completed the eleventh
 update with finite loss and 21 foreground anchors. The training snapshot marker
-is `rxla-yolox-training-v2`; v1 snapshots predate these exact multi-scale replay
-semantics and are rejected instead of silently resuming a different data
-stream. A separate real check verified the official empty-match behavior:
+is `rxla-yolox-training-v3`; older snapshots predate the exact official
+post-step learning-rate ordering and are rejected instead of silently resuming
+a different optimization trajectory. A separate real check verified the
+official empty-match behavior:
 after augmentation removed every box, SimOTA produced zero foreground and the
 normalized objectness-only loss continued instead of treating the batch as an
 error. Multi-scale is enabled by default for recipe compatibility; pass

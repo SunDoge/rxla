@@ -202,10 +202,12 @@ impl YoloLrSchedule {
         }
     }
 
-    /// Return the rate for a one-based optimizer update number.
+    /// Return the scheduler rate at an elapsed-update position.
     ///
-    /// YOLOX evaluates its schedule with `progress_in_iter + 1`; rejecting zero
-    /// prevents callers from silently inserting an extra zero-rate update.
+    /// Official YOLOX initializes SGD with `warmup_learning_rate`, performs the
+    /// first optimizer update, and only then installs `update_lr(1)` for the
+    /// next update. Consequently an optimizer about to run after `n` completed
+    /// updates uses this method with `update == n`; zero is a meaningful point.
     pub fn at_update(self, update: usize) -> SimOtaResult<f32> {
         ensure!(
             self.base_learning_rate.is_finite()
@@ -216,7 +218,6 @@ impl YoloLrSchedule {
                 && self.warmup_learning_rate >= 0.0
                 && self.minimum_ratio.is_finite()
                 && (0.0..=1.0).contains(&self.minimum_ratio)
-                && update > 0
                 && update <= self.total_steps,
             ConfigurationSnafu
         );
@@ -645,7 +646,7 @@ mod tests {
             .warmup_steps(10)
             .minimum_rate_steps(10)
             .minimum_ratio(0.05);
-        assert!(schedule.at_update(0).is_err());
+        assert_eq!(schedule.at_update(0).unwrap(), 0.0);
         assert!((schedule.at_update(1).unwrap() - 0.01).abs() < 1e-6);
         assert!((schedule.at_update(5).unwrap() - 0.25).abs() < 1e-6);
         assert!((schedule.at_update(10).unwrap() - 1.0).abs() < 1e-6);

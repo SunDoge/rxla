@@ -504,7 +504,7 @@ fn training_metadata(
     completed_steps: usize,
 ) -> HashMap<String, String> {
     [
-        ("format", "rxla-yolox-training-v2".to_owned()),
+        ("format", "rxla-yolox-training-v3".to_owned()),
         ("completed_steps", completed_steps.to_string()),
         ("total_steps", total_steps.to_string()),
         ("batch_size", args.batch_size.to_string()),
@@ -575,26 +575,6 @@ fn resume_step(
     );
     expected.remove("completed_steps");
     for (key, value) in expected {
-        if key == "target_capacity"
-            && value == MAX_TARGETS.to_string()
-            && !metadata.contains_key(&key)
-        {
-            // v1 snapshots written before configurable target padding always
-            // used the official capacity and remain exactly compatible.
-            continue;
-        }
-        if key == "gradient_accumulation" && value == "1" && !metadata.contains_key(&key) {
-            // Training-v2 snapshots written before accumulation support imply
-            // one optimizer update per batch.
-            continue;
-        }
-        if key == "minimum_rate_steps"
-            && value == no_augmentation_steps.to_string()
-            && !metadata.contains_key(&key)
-        {
-            // Older training-v2 snapshots coupled the LR tail to no-aug.
-            continue;
-        }
         if metadata.get(&key) != Some(&value) {
             return Err(
                 format!("training snapshot metadata {key:?} does not match this run").into(),
@@ -863,10 +843,11 @@ fn main() -> Result<()> {
         let staging_started = Instant::now();
         let input = client.buffer(&[batch, args.size, args.size, 3], &pixels)?;
         let image_upload_ms = staging_started.elapsed().as_secs_f64() * 1e3;
-        // The official trainer calls update_lr(progress_in_iter + 1) before
-        // optimizer.step(), so update numbers are one-based even though our
-        // completed-step counter is zero-based.
-        let step_learning_rate = schedule.at_update(completed + 1)?;
+        // Official YOLOX updates the optimizer's LR after `optimizer.step()`.
+        // Therefore the first step uses the optimizer's initial warmup rate,
+        // and a step with `completed` preceding updates uses schedule position
+        // `completed` (the rate installed after the previous update).
+        let step_learning_rate = schedule.at_update(completed)?;
         let learning_rate = client.buffer(&[], &[step_learning_rate])?;
         let use_l1 = no_augmentation_steps != 0
             && completed >= total_steps.saturating_sub(no_augmentation_steps);
