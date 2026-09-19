@@ -256,40 +256,35 @@ impl SimOtaConfig {
         targets: &[DetectionTarget],
     ) -> SimOtaResult<SimOtaAssignments> {
         self.validate(input, targets)?;
-        let images = (0..input.batch)
-            .into_par_iter()
-            .map(|batch| {
+        let mut boxes = vec![0.0; input.batch * input.anchors * 4];
+        let mut objectness = vec![0.0; input.batch * input.anchors];
+        let mut classes = vec![0.0; input.batch * input.anchors * input.classes];
+        let foreground = boxes
+            .par_chunks_mut(input.anchors * 4)
+            .zip(objectness.par_chunks_mut(input.anchors))
+            .zip(classes.par_chunks_mut(input.anchors * input.classes))
+            .enumerate()
+            .map(|(batch, ((boxes, objectness), classes))| {
                 let ground_truth = targets
                     .iter()
                     .filter(|target| target.batch == batch)
                     .collect::<Vec<_>>();
-                let mut output = SimOtaAssignments {
-                    boxes: vec![0.0; input.anchors * 4],
-                    objectness: vec![0.0; input.anchors],
-                    classes: vec![0.0; input.anchors * input.classes],
-                    batch: 1,
-                    anchors: input.anchors,
-                    class_count: input.classes,
-                    foreground: 0,
-                };
-                self.assign_image(input, batch, &ground_truth, &mut output);
-                output
+                self.assign_image(
+                    input,
+                    batch,
+                    &ground_truth,
+                    ImageAssignments {
+                        boxes,
+                        objectness,
+                        classes,
+                    },
+                )
             })
-            .collect::<Vec<_>>();
-        let foreground = images.iter().map(|image| image.foreground).sum();
+            .sum();
         Ok(SimOtaAssignments {
-            boxes: images
-                .iter()
-                .flat_map(|image| image.boxes.iter().copied())
-                .collect(),
-            objectness: images
-                .iter()
-                .flat_map(|image| image.objectness.iter().copied())
-                .collect(),
-            classes: images
-                .iter()
-                .flat_map(|image| image.classes.iter().copied())
-                .collect(),
+            boxes,
+            objectness,
+            classes,
             batch: input.batch,
             anchors: input.anchors,
             class_count: input.classes,
@@ -352,67 +347,71 @@ impl SimOtaConfig {
         input: &SimOtaInput<'_>,
         batch: usize,
         targets: &[&DetectionTarget],
-        output: &mut SimOtaAssignments,
-    ) {
+        output: ImageAssignments<'_>,
+    ) -> usize {
         if targets.is_empty() {
-            return;
+            return 0;
         }
-        let candidates = (0..input.anchors)
-            .filter_map(|anchor| {
-                let mut inside_any_center = false;
-                let mut inside_centers = Vec::with_capacity(targets.len());
-                for target in targets {
-                    let radius = self.center_radius * input.anchor_strides[anchor];
-                    let center_box = [
-                        target.cxcywh[0],
-                        target.cxcywh[1],
-                        radius * 2.0,
-                        radius * 2.0,
-                    ];
-                    let in_center = contains(center_box, input.anchor_centers[anchor]);
-                    inside_any_center |= in_center;
-                    inside_centers.push(in_center);
-                }
-                inside_any_center.then_some((anchor, inside_centers))
-            })
-            .collect::<Vec<_>>();
+        let mut candidates = Vec::new();
+        let mut inside_centers = Vec::new();
+        for anchor in 0..input.anchors {
+            let center_start = inside_centers.len();
+            let mut inside_any_center = false;
+            for target in targets {
+                let radius = self.center_radius * input.anchor_strides[anchor];
+                let center_box = [
+                    target.cxcywh[0],
+                    target.cxcywh[1],
+                    radius * 2.0,
+                    radius * 2.0,
+                ];
+                let in_center = contains(center_box, input.anchor_centers[anchor]);
+                inside_any_center |= in_center;
+                inside_centers.push(in_center);
+            }
+            if inside_any_center {
+                candidates.push(anchor);
+            } else {
+                inside_centers.truncate(center_start);
+            }
+        }
         if candidates.is_empty() {
-            return;
+            return 0;
         }
 
-        let mut costs = vec![vec![0.0; candidates.len()]; targets.len()];
-        let mut ious = vec![vec![0.0; candidates.len()]; targets.len()];
+        let candidate_count = candidates.len();
+        let target_count = targets.len();
+        let mut costs = vec![0.0; candidate_count * target_count];
+        let mut ious = vec![0.0; candidate_count * target_count];
         // BCE against a one-hot class target is the all-zero BCE sum plus one
         // replacement term for the positive class. These values only depend on
         // the candidate prediction, so compute the 80-class work once rather
         // than once per candidate/ground-truth pair.
-        let classification = candidates
-            .iter()
-            .map(|(anchor, _)| {
-                let flat_anchor = batch * input.anchors + anchor;
-                let base = flat_anchor * input.classes;
-                let objectness = sigmoid(input.objectness_logits[flat_anchor]);
-                let mut negative_sum = 0.0;
-                let mut positive_delta = Vec::with_capacity(input.classes);
-                for class in 0..input.classes {
-                    let probability =
-                        (sigmoid(input.class_logits[base + class]) * objectness).sqrt();
-                    let negative = binary_cross_entropy(probability, 0.0);
-                    negative_sum += negative;
-                    positive_delta.push(binary_cross_entropy(probability, 1.0) - negative);
-                }
-                (negative_sum, positive_delta)
-            })
-            .collect::<Vec<_>>();
+        let mut negative_sums = Vec::with_capacity(candidate_count);
+        let mut positive_deltas = Vec::with_capacity(candidate_count * input.classes);
+        for anchor in &candidates {
+            let flat_anchor = batch * input.anchors + anchor;
+            let base = flat_anchor * input.classes;
+            let objectness = sigmoid(input.objectness_logits[flat_anchor]);
+            let mut negative_sum = 0.0;
+            for class in 0..input.classes {
+                let probability = (sigmoid(input.class_logits[base + class]) * objectness).sqrt();
+                let negative = binary_cross_entropy(probability, 0.0);
+                negative_sum += negative;
+                positive_deltas.push(binary_cross_entropy(probability, 1.0) - negative);
+            }
+            negative_sums.push(negative_sum);
+        }
         for (target_index, target) in targets.iter().enumerate() {
-            for (candidate_index, (anchor, inside_centers)) in candidates.iter().enumerate() {
+            let row = target_index * candidate_count;
+            for (candidate_index, anchor) in candidates.iter().enumerate() {
                 let prediction = input.boxes[batch * input.anchors + anchor];
                 let iou = box_iou(target.cxcywh, prediction);
-                ious[target_index][candidate_index] = iou;
-                let (negative_sum, positive_delta) = &classification[candidate_index];
-                costs[target_index][candidate_index] = negative_sum + positive_delta[target.class]
+                ious[row + candidate_index] = iou;
+                costs[row + candidate_index] = negative_sums[candidate_index]
+                    + positive_deltas[candidate_index * input.classes + target.class]
                     - self.iou_weight * (iou + 1e-8).ln()
-                    + if inside_centers[target_index] {
+                    + if inside_centers[candidate_index * target_count + target_index] {
                         0.0
                     } else {
                         self.outside_penalty
@@ -420,40 +419,75 @@ impl SimOtaConfig {
             }
         }
 
-        let mut matching = vec![vec![false; candidates.len()]; targets.len()];
-        for target in 0..targets.len() {
-            let mut ranked_ious = ious[target].clone();
-            ranked_ious.sort_by(|left, right| right.total_cmp(left));
-            let dynamic_k = ranked_ious
-                .iter()
-                .take(self.candidate_top_k)
-                .sum::<f32>()
+        let mut matching = vec![false; candidate_count * target_count];
+        for target in 0..target_count {
+            let row = target * candidate_count;
+            let dynamic_k = top_k_sum(&ious[row..row + candidate_count], self.candidate_top_k)
                 .floor()
                 .max(1.0) as usize;
-            let mut ranked_costs = (0..candidates.len()).collect::<Vec<_>>();
-            ranked_costs
-                .sort_by(|left, right| costs[target][*left].total_cmp(&costs[target][*right]));
-            for &candidate in ranked_costs.iter().take(dynamic_k.min(candidates.len())) {
-                matching[target][candidate] = true;
+            for candidate in lowest_indices(
+                &costs[row..row + candidate_count],
+                dynamic_k.min(candidate_count),
+            ) {
+                matching[row + candidate] = true;
             }
         }
 
-        for (candidate, (anchor, _)) in candidates.iter().enumerate() {
-            let matched = (0..targets.len())
-                .filter(|target| matching[*target][candidate])
-                .min_by(|left, right| costs[*left][candidate].total_cmp(&costs[*right][candidate]));
+        let mut foreground = 0;
+        for (candidate, anchor) in candidates.iter().enumerate() {
+            let matched = (0..target_count)
+                .filter(|target| matching[*target * candidate_count + candidate])
+                .min_by(|left, right| {
+                    costs[*left * candidate_count + candidate]
+                        .total_cmp(&costs[*right * candidate_count + candidate])
+                });
             let Some(target_index) = matched else {
                 continue;
             };
             let target = targets[target_index];
-            let iou = ious[target_index][candidate];
+            let iou = ious[target_index * candidate_count + candidate];
             let flat_anchor = *anchor;
             output.boxes[flat_anchor * 4..flat_anchor * 4 + 4].copy_from_slice(&target.cxcywh);
             output.objectness[flat_anchor] = 1.0;
             output.classes[flat_anchor * input.classes + target.class] = iou;
-            output.foreground += 1;
+            foreground += 1;
+        }
+        foreground
+    }
+}
+
+struct ImageAssignments<'a> {
+    boxes: &'a mut [f32],
+    objectness: &'a mut [f32],
+    classes: &'a mut [f32],
+}
+
+fn top_k_sum(values: &[f32], count: usize) -> f32 {
+    let mut top = Vec::with_capacity(count.min(values.len()));
+    for &value in values {
+        let position = top.partition_point(|other| *other > value);
+        if position < count {
+            top.insert(position, value);
+            if top.len() > count {
+                top.pop();
+            }
         }
     }
+    top.into_iter().sum()
+}
+
+fn lowest_indices(values: &[f32], count: usize) -> Vec<usize> {
+    let mut lowest = Vec::with_capacity(count);
+    for (index, &value) in values.iter().enumerate() {
+        let position = lowest.partition_point(|&(other, _)| other < value);
+        if position < count {
+            lowest.insert(position, (value, index));
+            if lowest.len() > count {
+                lowest.pop();
+            }
+        }
+    }
+    lowest.into_iter().map(|(_, index)| index).collect()
 }
 
 fn contains(cxcywh: [f32; 4], point: [f32; 2]) -> bool {

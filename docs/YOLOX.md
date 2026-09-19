@@ -131,6 +131,12 @@ sequential. Moving matching onto the device remains the largest pipeline-level
 opportunity. Timings vary with image contents, target counts, host CPU, and
 PJRT/XLA versions.
 
+After replacing full per-target sorts with bounded top-k selection and writing
+parallel image assignments directly into the final dense buffers, a
+default-Mosaic, no-MixUp 20-step run reached 124.9 images/s. Steady-state host
+matching was typically 9–11 ms; inference and the fused training update remained
+about 8 ms and 36–37 ms respectively.
+
 With Mosaic, affine, MixUp, HSV, and flip all enabled, the corresponding
 twenty-step run took 1.482 seconds for 160 output images (107.9 images/s),
 including first-step device warmup and two final no-augmentation/L1 steps.
