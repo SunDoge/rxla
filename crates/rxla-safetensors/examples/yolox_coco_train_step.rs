@@ -1503,40 +1503,32 @@ fn transform_box(bbox: [f32; 4], matrix: [[f32; 3]; 2], extent: f32) -> [f32; 4]
     ]
 }
 
-fn interpolate_rgb_bilinear(image: &RgbImage, x: f32, y: f32) -> Option<[u8; 3]> {
-    let width = image.width() as usize;
-    let height = image.height() as usize;
-    if width == 0
-        || height == 0
-        || x < 0.0
-        || y < 0.0
-        || x > (width - 1) as f32
-        || y > (height - 1) as f32
-    {
-        return None;
-    }
-    let x0 = x as usize;
-    let y0 = y as usize;
-    let x1 = (x0 + 1).min(width - 1);
-    let y1 = (y0 + 1).min(height - 1);
+fn interpolate_rgb_bilinear(image: &RgbImage, x: f32, y: f32, border: u8) -> [u8; 3] {
+    let width = image.width() as i32;
+    let height = image.height() as i32;
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
     let fx = x - x0 as f32;
     let fy = y - y0 as f32;
     let bytes = image.as_raw();
-    let offsets = [
-        (y0 * width + x0) * 3,
-        (y0 * width + x1) * 3,
-        (y1 * width + x0) * 3,
-        (y1 * width + x1) * 3,
-    ];
-    Some(std::array::from_fn(|channel| {
-        let top_left = f32::from(bytes[offsets[0] + channel]);
-        let top_right = f32::from(bytes[offsets[1] + channel]);
-        let bottom_left = f32::from(bytes[offsets[2] + channel]);
-        let bottom_right = f32::from(bytes[offsets[3] + channel]);
+    let sample = |sample_x: i32, sample_y: i32, channel: usize| {
+        if sample_x < 0 || sample_y < 0 || sample_x >= width || sample_y >= height {
+            border
+        } else {
+            bytes[((sample_y * width + sample_x) * 3) as usize + channel]
+        }
+    };
+    std::array::from_fn(|channel| {
+        let top_left = f32::from(sample(x0, y0, channel));
+        let top_right = f32::from(sample(x1, y0, channel));
+        let bottom_left = f32::from(sample(x0, y1, channel));
+        let bottom_right = f32::from(sample(x1, y1, channel));
         let top = top_left + (top_right - top_left) * fx;
         let bottom = bottom_left + (bottom_right - bottom_left) * fx;
         (top + (bottom - top) * fy + 0.5) as u8
-    }))
+    })
 }
 
 fn warp_affine(image: &RgbImage, size: u32, matrix: [[f32; 3]; 2]) -> RgbImage {
@@ -1555,9 +1547,8 @@ fn warp_affine(image: &RgbImage, size: u32, matrix: [[f32; 3]; 2]) -> RgbImage {
                 let translated_y = y as f32 - matrix[1][2];
                 let source_x = inverse[0][0] * translated_x + inverse[0][1] * translated_y;
                 let source_y = inverse[1][0] * translated_x + inverse[1][1] * translated_y;
-                if let Some(pixel) = interpolate_rgb_bilinear(image, source_x, source_y) {
-                    row[x * 3..x * 3 + 3].copy_from_slice(&pixel);
-                }
+                let pixel = interpolate_rgb_bilinear(image, source_x, source_y, 114);
+                row[x * 3..x * 3 + 3].copy_from_slice(&pixel);
             }
         });
     RgbImage::from_raw(size, size, output).expect("affine output has exact RGB dimensions")
@@ -1913,12 +1904,25 @@ mod tests {
                 (x * 17 + y * 13) as u8,
             ])
         });
-        for y in [-0.25, 0.0, 0.2, 1.75, 4.0, 4.25] {
-            for x in [-0.25, 0.0, 0.6, 3.125, 6.0, 6.25] {
-                let expected = image::imageops::interpolate_bilinear(&image, x, y).map(|p| p.0);
-                assert_eq!(interpolate_rgb_bilinear(&image, x, y), expected);
+        for y in [0.0, 0.2, 1.75, 4.0] {
+            for x in [0.0, 0.6, 3.125, 6.0] {
+                let expected = image::imageops::interpolate_bilinear(&image, x, y).unwrap();
+                assert_eq!(interpolate_rgb_bilinear(&image, x, y, 114), expected.0);
             }
         }
+    }
+
+    #[test]
+    fn affine_warp_tracks_opencv_reference() {
+        let pixels = (0..48).map(|value| (value * 5) as u8).collect();
+        let image = RgbImage::from_raw(4, 4, pixels).unwrap();
+        let actual = warp_affine(&image, 4, [[0.9, 0.1, 0.3], [-0.05, 1.05, -0.2]]).into_raw();
+        let expected = [
+            47, 50, 53, 25, 30, 35, 45, 50, 55, 64, 69, 74, 89, 91, 94, 80, 85, 90, 100, 105, 110,
+            120, 125, 130, 118, 121, 123, 135, 140, 145, 155, 160, 165, 175, 180, 185, 136, 137,
+            139, 182, 186, 191, 192, 197, 201, 201, 205, 210,
+        ];
+        assert_eq!(actual, expected);
     }
 
     #[test]

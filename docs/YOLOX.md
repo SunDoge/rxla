@@ -323,13 +323,22 @@ OpenCV's byte-scale H/S/V domains, avoids redundant normalization and
 `fmodf`, and matches fixed OpenCV augmentation references within two integer
 LSBs. Its sampled leaf cost fell from 5,657 to 3,684 samples (-34.9%). The
 affine warp uses a raw RGB8 bilinear sampler that is byte-identical to the
-previous generic `image` implementation on an edge/interior coordinate grid;
+previous generic `image` implementation at in-bounds coordinates;
 its leaf samples fell from 4,282 to 3,393 (-20.8%), while total `roundf`
 samples fell from 2,584 to 1,151 before the final positive-value rounding was
 inlined. Two 400-step runs after both changes reached `547.3` and `547.7
 images/s`, versus `531.6` and `534.1 images/s` for the SIMD-resize baseline,
 about 2.8% higher by pair average. JPEG entropy decoding is now the largest
 sampled host hotspot.
+
+Affine border sampling also follows OpenCV's constant-border interpolation:
+each out-of-range neighbor contributes the value 114 independently. The former
+implementation replaced an entire output pixel with 114 whenever its sampling
+center fell just outside the source, discarding valid in-range neighbors. A
+fixed translated/sheared matrix now matches `cv2.warpAffine` byte-for-byte,
+including all four image boundaries. Two real 400-step runs after the fix
+reached `542.1` and `551.1 images/s`, so the corrected edge semantics have no
+measurable throughput penalty.
 
 `--random-resize` enables YOLOX's ten-step multi-scale schedule. It selects a
 square 32-pixel multiple in the inclusive `--random-size-min` to
