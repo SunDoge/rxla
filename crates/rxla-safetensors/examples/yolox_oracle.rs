@@ -8,7 +8,10 @@ use rxla_models::{
 };
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
-use rxla_train::{DecodedYoloBatch, DetectionTarget, SimOtaConfig, YoloHead};
+use rxla_train::{
+    DecodedYoloBatch, DetectionTarget, SgdOptions, SimOtaConfig, YoloHead,
+    apply_model_sgd_with_learning_rate,
+};
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -230,7 +233,8 @@ fn main() -> Result<()> {
          boxes: rxla_core::Tensor,
          classes: rxla_core::Tensor,
          valid: rxla_core::Tensor,
-         l1_weight: rxla_core::Tensor| {
+         l1_weight: rxla_core::Tensor,
+         learning_rate: rxla_core::Tensor| {
             let heads = yolo(cx, &image, &YoloConfig::yolox_tiny(80))?;
             let assignments = yolox_simota(
                 &heads,
@@ -252,6 +256,7 @@ fn main() -> Result<()> {
                 assignments.boxes,
                 assignments.objectness,
                 assignments.classes,
+                learning_rate,
             ))
         },
     )
@@ -261,11 +266,13 @@ fn main() -> Result<()> {
         ModelInput::new([1, 2, 80]),
         ModelInput::new([1, 2, 1]),
         ModelInput::new([]),
+        ModelInput::new([]),
     ))
     .training();
-    let (all_parameters, full_model) = full_definition.trace_resident_all()?;
-    let selected =
-        all_parameters.matching(|_, parameter| MODEL_GRADIENT_PATHS.contains(&parameter.path()));
+    let (all_parameters, mut full_model) = full_definition.trace_resident_all()?;
+    let selected = all_parameters
+        .clone()
+        .matching(|_, parameter| MODEL_GRADIENT_PATHS.contains(&parameter.path()));
     if selected.len() != MODEL_GRADIENT_PATHS.len() {
         return Err("full-model gradient oracle paths do not match the model schema".into());
     }
@@ -275,8 +282,23 @@ fn main() -> Result<()> {
         .collect::<Vec<_>>();
     let parameter_tensors = full_model.parameter_tensors(&selected)?;
     let gradients = full_model.outputs()[0].grad(&parameter_tensors)?;
-    let full_outputs = full_model
-        .outputs()
+    let learning_rate_tensor = full_model.outputs()[4].clone();
+    let full_loss = full_model.outputs()[0].clone();
+    apply_model_sgd_with_learning_rate(
+        &mut full_model,
+        &all_parameters,
+        &full_loss,
+        &learning_rate_tensor,
+        |parameter| {
+            let decay =
+                parameter.path().ends_with(".weight") && !parameter.path().contains(".bn.weight");
+            SgdOptions::default()
+                .momentum(0.9)
+                .nesterov(true)
+                .weight_decay(if decay { 5e-4 } else { 0.0 })
+        },
+    )?;
+    let full_outputs = full_model.outputs()[..4]
         .iter()
         .cloned()
         .chain(gradients)
@@ -286,8 +308,15 @@ fn main() -> Result<()> {
     let mut full_session = full_weights
         .initialize_raw(full_model.session(&full_program))?
         .build()?;
-    let full_outputs: Vec<Buffer> =
-        full_session.run(&[&input, &target_boxes, &target_classes, &valid, &l1_weight])?;
+    let learning_rate = client.buffer(&[], &[0.00015625_f32])?;
+    let full_outputs: Vec<Buffer> = full_session.run(&[
+        &input,
+        &target_boxes,
+        &target_classes,
+        &valid,
+        &l1_weight,
+        &learning_rate,
+    ])?;
     write_f32(
         &args.output.join("model_training_loss.f32"),
         &full_outputs[0].to_vec::<f32>()?,
@@ -333,6 +362,15 @@ fn main() -> Result<()> {
             &args
                 .output
                 .join(format!("model_state_{}.f32", path.replace('.', "_"))),
+            &buffer.to_vec::<f32>()?,
+        )?;
+    }
+    let updated = full_model.selected_resident_parameter_buffers(&full_session, &selected)?;
+    for (path, buffer) in updated {
+        write_f32(
+            &args
+                .output
+                .join(format!("model_update_{}.f32", path.replace('.', "_"))),
             &buffer.to_vec::<f32>()?,
         )?;
     }

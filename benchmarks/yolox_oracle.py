@@ -278,9 +278,12 @@ def pytorch_model_gradients(
     size: int,
     loss_assignments: tuple[np.ndarray, np.ndarray, np.ndarray],
     paths: tuple[str, ...],
+    learning_rate: float,
 ) -> tuple[
     float,
     tuple[np.ndarray, np.ndarray, np.ndarray],
+    dict[str, np.ndarray],
+    dict[str, np.ndarray],
     dict[str, np.ndarray],
     dict[str, np.ndarray],
 ]:
@@ -335,21 +338,42 @@ def pytorch_model_gradients(
     loss.backward()
     parameters = dict(model.named_parameters())
     gradients = {}
+    originals = {}
     for path in paths:
         gradient = parameters[path].grad
         if gradient is None:
             raise RuntimeError(f"parameter did not receive a gradient: {path}")
-        gradients[path] = gradient.detach().numpy()
+        gradients[path] = gradient.detach().numpy().copy()
+        originals[path] = parameters[path].detach().numpy().copy()
     state = model.state_dict()
     states = {
         "backbone.backbone.stem.conv.bn.running_mean": state[
             "backbone.backbone.stem.conv.bn.running_mean"
-        ].numpy(),
+        ].numpy().copy(),
         "backbone.backbone.stem.conv.bn.running_variance": state[
             "backbone.backbone.stem.conv.bn.running_var"
-        ].numpy(),
+        ].numpy().copy(),
     }
-    return float(loss.detach()), assignments, gradients, states
+    decay = []
+    no_decay = []
+    for path, parameter in parameters.items():
+        if path.endswith(".weight") and ".bn.weight" not in path:
+            decay.append(parameter)
+        else:
+            no_decay.append(parameter)
+    optimizer = torch.optim.SGD(
+        no_decay,
+        lr=learning_rate,
+        momentum=0.9,
+        nesterov=True,
+    )
+    optimizer.add_param_group({"params": decay, "weight_decay": 5e-4})
+    optimizer.step()
+    updates = {
+        path: parameters[path].detach().numpy().copy() - originals[path]
+        for path in paths
+    }
+    return float(loss.detach()), assignments, gradients, states, originals, updates
 
 
 def main() -> None:
@@ -464,8 +488,14 @@ def main() -> None:
         expected_model_assignment,
         expected_model_gradients,
         expected_model_states,
+        original_model_parameters,
+        expected_model_updates,
     ) = pytorch_model_gradients(
-        model, args.size, actual_model_assignment, model_gradient_paths
+        model,
+        args.size,
+        actual_model_assignment,
+        model_gradient_paths,
+        learning_rate=0.00015625,
     )
     actual_model_loss = np.fromfile(
         args.output / "model_training_loss.f32", dtype="<f4"
@@ -521,6 +551,25 @@ def main() -> None:
         maximum = float(difference.max(initial=0.0))
         print(f"model_state={path} shape={reference.shape} max_abs={maximum:.8g}")
         failed |= not np.allclose(actual, reference, atol=args.atol, rtol=args.rtol)
+    for path, reference in expected_model_updates.items():
+        updated = np.fromfile(
+            args.output / f"model_update_{path.replace('.', '_')}.f32",
+            dtype="<f4",
+        ).reshape(reference.shape)
+        actual = updated - original_model_parameters[path]
+        difference = np.abs(actual - reference)
+        maximum = float(difference.max(initial=0.0))
+        mean = float(difference.mean())
+        relative_l2 = float(
+            np.linalg.norm(difference.reshape(-1))
+            / max(np.linalg.norm(reference.reshape(-1)), args.atol)
+        )
+        print(
+            f"model_update={path} shape={reference.shape} "
+            f"max_abs={maximum:.8g} mean_abs={mean:.8g} "
+            f"relative_l2={relative_l2:.8g}"
+        )
+        failed |= not np.isfinite(difference).all() or relative_l2 > args.rtol
     if failed:
         raise SystemExit(f"YOLOX oracle exceeded atol={args.atol}")
 

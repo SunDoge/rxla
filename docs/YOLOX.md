@@ -19,9 +19,10 @@ The converter records the `rxla-yolox-v1` format marker and maps PyTorch
 BatchNorm state names to RXLA's model schema.
 
 The deterministic training oracle checks the converted checkpoint, model
-topology, SimOTA matcher, losses, reverse-mode head gradients, and selected
-full-model parameter gradients against the official-compatible PyTorch
-implementation without image resize or decoding differences:
+topology, SimOTA matcher, losses, reverse-mode head gradients, selected
+full-model parameter gradients, BatchNorm state, and one complete Nesterov SGD
+update against the official-compatible PyTorch implementation without image
+resize or decoding differences:
 
 ```sh
 uv run --no-sync python benchmarks/yolox_oracle.py \
@@ -37,13 +38,16 @@ was `2.10e-5`, the assignments selected the same two foreground anchors, and
 the largest loss error was `4.30e-6`. The largest absolute gradient error over
 all three raw heads was `2.54e-7`. A second graph runs the complete model in
 training mode and checks matcher outputs, loss, selected parameter gradients,
-and BatchNorm state. Gradients are sampled at the stem, immediately before and
-after the SPP max-pool branches, and at the first class predictor. Their largest
-observed relative L2 error was `7.59e-4` (`rtol=2e-3`); the training loss differed
-by `1.44e-5`. The stem running mean and variance differed by at most `9.54e-7`
-and `2.45e-4`, respectively. RXLA applies the same Bessel correction as PyTorch
-when updating running variance while retaining population variance for the
-current batch's normalization.
+BatchNorm state, and the resulting parameter updates. Gradients and updates are
+sampled at the stem, immediately before and after the SPP max-pool branches,
+and at the first class predictor. Their largest observed relative L2 errors
+were both `7.59e-4` (`rtol=2e-3`); the training loss differed by `1.44e-5`.
+The optimizer comparison uses the training configuration's `0.9` momentum,
+Nesterov update, and `5e-4` decay for non-BatchNorm weights. The stem running
+mean and variance differed by at most `9.54e-7` and `2.45e-4`, respectively.
+RXLA applies the same Bessel correction as PyTorch when updating running
+variance while retaining population variance for the current batch's
+normalization.
 
 ## Inference
 
