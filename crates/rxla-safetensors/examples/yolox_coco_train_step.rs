@@ -1533,20 +1533,25 @@ fn interpolate_rgb_bilinear(image: &RgbImage, x: f32, y: f32, border: u8) -> [u8
     let fx = x - x0 as f32;
     let fy = y - y0 as f32;
     let bytes = image.as_raw();
-    let sample = |sample_x: i32, sample_y: i32, channel: usize| {
+    let sample = |sample_x: i32, sample_y: i32| {
         if sample_x < 0 || sample_y < 0 || sample_x >= width || sample_y >= height {
-            border
+            [f32::from(border); 3]
         } else {
-            bytes[((sample_y * width + sample_x) * 3) as usize + channel]
+            let offset = ((sample_y * width + sample_x) * 3) as usize;
+            [
+                f32::from(bytes[offset]),
+                f32::from(bytes[offset + 1]),
+                f32::from(bytes[offset + 2]),
+            ]
         }
     };
+    let top_left = sample(x0, y0);
+    let top_right = sample(x1, y0);
+    let bottom_left = sample(x0, y1);
+    let bottom_right = sample(x1, y1);
     std::array::from_fn(|channel| {
-        let top_left = f32::from(sample(x0, y0, channel));
-        let top_right = f32::from(sample(x1, y0, channel));
-        let bottom_left = f32::from(sample(x0, y1, channel));
-        let bottom_right = f32::from(sample(x1, y1, channel));
-        let top = top_left + (top_right - top_left) * fx;
-        let bottom = bottom_left + (bottom_right - bottom_left) * fx;
+        let top = top_left[channel] + (top_right[channel] - top_left[channel]) * fx;
+        let bottom = bottom_left[channel] + (bottom_right[channel] - bottom_left[channel]) * fx;
         (top + (bottom - top) * fy + 0.5) as u8
     })
 }

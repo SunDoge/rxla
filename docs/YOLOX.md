@@ -388,6 +388,16 @@ difference from the direct-JPEG pair average is within run-to-run variance, so
 this is retained as a local kernel simplification rather than claimed as an
 end-to-end speedup.
 
+A fresh steady-state Nsight CPU sample after those changes still placed JPEG
+entropy decoding first (`decode_mcu_block`, 5,556 leaf samples). Affine
+bilinear interpolation followed at 3,930 samples and HSV adjustment at 3,092.
+The affine sampler was checking bounds and recomputing the byte address for all
+four neighbors separately for each RGB channel. It now loads each neighbor as
+one RGB triplet, reducing twelve checks/address calculations to four while
+preserving the exact interpolation order and OpenCV byte reference. Two
+400-step runs reached `555.8` and `561.4 images/s` (558.6 average), roughly
+0.9% above the preceding pair average.
+
 `--random-resize` enables YOLOX's ten-step multi-scale schedule. It selects a
 square 32-pixel multiple in the inclusive `--random-size-min` to
 `--random-size-max` range (official defaults `10..20`), precompiles only the
