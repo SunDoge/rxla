@@ -41,6 +41,10 @@ name = "yolox_coco_train_step"
 required-features = ["model"]
 
 [[example]]
+name = "yolox_oracle"
+required-features = ["model"]
+
+[[example]]
 name = "flux2_oracle"
 required-features = ["model"]
 

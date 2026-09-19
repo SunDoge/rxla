@@ -288,17 +288,17 @@ impl Layer for Spp {
     }
 }
 
-fn csp_darknet(cx: Cx, images: &Tensor, config: YoloConfig) -> Result<[Tensor; 3]> {
+fn csp_darknet(cx: Cx, images: &Tensor, config: YoloConfig) -> Result<[Tensor; 5]> {
     let base = config.channels(64);
     let depth = config.backbone_depth();
     let stem = images.through(path!(cx / "stem")?, Focus::new(base))?;
-    let dark2 = stem.through(
+    let dark2_down = stem.through(
         path!(cx / "dark2" / 0)?,
         YoloConv::new(base * 2, 3)
             .stride(2)
             .depthwise(config.depthwise),
     )?;
-    let dark2 = dark2.through(
+    let dark2 = dark2_down.through(
         path!(cx / "dark2" / 1)?,
         CspLayer::new(base * 2)
             .repeats(depth)
@@ -342,11 +342,10 @@ fn csp_darknet(cx: Cx, images: &Tensor, config: YoloConfig) -> Result<[Tensor; 3
             .shortcut(false)
             .depthwise(config.depthwise),
     )?;
-    Ok([dark3, dark4, dark5])
+    Ok([stem, dark2, dark3, dark4, dark5])
 }
 
-fn pafpn(cx: Cx, images: &Tensor, config: YoloConfig) -> Result<[Tensor; 3]> {
-    let [x2, x1, x0] = csp_darknet(path!(cx / "backbone")?, images, config)?;
+fn pafpn(cx: Cx, [x2, x1, x0]: [Tensor; 3], config: YoloConfig) -> Result<[Tensor; 3]> {
     let depth = config.neck_depth();
     let (c3, c4, c5) = (
         config.channels(256),
@@ -424,8 +423,15 @@ fn head(cx: Cx, features: [Tensor; 3], config: YoloConfig) -> Result<[Tensor; 3]
     Ok([outputs.remove(0), outputs.remove(0), outputs.remove(0)])
 }
 
-/// Official YOLOX topology with raw NHWC heads at strides 8, 16 and 32.
-pub fn yolo(cx: Cx, images: &Tensor, config: &YoloConfig) -> Result<[Tensor; 3]> {
+/// Feature pyramid and raw detection heads from one YOLOX application.
+pub struct YoloForward {
+    pub backbone_features: [Tensor; 5],
+    pub features: [Tensor; 3],
+    pub heads: [Tensor; 3],
+}
+
+/// Official YOLOX topology with intermediate PAFPN features exposed.
+pub fn yolo_forward(cx: Cx, images: &Tensor, config: &YoloConfig) -> Result<YoloForward> {
     config.validate()?;
     let [_, height, width, channels] = images.shape() else {
         return Err(Error::InvalidModel {
@@ -443,8 +449,28 @@ pub fn yolo(cx: Cx, images: &Tensor, config: &YoloConfig) -> Result<[Tensor; 3]>
             kind: ModelDefinitionError::InvalidYoloInput,
         });
     }
-    let features = pafpn(path!(cx / "backbone")?, images, *config)?;
-    head(path!(cx / "head")?, features, *config)
+    let backbone = path!(cx / "backbone")?;
+    let backbone_features = csp_darknet(path!(backbone / "backbone")?, images, *config)?;
+    let features = pafpn(
+        backbone,
+        [
+            backbone_features[2].clone(),
+            backbone_features[3].clone(),
+            backbone_features[4].clone(),
+        ],
+        *config,
+    )?;
+    let heads = head(path!(cx / "head")?, features.clone(), *config)?;
+    Ok(YoloForward {
+        backbone_features,
+        features,
+        heads,
+    })
+}
+
+/// Official YOLOX topology with raw NHWC heads at strides 8, 16 and 32.
+pub fn yolo(cx: Cx, images: &Tensor, config: &YoloConfig) -> Result<[Tensor; 3]> {
+    Ok(yolo_forward(cx, images, config)?.heads)
 }
 
 #[derive(Clone, Debug, PartialEq)]

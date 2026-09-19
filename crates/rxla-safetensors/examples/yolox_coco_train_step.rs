@@ -46,7 +46,8 @@ struct Args {
     shuffle_buffer: usize,
     #[arg(long, default_value_t = 7)]
     seed: u64,
-    #[arg(long, default_value_t = 1.0)]
+    /// Official YOLOX-tiny disables MixUp; set to 1 for the base recipe.
+    #[arg(long, default_value_t = 0.0)]
     mosaic_probability: f32,
     #[arg(long, default_value_t = 1.0)]
     mixup_probability: f32,
@@ -906,7 +907,8 @@ fn mosaic_coordinates(
 
 fn random_affine_matrix(size: u32, rng: SampleRng) -> [[f32; 3]; 2] {
     let angle = (-10.0 + 20.0 * rng.uniform(2, 0)).to_radians();
-    let scale = 0.1 + 1.9 * rng.uniform(2, 1);
+    // YOLOX-tiny overrides the base recipe's 0.1..2.0 range with 0.5..1.5.
+    let scale = 0.5 + rng.uniform(2, 1);
     let shear_x = (-2.0 + 4.0 * rng.uniform(2, 2)).to_radians().tan();
     let shear_y = (-2.0 + 4.0 * rng.uniform(2, 3)).to_radians().tan();
     let alpha = scale * angle.cos();

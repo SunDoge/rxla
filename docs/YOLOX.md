@@ -18,6 +18,20 @@ uv run python benchmarks/convert_yolox.py \
 The converter records the `rxla-yolox-v1` format marker and maps PyTorch
 BatchNorm state names to RXLA's model schema.
 
+The deterministic raw-head oracle checks the converted checkpoint and model
+topology against the official-compatible PyTorch implementation without image
+resize or decoding differences:
+
+```sh
+uv run --no-sync python benchmarks/yolox_oracle.py \
+  /path/to/xla_cuda_plugin.so \
+  yolox_tiny.pth yolox_tiny.safetensors .cache/yolox/oracle
+```
+
+At the default 64×64 oracle size, all five CSPDarknet stages, three PAFPN
+features, and three raw heads are checked. On the CUDA 13 PJRT plugin the largest
+observed raw-head absolute error was `2.10e-5` (default tolerance `5e-5`).
+
 ## Inference
 
 ```sh
@@ -84,8 +98,9 @@ The reader remains sequential; a deterministic bounded pool above the storage
 layer supplies randomized samples without seeking. This is also the sampling
 boundary for compound augmentations: each training Mosaic consumes four samples
 from the pool without replacement, applies the official random-center layout
-and random affine ranges. MixUp draws another nonempty sample from the same pool
-with the official `0.5..1.5` jitter, optional flip, crop, and 50/50 blend. HSV
+and YOLOX-tiny's `0.5..1.5` affine scale range. Tiny disables MixUp by default;
+when enabled explicitly, it draws another nonempty sample from the same pool
+with `0.5..1.5` jitter, optional flip, crop, and a 50/50 blend. HSV
 perturbation and a 0.5-probability horizontal flip then run on the composite.
 The final no-augmentation phase consumes one image, disables Mosaic/MixUp, and
 enables the official raw-box L1 loss. Its weight is a runtime scalar, so the
