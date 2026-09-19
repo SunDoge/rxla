@@ -561,12 +561,26 @@ fn prepare_mosaic(
     let mut classes = Vec::new();
     let mut ids = Vec::with_capacity(5);
 
-    for (quadrant, sample) in samples.into_iter().enumerate() {
-        let image = decode_sample(&sample)?;
-        let scale = (size as f32 / image.height() as f32).min(size as f32 / image.width() as f32);
-        let width = (image.width() as f32 * scale) as u32;
-        let height = (image.height() as f32 * scale) as u32;
-        let resized = image::imageops::resize(&image, width, height, FilterType::Triangle);
+    // A batch has only `batch_size` outer Rayon jobs, but Mosaic decodes four
+    // independent JPEGs per output image. Expose those jobs to the same pool so
+    // a small batch can still use all host cores while the device consumes the
+    // preceding batch. Indexed parallel iteration preserves quadrant order.
+    let tiles = samples
+        .into_par_iter()
+        .map(|sample| {
+            let image = decode_sample(&sample)?;
+            let scale =
+                (size as f32 / image.height() as f32).min(size as f32 / image.width() as f32);
+            let width = (image.width() as f32 * scale) as u32;
+            let height = (image.height() as f32 * scale) as u32;
+            let resized = image::imageops::resize(&image, width, height, FilterType::Triangle);
+            Ok((sample, resized, scale))
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+
+    for (quadrant, (sample, resized, scale)) in tiles.into_iter().enumerate() {
+        let width = resized.width();
+        let height = resized.height();
         let (large, small) = mosaic_coordinates(
             quadrant,
             center_x,

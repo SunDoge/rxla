@@ -159,11 +159,13 @@ device baselines, not a strict data-pipeline comparison.
 
 The input boundary now preserves decoded images as U8 through host batching and
 PCIe transfer, then performs the exact U8-to-F32 conversion in the compiled
-graph. Together with row-wise Mosaic copies, a 100-step real-data run sustained
-214.4 images/s (3.731 seconds for 800 images). Steady device steps were
-23.8–25.2 ms, while observed Mosaic preparation fell to 35.3–38.6 ms; producer
-wait was still 7.8–12.2 ms. The next throughput limit is therefore host-side
-decode/augmentation, not YOLOX CUDA compute.
+graph. Mosaic also exposes its four independent JPEG decode/resize jobs to the
+same Rayon pool as the batch, rather than serializing them inside each output
+image. On this 24-core host a 100-step real-data run sustained 295.6 images/s
+(2.707 seconds for 800 images), 37.9% above the U8-only result. Steady device
+steps were 22.6–24.8 ms, observed Mosaic preparation was 22.6–28.3 ms, and
+consumer wait remained 0.0 ms. Host preparation is therefore hidden behind the
+unified CUDA training graph at this batch size.
 
 The exported checkpoint was then loaded by the 416×416 inference example on
 both CPU and CUDA. CUDA inference measured 9.4 ms after compilation and produced
