@@ -103,7 +103,8 @@ cargo run -p rxla-safetensors --release --features model \
   --example yolox_coco_train_step -- \
   /path/to/xla_cuda_plugin.so yolox_tiny.safetensors \
   --compute-dtype bf16 \
-  --size 416 --batch-size 8 --prefetch 2 --shuffle-buffer 1024 --seed 7 \
+  --size 416 --batch-size 8 --prefetch 16 --augmentation-workers 16 \
+  --shuffle-buffer 1024 --seed 7 \
   --steps 100 \
   tfrecord /data/datasets/coco2017-fory-4096.tfrecord
 ```
@@ -191,6 +192,17 @@ comparison. An 11-step Nsight capture measured 4.07 ms aggregate GPU kernel time
 and about 402 kernel launches per step. Only one grouped-direct launch remained
 per step, consuming less than 0.01 ms. The native lowering therefore removed
 the actual bottleneck instead of tuning unrelated convolutions.
+
+Host augmentation is now split into deterministic sequential sampling and an
+ordered parallel transformation stage. Multiple batches may decode and augment
+concurrently, while a bounded reorder buffer preserves the exact seeded sample
+order. On the same 100-step workload, 16 augmentation workers with 16 prefetched
+batches raised end-to-end throughput from 305.6 to 513.6 images/s. Final
+measurements for 1, 2, 4, 8, 16, and 24 workers were respectively 339.7, about
+417, 429.1, 480.4, 513.6, and 497.7 images/s. The example therefore defaults to
+two thirds of the available host parallelism for both values (16 on this
+24-thread host), while retaining explicit overrides. The prepared sample IDs
+remained identical across every run.
 
 BF16 XLA autotune logs also confirm that forward and weight-gradient
 convolutions remain BF16, while input gradients are represented as

@@ -27,6 +27,12 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const MAX_TARGETS: usize = 120;
 
+fn default_augmentation_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|threads| (threads.get() * 2 / 3).max(1))
+        .unwrap_or(1)
+}
+
 #[derive(Parser)]
 #[command(about = "Run consecutive real COCO YOLOX training steps")]
 struct Args {
@@ -44,8 +50,11 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
     /// Number of prepared host batches retained ahead of the device.
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = default_augmentation_workers())]
     prefetch: usize,
+    /// Concurrent ordered host batches submitted to the augmentation pool.
+    #[arg(long, default_value_t = default_augmentation_workers())]
+    augmentation_workers: usize,
     /// Number of sequential samples retained for deterministic pool shuffle.
     #[arg(long, default_value_t = 1024)]
     shuffle_buffer: usize,
@@ -198,9 +207,14 @@ struct AugmentationGroup {
     rng: SampleRng,
 }
 
+struct AugmentationBatch {
+    groups: Vec<AugmentationGroup>,
+    size: u32,
+}
+
 struct SourceSamples(TrainingSource);
 
-struct PreparedBatches<I> {
+struct PlannedBatches<I> {
     samples: I,
     remaining: usize,
     step: usize,
@@ -235,19 +249,20 @@ fn main() -> Result<()> {
         || args.log_every == 0
         || args.batch_size == 0
         || args.prefetch == 0
+        || args.augmentation_workers == 0
         || args.shuffle_buffer == 0
         || !(0.0..=1.0).contains(&args.mosaic_probability)
         || !(0.0..=1.0).contains(&args.mixup_probability)
     {
         return Err(
-            "size must be a positive multiple of 32; learning rate must be finite; steps, batch-size, prefetch, shuffle-buffer and log-every must be non-zero; mosaic-probability and mixup-probability must be in [0, 1]"
+            "size must be a positive multiple of 32; learning rate must be finite; steps, batch-size, prefetch, augmentation-workers, shuffle-buffer and log-every must be non-zero; mosaic-probability and mixup-probability must be in [0, 1]"
                 .into(),
         );
     }
     let source = TrainingSource::open(args.source)?;
     let no_augmentation_steps = args.no_augmentation_steps.unwrap_or(args.steps / 20);
     let samples = ShufflePool::new(SourceSamples(source), args.shuffle_buffer, args.seed)?;
-    let batches = PreparedBatches {
+    let batches = PlannedBatches {
         samples,
         remaining: args.steps,
         step: 0,
@@ -260,7 +275,11 @@ fn main() -> Result<()> {
     };
     // Host input preparation starts before XLA compilation so initial pool fill
     // and the first augmented batches are normally hidden by compilation.
-    let pipeline = BoundedPipeline::from_iter(args.prefetch, batches)?;
+    let pipeline = BoundedPipeline::from_iter(args.prefetch, batches)?.map_parallel_ordered(
+        args.prefetch,
+        args.augmentation_workers,
+        |batch| prepare_batch(batch.groups, batch.size),
+    )?;
     let batch = i64::try_from(args.batch_size)?;
     let client = unsafe { Client::load(&args.plugin) }?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
@@ -456,17 +475,16 @@ impl Iterator for SourceSamples {
     }
 }
 
-impl<I> Iterator for PreparedBatches<I>
+impl<I> Iterator for PlannedBatches<I>
 where
     I: Iterator<Item = std::result::Result<DetectionSample, String>>,
 {
-    type Item = std::result::Result<PreparedBatch, String>;
+    type Item = std::result::Result<AugmentationBatch, String>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
             return None;
         }
-        let load_started = Instant::now();
         let mut groups = Vec::with_capacity(self.batch_size);
         let mut consumed = 0;
         for batch_index in 0..self.batch_size {
@@ -511,15 +529,18 @@ where
         }
         self.remaining -= 1;
         self.step += 1;
-        Some(prepare_batch(groups, self.size, load_started))
+        Some(Ok(AugmentationBatch {
+            groups,
+            size: self.size,
+        }))
     }
 }
 
 fn prepare_batch(
     groups: Vec<AugmentationGroup>,
     size: u32,
-    load_started: Instant,
 ) -> std::result::Result<PreparedBatch, String> {
+    let load_started = Instant::now();
     let prepared = groups
         .into_par_iter()
         .enumerate()

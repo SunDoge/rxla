@@ -1,10 +1,64 @@
 //! Ordered bounded host pipelines for input preparation.
 
 use snafu::{Snafu, ensure};
-use std::sync::mpsc::{self, Receiver};
+use std::collections::BTreeMap;
+use std::sync::{
+    Arc, Condvar, Mutex,
+    mpsc::{self, Receiver},
+};
 use std::thread::{self, JoinHandle};
 
 use crate::DataRng;
+
+struct PipelineCredits {
+    state: Mutex<(usize, bool)>,
+    available: Condvar,
+}
+
+impl PipelineCredits {
+    fn new(capacity: usize) -> Self {
+        Self {
+            state: Mutex::new((capacity, false)),
+            available: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while state.0 == 0 && !state.1 {
+            state = self
+                .available
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        if state.1 {
+            return false;
+        }
+        state.0 -= 1;
+        true
+    }
+
+    fn release(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.0 += 1;
+        self.available.notify_one();
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.1 = true;
+        self.available.notify_all();
+    }
+}
 
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
@@ -13,6 +67,8 @@ pub enum PipelineError {
     ZeroCapacity,
     #[snafu(display("shuffle pool capacity must be nonzero"))]
     ZeroShuffleCapacity,
+    #[snafu(display("parallel pipeline worker count must be nonzero"))]
+    ZeroWorkers,
     #[snafu(display("pipeline worker panicked"))]
     WorkerPanicked,
 }
@@ -111,9 +167,10 @@ where
 
 /// One ordered stream of owned values produced by bounded worker stages.
 ///
-/// Every stage runs on one OS thread. Capacity bounds the number of values
-/// retained between adjacent stages and therefore provides backpressure. Values
-/// remain ordered, and the first item error terminates downstream processing.
+/// Sequential stages run on one OS thread; explicitly parallel stages use their
+/// requested bounded worker count. Capacity bounds the number of values retained
+/// between adjacent stages and therefore provides backpressure. Values remain
+/// ordered, and the first item error terminates downstream processing.
 /// Dropping the pipeline closes its final receiver; blocked upstream workers then
 /// observe disconnection and exit without requiring cancellation or shared flags.
 pub struct BoundedPipeline<T, E> {
@@ -179,6 +236,96 @@ where
         })
     }
 
+    /// Append a bounded parallel transformation while preserving input order.
+    ///
+    /// Workers claim monotonically numbered inputs from one synchronized source.
+    /// The collector buffers only out-of-order completions and emits them in
+    /// source order, so scheduling never changes deterministic data pipelines.
+    /// The first ordered error terminates downstream processing.
+    pub fn map_parallel_ordered<U, F>(
+        self,
+        capacity: usize,
+        worker_count: usize,
+        transform: F,
+    ) -> PipelineResult<BoundedPipeline<U, E>>
+    where
+        U: Send + 'static,
+        F: Fn(T) -> Result<U, E> + Send + Sync + 'static,
+    {
+        ensure!(capacity != 0, ZeroCapacitySnafu);
+        ensure!(worker_count != 0, ZeroWorkersSnafu);
+        let Self {
+            receiver,
+            mut workers,
+        } = self;
+        let transform = Arc::new(transform);
+        let input = Arc::new(Mutex::new((receiver, 0_usize)));
+        let (completed_sender, completed_receiver) =
+            mpsc::sync_channel::<(usize, Result<U, E>)>(capacity);
+        // Credits bound the whole parallel stage, including items waiting in
+        // the reorder map. A closeable semaphore also wakes idle workers when
+        // the input ends or downstream abandons the pipeline.
+        let credits = Arc::new(PipelineCredits::new(capacity));
+        for _ in 0..worker_count {
+            let input = input.clone();
+            let credits = credits.clone();
+            let completed_sender = completed_sender.clone();
+            let transform = transform.clone();
+            workers.push(thread::spawn(move || {
+                loop {
+                    if !credits.acquire() {
+                        break;
+                    }
+                    let mut input = input
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let Some(value) = input.0.recv().ok() else {
+                        credits.close();
+                        break;
+                    };
+                    let index = input.1;
+                    input.1 += 1;
+                    drop(input);
+                    let value = value.and_then(|value| transform(value));
+                    let failed = value.is_err();
+                    if completed_sender.send((index, value)).is_err() {
+                        credits.close();
+                        break;
+                    }
+                    if failed {
+                        credits.close();
+                        break;
+                    }
+                }
+            }));
+        }
+        drop(completed_sender);
+
+        let (sender, next_receiver) = mpsc::sync_channel(capacity);
+        let collector_credits = credits.clone();
+        workers.push(thread::spawn(move || {
+            let mut expected = 0;
+            let mut pending = BTreeMap::new();
+            for (index, value) in completed_receiver {
+                pending.insert(index, value);
+                while let Some(value) = pending.remove(&expected) {
+                    let failed = value.is_err();
+                    if sender.send(value).is_err() || failed {
+                        collector_credits.close();
+                        return;
+                    }
+                    collector_credits.release();
+                    expected += 1;
+                }
+            }
+            collector_credits.close();
+        }));
+        Ok(BoundedPipeline {
+            receiver: next_receiver,
+            workers,
+        })
+    }
+
     /// Block until the next item arrives or every producer has exited.
     pub fn recv(&self) -> Option<Result<T, E>> {
         self.receiver.recv().ok()
@@ -231,6 +378,12 @@ mod tests {
             .map(1, |value| Ok(value + 1))
             .unwrap();
         pipeline.finish().unwrap();
+
+        let pipeline = BoundedPipeline::from_iter(1, (0..1_000_000).map(Ok::<_, ()>))
+            .unwrap()
+            .map_parallel_ordered(1, 4, |value| Ok(value + 1))
+            .unwrap();
+        pipeline.finish().unwrap();
     }
 
     #[test]
@@ -248,6 +401,88 @@ mod tests {
             pipeline.finish(),
             Err(PipelineError::WorkerPanicked)
         ));
+        let pipeline =
+            BoundedPipeline::from_iter(1, std::iter::empty::<Result<i32, ()>>()).unwrap();
+        assert!(matches!(
+            pipeline.map_parallel_ordered(1, 0, Ok),
+            Err(PipelineError::ZeroWorkers)
+        ));
+    }
+
+    #[test]
+    fn parallel_stage_restores_order_before_propagating_errors() {
+        use std::time::Duration;
+
+        let values = (0..12).map(|value| if value == 9 { Err(value) } else { Ok(value) });
+        let pipeline = BoundedPipeline::from_iter(3, values)
+            .unwrap()
+            .map_parallel_ordered(3, 4, |value| {
+                thread::sleep(Duration::from_millis((3 - value % 4) as u64));
+                Ok(value * value)
+            })
+            .unwrap();
+        let mut output = Vec::new();
+        while let Some(value) = pipeline.recv() {
+            output.push(value);
+        }
+        pipeline.finish().unwrap();
+        assert_eq!(
+            output,
+            [
+                Ok(0),
+                Ok(1),
+                Ok(4),
+                Ok(9),
+                Ok(16),
+                Ok(25),
+                Ok(36),
+                Ok(49),
+                Ok(64),
+                Err(9)
+            ]
+        );
+    }
+
+    #[test]
+    fn parallel_stage_capacity_bounds_out_of_order_work() {
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use std::time::{Duration, Instant};
+
+        let first_started = Arc::new(Barrier::new(2));
+        let release_first = Arc::new(Barrier::new(2));
+        let started = Arc::new(AtomicUsize::new(0));
+        let pipeline = BoundedPipeline::from_iter(2, (0..20).map(Ok::<_, ()>))
+            .unwrap()
+            .map_parallel_ordered(2, 4, {
+                let first_started = first_started.clone();
+                let release_first = release_first.clone();
+                let started = started.clone();
+                move |value| {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    if value == 0 {
+                        first_started.wait();
+                        release_first.wait();
+                    }
+                    Ok(value)
+                }
+            })
+            .unwrap();
+        first_started.wait();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while started.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+        release_first.wait();
+        let mut output = Vec::new();
+        while let Some(value) = pipeline.recv() {
+            output.push(value.unwrap());
+        }
+        pipeline.finish().unwrap();
+        assert_eq!(output, (0..20).collect::<Vec<_>>());
     }
 
     #[test]
