@@ -3,6 +3,7 @@
 use clap::{Parser, Subcommand};
 use fory::{ForyRow, from_row};
 use image::{RgbImage, imageops::FilterType};
+use rayon::prelude::*;
 use rxla_core::{Buffer, CacheLimits, Client, Compiler, Tensor};
 use rxla_models::{YoloAssignments, YoloConfig, YoloLossConfig, yolo, yolox_loss};
 use rxla_nn::{Cx, Model, ModelInput};
@@ -35,6 +36,8 @@ struct Args {
     steps: usize,
     #[arg(long, default_value_t = 64)]
     size: i64,
+    #[arg(long, default_value_t = 1)]
+    batch_size: usize,
     #[arg(long, default_value_t = 0.00015625)]
     learning_rate: f32,
     /// Override warmup duration (default: 5/300 of all steps).
@@ -111,7 +114,8 @@ struct DetectionRecord {
 
 struct DetectionSample {
     id: String,
-    image: RgbImage,
+    encoded_image: Vec<u8>,
+    dimensions: Option<[u32; 2]>,
     boxes: Vec<[f32; 4]>,
     classes: Vec<usize>,
 }
@@ -137,22 +141,24 @@ fn main() -> Result<()> {
         || !args.learning_rate.is_finite()
         || args.steps == 0
         || args.log_every == 0
+        || args.batch_size == 0
     {
         return Err(
-            "size must be a positive multiple of 32; learning rate must be finite; steps and log-every must be non-zero"
+            "size must be a positive multiple of 32; learning rate must be finite; steps, batch-size and log-every must be non-zero"
                 .into(),
         );
     }
     let mut source = TrainingSource::open(args.source)?;
+    let batch = i64::try_from(args.batch_size)?;
     let client = unsafe { Client::load(&args.plugin) }?;
     let config = YoloConfig::yolox_tiny(80);
     let inference = Model::new(move |cx: Cx, image| yolo(cx, &image, &config))
-        .inputs(ModelInput::new([1, args.size, args.size, 3]))
+        .inputs(ModelInput::new([batch, args.size, args.size, 3]))
         .inference();
     let (_, inference) = inference.trace_resident_all()?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let inference_program = inference.compile_stateful_program(&mut compiler)?;
-    let anchors = head_shapes(args.size, 85)
+    let anchors = head_shapes(1, args.size, 85)
         .iter()
         .map(|shape| shape[1] * shape[2])
         .sum::<usize>() as i64;
@@ -184,10 +190,10 @@ fn main() -> Result<()> {
         },
     )
     .inputs((
-        ModelInput::new([1, args.size, args.size, 3]),
-        ModelInput::new([1, anchors, 4]),
-        ModelInput::new([1, anchors, 1]),
-        ModelInput::new([1, anchors, 80]),
+        ModelInput::new([batch, args.size, args.size, 3]),
+        ModelInput::new([batch, anchors, 4]),
+        ModelInput::new([batch, anchors, 1]),
+        ModelInput::new([batch, anchors, 80]),
         ModelInput::new([]),
     ))
     .training();
@@ -223,15 +229,49 @@ fn main() -> Result<()> {
         .warmup_steps(args.warmup_steps.unwrap_or(args.steps / 60))
         .no_augmentation_steps(args.no_augmentation_steps.unwrap_or(args.steps / 20));
     let mut completed = 0;
-    while let Some(sample) = source.next_sample()? {
-        let (pixels, ratio) = letterbox(&sample.image, args.size as u32);
-        let targets = sample.targets(ratio);
-        if targets.is_empty() {
-            continue;
+    while completed < args.steps {
+        let load_started = Instant::now();
+        let mut samples = Vec::with_capacity(args.batch_size);
+        for _ in 0..args.batch_size {
+            let Some(sample) = source.next_sample()? else {
+                break;
+            };
+            samples.push(sample);
         }
-        let input = client.buffer(&[1, args.size, args.size, 3], &pixels)?;
+        if samples.len() != args.batch_size {
+            break;
+        }
+        let prepared = samples
+            .into_par_iter()
+            .enumerate()
+            .map(|(batch_index, sample)| {
+                let image = image::load_from_memory(&sample.encoded_image)
+                    .map_err(|error| error.to_string())?
+                    .into_rgb8();
+                if sample
+                    .dimensions
+                    .is_some_and(|dimensions| dimensions != [image.width(), image.height()])
+                {
+                    return Err("image dimensions do not match Fory metadata".to_owned());
+                }
+                let (pixels, ratio) = letterbox(&image, args.size as u32);
+                let targets = sample.targets(ratio, batch_index);
+                Ok((sample.id, pixels, targets))
+            })
+            .collect::<std::result::Result<Vec<_>, String>>()?;
+        let mut pixels =
+            Vec::with_capacity(args.batch_size * usize::try_from(args.size * args.size * 3)?);
+        let mut targets = Vec::new();
+        let mut sample_ids = Vec::with_capacity(args.batch_size);
+        for (id, sample_pixels, sample_targets) in prepared {
+            sample_ids.push(id);
+            pixels.extend(sample_pixels);
+            targets.extend(sample_targets);
+        }
+        let input = client.buffer(&[batch, args.size, args.size, 3], &pixels)?;
         let step_learning_rate = schedule.at(completed)?;
         let learning_rate = client.buffer(&[], &[step_learning_rate])?;
+        let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
 
         // Buffer clones share their PJRT allocation. The inference detour sees
         // the current weights while the original snapshot retains SGD state.
@@ -253,27 +293,29 @@ fn main() -> Result<()> {
             .restore_model(training.session(&program))?
             .build()?;
 
+        let match_started = Instant::now();
         let heads = outputs
             .iter()
             .map(Buffer::to_vec::<f32>)
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let shapes = head_shapes(args.size, 85);
+        let shapes = head_shapes(batch, args.size, 85);
         let decoded = DecodedYoloBatch::from_heads([
             YoloHead::new(&heads[0], shapes[0]).stride(8),
             YoloHead::new(&heads[1], shapes[1]).stride(16),
             YoloHead::new(&heads[2], shapes[2]).stride(32),
         ])?;
         let assignments = SimOtaConfig::default().assign(&decoded.input(), &targets)?;
+        let match_ms = match_started.elapsed().as_secs_f64() * 1e3;
         if assignments.foreground == 0 {
             return Err(format!(
                 "SimOTA produced no foreground anchors for image {}",
-                sample.id
+                sample_ids.join(",")
             )
             .into());
         }
-        let boxes = client.buffer(&[1, anchors, 4], &assignments.boxes)?;
-        let objectness = client.buffer(&[1, anchors, 1], &assignments.objectness)?;
-        let classes = client.buffer(&[1, anchors, 80], &assignments.classes)?;
+        let boxes = client.buffer(&[batch, anchors, 4], &assignments.boxes)?;
+        let objectness = client.buffer(&[batch, anchors, 1], &assignments.objectness)?;
+        let classes = client.buffer(&[batch, anchors, 80], &assignments.classes)?;
         let train_started = Instant::now();
         let outputs =
             training_session.run(&[&input, &boxes, &objectness, &classes, &learning_rate])?;
@@ -285,8 +327,8 @@ fn main() -> Result<()> {
         completed += 1;
         if completed == 1 || completed % args.log_every == 0 || completed == args.steps {
             println!(
-                "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} lr={step_learning_rate:.8} infer_ms={infer_ms:.1} train_ms={train_ms:.1}",
-                sample.id,
+                "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} lr={step_learning_rate:.8} load_ms={load_ms:.1} infer_ms={infer_ms:.1} match_ms={match_ms:.1} train_ms={train_ms:.1}",
+                sample_ids.join(","),
                 targets.len(),
                 assignments.foreground,
                 losses[0],
@@ -294,9 +336,6 @@ fn main() -> Result<()> {
                 losses[2],
                 losses[3],
             );
-        }
-        if completed == args.steps {
-            break;
         }
     }
     if completed != args.steps {
@@ -320,12 +359,12 @@ fn main() -> Result<()> {
 }
 
 impl DetectionSample {
-    fn targets(&self, ratio: f32) -> Vec<DetectionTarget> {
+    fn targets(&self, ratio: f32, batch: usize) -> Vec<DetectionTarget> {
         self.boxes
             .iter()
             .zip(&self.classes)
             .map(|([x0, y0, x1, y1], &class)| DetectionTarget {
-                batch: 0,
+                batch,
                 class,
                 cxcywh: [
                     (x0 + x1) * 0.5 * ratio,
@@ -422,7 +461,8 @@ impl TrainingSource {
                 }
                 Ok(Some(DetectionSample {
                     id: image.id.to_string(),
-                    image: image::open(images.join(&image.file_name))?.into_rgb8(),
+                    encoded_image: std::fs::read(images.join(&image.file_name))?,
+                    dimensions: None,
                     boxes,
                     classes,
                 }))
@@ -437,12 +477,7 @@ impl TrainingSource {
                 if boxes.len() != labels.len() * 4 {
                     return Err("Fory detection row has inconsistent boxes and labels".into());
                 }
-                let image = image::load_from_memory(row.image()?)?.into_rgb8();
-                if image.width() != u32::try_from(row.width()?)?
-                    || image.height() != u32::try_from(row.height()?)?
-                {
-                    return Err("Fory detection row image dimensions do not match metadata".into());
-                }
+                let dimensions = [u32::try_from(row.width()?)?, u32::try_from(row.height()?)?];
                 let boxes = (0..labels.len())
                     .map(|index| {
                         Ok([
@@ -466,7 +501,8 @@ impl TrainingSource {
                     .collect::<std::result::Result<Vec<_>, String>>()?;
                 Ok(Some(DetectionSample {
                     id: row.sample_id()?.to_owned(),
-                    image,
+                    encoded_image: row.image()?.to_vec(),
+                    dimensions: Some(dimensions),
                     boxes,
                     classes,
                 }))
@@ -494,10 +530,10 @@ const COCO_CATEGORY_IDS: [u64; 80] = [
 const DETECTION_SCHEMA_SHA256: &str =
     "237f2fa5b001dbed66bc326f618b90fdeba67d2d284357a38274612d007d455f";
 
-fn head_shapes(size: i64, channels: usize) -> [[usize; 4]; 3] {
+fn head_shapes(batch: i64, size: i64, channels: usize) -> [[usize; 4]; 3] {
     [8, 16, 32].map(|stride| {
         [
-            1,
+            batch as usize,
             (size / stride) as usize,
             (size / stride) as usize,
             channels,

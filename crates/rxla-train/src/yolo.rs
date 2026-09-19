@@ -1,6 +1,7 @@
 //! Host-side, no-gradient YOLOX SimOTA assignment.
 
 use derive_setters::Setters;
+use rayon::prelude::*;
 use snafu::{Snafu, ensure};
 
 pub type SimOtaResult<T, E = SimOtaError> = std::result::Result<T, E>;
@@ -255,23 +256,45 @@ impl SimOtaConfig {
         targets: &[DetectionTarget],
     ) -> SimOtaResult<SimOtaAssignments> {
         self.validate(input, targets)?;
-        let mut output = SimOtaAssignments {
-            boxes: vec![0.0; input.batch * input.anchors * 4],
-            objectness: vec![0.0; input.batch * input.anchors],
-            classes: vec![0.0; input.batch * input.anchors * input.classes],
+        let images = (0..input.batch)
+            .into_par_iter()
+            .map(|batch| {
+                let ground_truth = targets
+                    .iter()
+                    .filter(|target| target.batch == batch)
+                    .collect::<Vec<_>>();
+                let mut output = SimOtaAssignments {
+                    boxes: vec![0.0; input.anchors * 4],
+                    objectness: vec![0.0; input.anchors],
+                    classes: vec![0.0; input.anchors * input.classes],
+                    batch: 1,
+                    anchors: input.anchors,
+                    class_count: input.classes,
+                    foreground: 0,
+                };
+                self.assign_image(input, batch, &ground_truth, &mut output);
+                output
+            })
+            .collect::<Vec<_>>();
+        let foreground = images.iter().map(|image| image.foreground).sum();
+        Ok(SimOtaAssignments {
+            boxes: images
+                .iter()
+                .flat_map(|image| image.boxes.iter().copied())
+                .collect(),
+            objectness: images
+                .iter()
+                .flat_map(|image| image.objectness.iter().copied())
+                .collect(),
+            classes: images
+                .iter()
+                .flat_map(|image| image.classes.iter().copied())
+                .collect(),
             batch: input.batch,
             anchors: input.anchors,
             class_count: input.classes,
-            foreground: 0,
-        };
-        for batch in 0..input.batch {
-            let ground_truth = targets
-                .iter()
-                .filter(|target| target.batch == batch)
-                .collect::<Vec<_>>();
-            self.assign_image(input, batch, &ground_truth, &mut output);
-        }
-        Ok(output)
+            foreground,
+        })
     }
 
     fn validate(self, input: &SimOtaInput<'_>, targets: &[DetectionTarget]) -> SimOtaResult<()> {
@@ -360,21 +383,35 @@ impl SimOtaConfig {
 
         let mut costs = vec![vec![0.0; candidates.len()]; targets.len()];
         let mut ious = vec![vec![0.0; candidates.len()]; targets.len()];
+        // BCE against a one-hot class target is the all-zero BCE sum plus one
+        // replacement term for the positive class. These values only depend on
+        // the candidate prediction, so compute the 80-class work once rather
+        // than once per candidate/ground-truth pair.
+        let classification = candidates
+            .iter()
+            .map(|(anchor, _)| {
+                let flat_anchor = batch * input.anchors + anchor;
+                let base = flat_anchor * input.classes;
+                let objectness = sigmoid(input.objectness_logits[flat_anchor]);
+                let mut negative_sum = 0.0;
+                let mut positive_delta = Vec::with_capacity(input.classes);
+                for class in 0..input.classes {
+                    let probability =
+                        (sigmoid(input.class_logits[base + class]) * objectness).sqrt();
+                    let negative = binary_cross_entropy(probability, 0.0);
+                    negative_sum += negative;
+                    positive_delta.push(binary_cross_entropy(probability, 1.0) - negative);
+                }
+                (negative_sum, positive_delta)
+            })
+            .collect::<Vec<_>>();
         for (target_index, target) in targets.iter().enumerate() {
             for (candidate_index, (anchor, inside_both)) in candidates.iter().enumerate() {
                 let prediction = input.boxes[batch * input.anchors + anchor];
                 let iou = box_iou(target.cxcywh, prediction);
                 ious[target_index][candidate_index] = iou;
-                let base = (batch * input.anchors + anchor) * input.classes;
-                let objectness = sigmoid(input.objectness_logits[batch * input.anchors + anchor]);
-                let classification = (0..input.classes)
-                    .map(|class| {
-                        let probability =
-                            (sigmoid(input.class_logits[base + class]) * objectness).sqrt();
-                        binary_cross_entropy(probability, usize::from(class == target.class) as f32)
-                    })
-                    .sum::<f32>();
-                costs[target_index][candidate_index] = classification
+                let (negative_sum, positive_delta) = &classification[candidate_index];
+                costs[target_index][candidate_index] = negative_sum + positive_delta[target.class]
                     - self.iou_weight * (iou + 1e-8).ln()
                     + if inside_both[target_index] {
                         0.0
@@ -411,7 +448,7 @@ impl SimOtaConfig {
             };
             let target = targets[target_index];
             let iou = ious[target_index][candidate];
-            let flat_anchor = batch * input.anchors + anchor;
+            let flat_anchor = *anchor;
             output.boxes[flat_anchor * 4..flat_anchor * 4 + 4].copy_from_slice(&target.cxcywh);
             output.objectness[flat_anchor] = 1.0;
             output.classes[flat_anchor * input.classes + target.class] = iou;
@@ -509,6 +546,39 @@ mod tests {
         let assigned = SimOtaConfig::default().assign(&input, &[]).unwrap();
         assert_eq!(assigned.foreground, 0);
         assert_eq!(assigned.objectness, [0.0]);
+    }
+
+    #[test]
+    fn batched_assignment_keeps_images_isolated() {
+        let input = SimOtaInput {
+            boxes: &[[4.0, 4.0, 4.0, 4.0], [12.0, 12.0, 4.0, 4.0]],
+            objectness_logits: &[8.0, 8.0],
+            class_logits: &[8.0, -8.0, -8.0, 8.0],
+            anchor_centers: &[[4.0, 4.0]],
+            anchor_strides: &[8.0],
+            batch: 2,
+            anchors: 1,
+            classes: 2,
+        };
+        let targets = [
+            DetectionTarget {
+                batch: 0,
+                class: 0,
+                cxcywh: [4.0, 4.0, 4.0, 4.0],
+            },
+            DetectionTarget {
+                batch: 1,
+                class: 1,
+                cxcywh: [12.0, 12.0, 4.0, 4.0],
+            },
+        ];
+
+        let assigned = SimOtaConfig::default().assign(&input, &targets).unwrap();
+
+        assert_eq!(assigned.foreground, 2);
+        assert_eq!(assigned.objectness, [1.0, 1.0]);
+        assert_eq!(assigned.boxes, input.boxes.concat());
+        assert_eq!(assigned.classes, [1.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]
