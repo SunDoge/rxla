@@ -98,6 +98,8 @@ message ModelArtifact {
   repeated Program programs = 7;
   repeated Capability required_capabilities = 8;
   repeated Asset assets = 9;
+  bytes artifact_uuid = 10; // exactly 16 bytes
+  repeated Metadata metadata = 11;
 }
 
 message Blob {
@@ -106,6 +108,7 @@ message Blob {
   uint64 byte_length = 3;
   Digest digest = 4;
   string media_type = 5;
+  bytes shard_uuid = 6; // exactly 16 bytes for tensor arenas
 }
 
 message Tensor {
@@ -113,12 +116,45 @@ message Tensor {
   repeated PathSegment path = 2;
   DType dtype = 3;
   repeated uint64 shape = 4;
-  uint64 blob_id = 5;
-  uint64 byte_offset = 6;
-  TensorRole role = 7;
-  optional uint64 alias_of = 8;
-  uint64 byte_length = 9;
-  TensorEncoding encoding = 10;
+  TensorRole role = 5;
+  TensorEncoding encoding = 6;
+  repeated TensorSlice slices = 7;
+  optional uint64 storage_alias_of = 8;
+  optional Sharding sharding = 9;
+  repeated Metadata metadata = 10;
+}
+
+message TensorSlice {
+  uint64 blob_id = 1;
+  uint64 byte_offset = 2;
+  uint64 byte_length = 3;
+  repeated SliceDimension dimensions = 4;
+  optional Digest digest = 5;
+  uint32 alignment = 6;
+  optional uint64 replica_group = 7;
+  repeated MeshCoordinate mesh_coordinates = 8;
+}
+
+message SliceDimension {
+  uint64 start = 1;
+  uint64 length = 2;
+}
+
+message MeshCoordinate {
+  string axis = 1;
+  uint64 index = 2;
+}
+
+message Sharding {
+  repeated string mesh_axes = 1;
+  repeated uint64 preferred_mesh_shape = 2;
+  repeated DimensionSharding dimensions = 3;
+  bool reshardable = 4;
+}
+
+message Metadata {
+  string key = 1;
+  MetadataValue value = 2;
 }
 
 message Program {
@@ -138,6 +174,31 @@ message Program {
 The sketch is not permission to serialize Rust structs mechanically. Every
 field needs a language-independent semantic definition and loader limits.
 
+## Typed metadata
+
+GGUF demonstrates that a model container benefits from self-describing typed
+key/value metadata rather than one opaque JSON object. RXLA follows that idea
+for information which is useful to tools but is not part of the execution ABI.
+`MetadataValue` is a closed tagged union containing booleans, signed/unsigned
+integers, `f32`/`f64`, UTF-8 strings, bytes, and homogeneous arrays of those
+scalar types. Nested arbitrary maps and dynamically typed arrays are excluded.
+
+Keys are namespaced lowercase identifiers such as `general.architecture`,
+`general.license`, `rxla.quantization_version`, or `coco.class_names`. The
+`rxla.*` namespace is reserved. Architecture owners should use their own
+namespace, and readers must preserve unknown metadata when copying an artifact.
+Metadata cannot override typed manifest fields, program ABI, tensor shape,
+encoding, integrity information, or required capabilities. Anything required
+for safe execution gets a real schema field instead of a magic key.
+
+RXLA deliberately departs from GGUF where its scope is broader. GGUF places a
+tensor name, dimensions, element/quantization type, and aligned offset beside a
+single tensor data region. RXLA retains those explicit descriptors but uses
+structured parameter paths, multiple external arenas, logical tensor slices,
+replication/sharding semantics, StableHLO programs, and typed calling
+conventions. This keeps inference, fine-tuning, distributed checkpoints, and
+LoRA overlays in one model without turning naming conventions into semantics.
+
 ## Tensor arena
 
 RXLA owns the tensor payload format. It borrows the useful idea from
@@ -148,7 +209,8 @@ format the model's storage ABI.
 In the directory representation, an `.rxt` shard is an immutable byte arena.
 Tensor descriptors live in `manifest.pb`; the shard does not repeat names,
 shapes, or arbitrary string metadata. Each descriptor gives a blob ID, checked
-64-bit offset and length, dtype, shape, and encoding. Version 1 tensors are:
+64-bit offset and length, dtype, shape, encoding, and logical slice. Version 1
+tensor payloads are:
 
 - dense, row-major, and little-endian;
 - stored without compression in the normal serving path;
@@ -171,6 +233,29 @@ tensor ID; representational views refer to a storage tensor plus a checked byte
 range and view metadata. Version 1 does not persist arbitrary strides. A writer
 materializes unsupported layouts, keeping runtime loading predictable and
 allowing one mapped range to become a host buffer directly.
+
+A logical tensor may have multiple `TensorSlice` entries. Every slice records
+its half-open range in every logical dimension, so its meaning is independent
+of file order, process rank, host name, and device ordinal. Partition slices
+must be non-overlapping and cover the complete logical tensor unless an
+explicitly declared sparse encoding says otherwise. Equivalent replicas may
+cover the same range when they share a replica group; their encoding, logical
+range, byte length, and decoded content digest must agree. A reader may select
+any verified replica. Version 1 does not allow one physical slice payload to
+cross blob boundaries.
+
+`Sharding` records semantic mesh axes and how logical dimensions are partitioned
+or replicated. Slice mesh coordinates describe the saved semantic layout. The
+layout may contain a preferred mesh shape, but never persistent assignments
+such as `cuda:0` or worker addresses. At load time the runtime maps the semantic
+mesh onto available PJRT devices. When the saved and requested layouts differ
+and `reshardable` is true, it constructs a checked reshard plan; otherwise
+loading fails before device allocation.
+
+Published inference artifacts should prefer broadly loadable canonical layouts.
+Training checkpoints may preserve the current physical slicing so every worker
+can write and restore its own shards concurrently without gathering the full
+tensor on one host. Both forms describe the same global logical tensor.
 
 Compression is a blob transport concern, not a tensor encoding default. A
 compressed archive must be expanded before mmap and partial fetching are
@@ -313,6 +398,9 @@ Readers enforce limits before allocation:
 - UTF-8 path length and segment count;
 - relative paths only, with no traversal or symlink escape;
 - unique IDs, paths, program names, and ABI positions;
+- slice bounds, alignment, non-overlap, and complete logical coverage;
+- mesh-axis uniqueness and valid partition/replication specifications;
+- typed metadata count, key length, array length, and namespace rules;
 - digest verification before parsing executable/native payloads.
 
 ## Loading sequence
