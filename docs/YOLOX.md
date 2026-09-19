@@ -339,6 +339,16 @@ images/s`, versus `531.6` and `534.1 images/s` for the SIMD-resize baseline,
 about 2.8% higher by pair average. JPEG entropy decoding is now the largest
 sampled host hotspot.
 
+Replacing the decoder was measured before adding another dependency. The
+current `image` feature set already selects `zune-jpeg 0.5.15` with its x86
+SIMD implementation. On 512 real COCO train JPEGs, three warm-cache sequential
+passes through `image`/zune reached `759.8`, `763.3`, and `762.6 images/s`;
+`zenjpeg 0.8.4` reached `731.3`, `730.3`, and `724.7 images/s` while producing
+the same total RGB byte count. The prerelease decoder was therefore rejected:
+it was 4%-5% slower in this workload and would not address the augmentation
+kernel costs. Decoder choice should be re-evaluated with end-to-end concurrent
+loading rather than inferred from single-image library benchmarks.
+
 Affine border sampling also follows OpenCV's constant-border interpolation:
 each out-of-range neighbor contributes the value 114 independently. The former
 implementation replaced an entire output pixel with 114 whenever its sampling
