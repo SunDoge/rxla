@@ -48,6 +48,8 @@ struct Args {
     seed: u64,
     #[arg(long, default_value_t = 1.0)]
     mosaic_probability: f32,
+    #[arg(long, default_value_t = 1.0)]
+    mixup_probability: f32,
     #[arg(long, default_value_t = 0.00015625)]
     learning_rate: f32,
     /// Override warmup duration (default: 5/300 of all steps).
@@ -137,6 +139,12 @@ struct PreparedBatch {
     load_ms: f64,
 }
 
+struct AugmentationGroup {
+    samples: Vec<DetectionSample>,
+    mixup: Option<DetectionSample>,
+    rng: SampleRng,
+}
+
 struct SourceSamples(TrainingSource);
 
 struct PreparedBatches<I> {
@@ -145,6 +153,7 @@ struct PreparedBatches<I> {
     step: usize,
     mosaic_steps: usize,
     mosaic_probability: f32,
+    mixup_probability: f32,
     batch_size: usize,
     size: u32,
     rng: DataRng,
@@ -175,9 +184,10 @@ fn main() -> Result<()> {
         || args.prefetch == 0
         || args.shuffle_buffer == 0
         || !(0.0..=1.0).contains(&args.mosaic_probability)
+        || !(0.0..=1.0).contains(&args.mixup_probability)
     {
         return Err(
-            "size must be a positive multiple of 32; learning rate must be finite; steps, batch-size, prefetch, shuffle-buffer and log-every must be non-zero; mosaic-probability must be in [0, 1]"
+            "size must be a positive multiple of 32; learning rate must be finite; steps, batch-size, prefetch, shuffle-buffer and log-every must be non-zero; mosaic-probability and mixup-probability must be in [0, 1]"
                 .into(),
         );
     }
@@ -190,6 +200,7 @@ fn main() -> Result<()> {
         step: 0,
         mosaic_steps: args.steps.saturating_sub(no_augmentation_steps),
         mosaic_probability: args.mosaic_probability,
+        mixup_probability: args.mixup_probability,
         batch_size: args.batch_size,
         size: u32::try_from(args.size)?,
         rng: DataRng::new(args.seed),
@@ -438,24 +449,36 @@ where
             let count = if mosaic { 4 } else { 1 };
             let mut samples = Vec::with_capacity(count);
             for _ in 0..count {
-                match self.samples.next() {
-                    Some(Ok(sample)) => {
-                        samples.push(sample);
-                        consumed += 1;
-                    }
-                    None => {
-                        self.remaining = 0;
-                        return Some(Err(format!(
-                            "dataset ended after {consumed} source samples in the next batch"
-                        )));
-                    }
-                    Some(Err(error)) => {
+                match take_training_sample(&mut self.samples, &mut consumed) {
+                    Ok(sample) => samples.push(sample),
+                    Err(error) => {
                         self.remaining = 0;
                         return Some(Err(error));
                     }
                 }
             }
-            groups.push((samples, sample_rng));
+            let use_mixup = mosaic
+                && samples.iter().any(|sample| !sample.boxes.is_empty())
+                && sample_rng.bernoulli(0, 1, self.mixup_probability);
+            let mixup = if use_mixup {
+                loop {
+                    match take_training_sample(&mut self.samples, &mut consumed) {
+                        Ok(sample) if sample.boxes.is_empty() => continue,
+                        Ok(sample) => break Some(sample),
+                        Err(error) => {
+                            self.remaining = 0;
+                            return Some(Err(error));
+                        }
+                    }
+                }
+            } else {
+                None
+            };
+            groups.push(AugmentationGroup {
+                samples,
+                mixup,
+                rng: sample_rng,
+            });
         }
         self.remaining -= 1;
         self.step += 1;
@@ -464,16 +487,21 @@ where
 }
 
 fn prepare_batch(
-    groups: Vec<(Vec<DetectionSample>, SampleRng)>,
+    groups: Vec<AugmentationGroup>,
     size: u32,
     load_started: Instant,
 ) -> std::result::Result<PreparedBatch, String> {
     let prepared = groups
         .into_par_iter()
         .enumerate()
-        .map(|(batch_index, (samples, rng))| {
+        .map(|(batch_index, group)| {
+            let AugmentationGroup {
+                samples,
+                mixup,
+                rng,
+            } = group;
             if samples.len() == 4 {
-                prepare_mosaic(samples, size, batch_index, rng)
+                prepare_mosaic(samples, mixup, size, batch_index, rng)
             } else {
                 let sample = samples
                     .into_iter()
@@ -499,6 +527,25 @@ fn prepare_batch(
     })
 }
 
+fn take_training_sample<I>(
+    samples: &mut I,
+    consumed: &mut usize,
+) -> std::result::Result<DetectionSample, String>
+where
+    I: Iterator<Item = std::result::Result<DetectionSample, String>>,
+{
+    match samples.next() {
+        Some(Ok(sample)) => {
+            *consumed += 1;
+            Ok(sample)
+        }
+        Some(Err(error)) => Err(error),
+        None => Err(format!(
+            "dataset ended after {consumed} source samples in the next batch"
+        )),
+    }
+}
+
 fn prepare_single(
     sample: DetectionSample,
     size: u32,
@@ -515,6 +562,7 @@ fn prepare_single(
 
 fn prepare_mosaic(
     samples: Vec<DetectionSample>,
+    mixup: Option<DetectionSample>,
     size: u32,
     batch: usize,
     rng: SampleRng,
@@ -525,7 +573,7 @@ fn prepare_mosaic(
     let mut canvas = RgbImage::from_pixel(canvas_size, canvas_size, Rgb([114; 3]));
     let mut boxes = Vec::new();
     let mut classes = Vec::new();
-    let mut ids = Vec::with_capacity(4);
+    let mut ids = Vec::with_capacity(5);
 
     for (quadrant, sample) in samples.into_iter().enumerate() {
         let image = decode_sample(&sample)?;
@@ -569,6 +617,10 @@ fn prepare_mosaic(
         .into_iter()
         .map(|bbox| transform_box(bbox, matrix, size as f32))
         .collect::<Vec<_>>();
+    if let Some(mixup) = mixup {
+        ids.push(format!("mixup:{}", mixup.id));
+        apply_mixup(&mut image, &mut transformed, &mut classes, mixup, size, rng)?;
+    }
     train_transform(&mut image, &mut transformed, rng);
     let mut targets = detection_targets(&transformed, &classes, 1.0, batch);
     targets.retain(|target| target.cxcywh[2] > 1.0 && target.cxcywh[3] > 1.0);
@@ -580,6 +632,79 @@ fn prepare_mosaic(
             .collect(),
         targets,
     ))
+}
+
+fn apply_mixup(
+    image: &mut RgbImage,
+    boxes: &mut Vec<[f32; 4]>,
+    classes: &mut Vec<usize>,
+    sample: DetectionSample,
+    size: u32,
+    rng: SampleRng,
+) -> std::result::Result<(), String> {
+    let source = decode_sample(&sample)?;
+    let base_scale =
+        (size as f32 / source.height() as f32).min(size as f32 / source.width() as f32);
+    let resized_width = (source.width() as f32 * base_scale) as u32;
+    let resized_height = (source.height() as f32 * base_scale) as u32;
+    let resized =
+        image::imageops::resize(&source, resized_width, resized_height, FilterType::Triangle);
+    let mut copy = RgbImage::from_pixel(size, size, Rgb([114; 3]));
+    for (x, y, pixel) in resized.enumerate_pixels() {
+        copy.put_pixel(x, y, *pixel);
+    }
+
+    let jitter = 0.5 + rng.uniform(5, 0);
+    let width = (size as f32 * jitter) as u32;
+    let height = (size as f32 * jitter) as u32;
+    let mut copy = image::imageops::resize(&copy, width, height, FilterType::Triangle);
+    let flipped = rng.uniform(5, 1) > 0.5;
+    if flipped {
+        image::imageops::flip_horizontal_in_place(&mut copy);
+    }
+    let x_range = width.saturating_sub(size);
+    let y_range = height.saturating_sub(size);
+    let x_offset = (rng.uniform(5, 2) * x_range as f32) as u32;
+    let y_offset = (rng.uniform(5, 3) * y_range as f32) as u32;
+
+    for y in 0..size {
+        for x in 0..size {
+            let copy_x = x + x_offset;
+            let copy_y = y + y_offset;
+            let overlay = if copy_x < width && copy_y < height {
+                copy.get_pixel(copy_x, copy_y).0
+            } else {
+                [0; 3]
+            };
+            let origin = image.get_pixel(x, y).0;
+            image.put_pixel(
+                x,
+                y,
+                Rgb(std::array::from_fn(|channel| {
+                    ((u16::from(origin[channel]) + u16::from(overlay[channel])) / 2) as u8
+                })),
+            );
+        }
+    }
+
+    let scale = base_scale * jitter;
+    for (bbox, class) in sample.boxes.into_iter().zip(sample.classes) {
+        let mut bbox = bbox.map(|coordinate| coordinate * scale);
+        bbox[0] = bbox[0].clamp(0.0, width as f32);
+        bbox[2] = bbox[2].clamp(0.0, width as f32);
+        bbox[1] = bbox[1].clamp(0.0, height as f32);
+        bbox[3] = bbox[3].clamp(0.0, height as f32);
+        if flipped {
+            [bbox[0], bbox[2]] = [width as f32 - bbox[2], width as f32 - bbox[0]];
+        }
+        bbox[0] = (bbox[0] - x_offset as f32).clamp(0.0, size as f32);
+        bbox[2] = (bbox[2] - x_offset as f32).clamp(0.0, size as f32);
+        bbox[1] = (bbox[1] - y_offset as f32).clamp(0.0, size as f32);
+        bbox[3] = (bbox[3] - y_offset as f32).clamp(0.0, size as f32);
+        boxes.push(bbox);
+        classes.push(class);
+    }
+    Ok(())
 }
 
 fn decode_sample(sample: &DetectionSample) -> std::result::Result<RgbImage, String> {
