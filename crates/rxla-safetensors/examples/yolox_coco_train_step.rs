@@ -39,12 +39,9 @@ fn default_learning_rate(batch_size: usize) -> f32 {
 }
 
 fn default_augmentation_workers() -> usize {
-    std::thread::available_parallelism()
-        // A batch already fans out over Rayon's global pool. These workers
-        // overlap a few batches; scaling them with every host core only
-        // oversubscribes JPEG decoding and the nested image transforms.
-        .map(|threads| threads.get().min(4))
-        .unwrap_or(1)
+    // A batch already fans out over Rayon's global pool. One ordered producer
+    // keeps that pool busy and avoids multiplying in-flight image buffers.
+    1
 }
 
 fn default_prefetch() -> usize {
@@ -689,6 +686,11 @@ fn main() -> Result<()> {
     let mut maximum_targets_per_image = 0;
     let mut dropped_targets = 0;
     let mut warned_about_dropped_targets = false;
+    let mut total_wait_ms = 0.0;
+    let mut total_load_ms = 0.0;
+    let mut total_staging_ms = 0.0;
+    let mut total_image_upload_ms = 0.0;
+    let mut total_train_ms = 0.0;
     let run_started = Instant::now();
     let mut profiler = None;
     loop {
@@ -704,6 +706,8 @@ fn main() -> Result<()> {
             size,
             load_ms,
         } = prepared?;
+        total_wait_ms += wait_ms;
+        total_load_ms += load_ms;
         if size != current_size {
             let snapshot = variants
                 .get(&current_size)
@@ -745,6 +749,8 @@ fn main() -> Result<()> {
         let target_classes = client.buffer(&[batch, capacity, 1], &padded.classes)?;
         let target_valid = client.buffer(&[batch, capacity, 1], &padded.valid)?;
         let staging_ms = staging_started.elapsed().as_secs_f64() * 1e3;
+        total_staging_ms += staging_ms;
+        total_image_upload_ms += image_upload_ms;
         let train_started = Instant::now();
         let outputs = training_session.run(&[
             &input,
@@ -768,6 +774,7 @@ fn main() -> Result<()> {
             None
         };
         let train_ms = train_started.elapsed().as_secs_f64() * 1e3;
+        total_train_ms += train_ms;
         if completed == resumed_at + 1 && args.cuda_profile {
             profiler = Some(CudaProfiler::start(&args.cuda_runtime)?);
         }
@@ -870,13 +877,19 @@ fn main() -> Result<()> {
     }
     let cache = compiler.stats();
     let executed = completed - resumed_at;
+    let executed_f64 = executed as f64;
     println!(
-        "completed={completed} resumed_at={resumed_at} images={} augmentation_workers={} prefetch={} maximum_targets_per_image={maximum_targets_per_image} dropped_targets={dropped_targets} run_ms={:.1} images_per_second={:.1} replay_ms={replay_ms:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
+        "completed={completed} resumed_at={resumed_at} images={} augmentation_workers={} prefetch={} maximum_targets_per_image={maximum_targets_per_image} dropped_targets={dropped_targets} run_ms={:.1} images_per_second={:.1} mean_wait_ms={:.3} mean_load_ms={:.3} mean_staging_ms={:.3} mean_image_upload_ms={:.3} mean_train_ms={:.3} replay_ms={replay_ms:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
         executed * args.batch_size,
         args.augmentation_workers,
         args.prefetch,
         run_seconds * 1e3,
         executed as f64 * args.batch_size as f64 / run_seconds,
+        total_wait_ms / executed_f64,
+        total_load_ms / executed_f64,
+        total_staging_ms / executed_f64,
+        total_image_upload_ms / executed_f64,
+        total_train_ms / executed_f64,
         variants.len(),
         cache.misses,
         cache.disk_hits,

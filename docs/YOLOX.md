@@ -315,16 +315,21 @@ different dataset, seed, or augmentation stream can have a higher maximum.
 
 Host augmentation uses two independent controls. `--augmentation-workers`
 sets the number of batches prepared concurrently, while `--prefetch` bounds the
-ready-batch queue. A batch already parallelizes its images and pixel transforms
-through Rayon, so the automatic worker count is capped at four rather than
-scaling a second level of parallelism to most host cores; the default prefetch
-depth is eight batches per worker. On the same 24-core host and deterministic
-200-step workload, the former automatic 16-worker/16-prefetch configuration
-reached `466.9` and `467.5 images/s` in two interleaved runs. The new
-4-worker/32-prefetch configuration reached `478.5` and `482.7 images/s`, a
-2.5%-3.3% improvement. Prepared pixels are retained as bytes, but large images
-or batches can still make a deep queue costly; both values remain explicit CLI
-overrides for memory-constrained hosts.
+ready-batch queue. Each batch already parallelizes its JPEG decodes and pixel
+transforms through Rayon's global pool. Earlier in development, before those
+inner transforms were parallel, changing 16 workers/16 prefetched batches to
+4/32 improved a deterministic 200-step workload from `466.9`-`467.5` to
+`478.5`-`482.7 images/s`.
+
+That outer concurrency stopped helping after the inner pipeline was optimized.
+The trainer now reports cumulative mean wait, augmentation, staging, image
+upload, and device-training times so starvation can be measured directly. In
+400-step BF16/COCO runs, 4/32, 2/16, and 1/8 respectively reached `547.0`,
+`547.1`, and `546.7 images/s`; every configuration spent only `0.004 ms` per
+step waiting for prepared data. The default is therefore one outer worker and
+eight prefetched batches. This preserves throughput while avoiding nested
+batch-level contention and bounding queued image memory more tightly. Both
+values remain explicit CLI overrides for slower storage or different hosts.
 
 CPU sampling then identified generic `image::imageops::resize` as the largest
 remaining host hotspot: it accounted for 14,444 leaf samples, ahead of JPEG
@@ -500,7 +505,7 @@ batches raised end-to-end throughput from 305.6 to 513.6 images/s. Final
 measurements for 1, 2, 4, 8, 16, and 24 workers were respectively 339.7, about
 417, 429.1, 480.4, 513.6, and 497.7 images/s. Those measurements predated the
 parallel pixel transforms, which made high outer concurrency redundant; the
-current four-worker/deeper-prefetch defaults and their paired measurements are
+current single-worker/eight-prefetch defaults and their paired measurements are
 documented above. The prepared sample IDs remained identical across every run.
 
 BF16 XLA autotune logs also confirm that forward and weight-gradient
