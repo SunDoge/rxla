@@ -442,8 +442,11 @@ val2017 images. Evaluation took 58.5 seconds on the same RTX 5080 while the
 trainer remained paused with its CUDA context resident. The milestone produced
 an immutable resumable snapshot, a finalized evaluation MCAP, and the exact
 inference StableHLO/ABI fixture; the trainer then resumed the unchanged
-300-epoch run. This is an intermediate convergence point, not the final AP
-claim.
+300-epoch run. At update 36,980 (epoch 20), the next periodic evaluation
+reached `AP=0.1654`, `AP50=0.3056`, `AP75=0.1682`, and `AR@100=0.3355` in
+58.0 seconds. The second immutable snapshot and finalized MCAP were published,
+and the paused trainer resumed again. These are intermediate convergence
+points, not the final AP claim.
 
 The remaining intentional data-order difference is accepted by the training
 quality contract. Official YOLOX permutes one primary sample per output and
