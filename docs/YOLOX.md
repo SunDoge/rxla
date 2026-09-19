@@ -154,6 +154,13 @@ phase transition reuses the same compiled forward/backward/SGD program. Decoded
 RGB images are converted to the BGR channel order used by the official OpenCV
 input pipeline before entering the model.
 
+Both COCO-file and TFRecord sources roll over at end of input, so `--steps` can
+span any number of epochs instead of stopping after one physical pass. A COCO
+`image_id` cursor applies only to the first partial epoch; later epochs restart
+at the beginning. TFRecord input reopens the same validated file. A genuinely
+empty source still terminates with an error rather than spinning forever, and
+the bounded shuffle pool remains continuous across storage rollovers.
+
 ## Verified baseline
 
 On an RTX 5080 with JAX's CUDA 13 PJRT plugin, device SimOTA selects exactly the

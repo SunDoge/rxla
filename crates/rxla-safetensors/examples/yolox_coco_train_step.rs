@@ -272,11 +272,13 @@ enum TrainingSource {
         document: Coco,
         images: PathBuf,
         position: usize,
+        rollover_position: usize,
         annotations: HashMap<u64, Vec<usize>>,
         categories: BTreeMap<u64, usize>,
     },
     Tfrecord {
         reader: TfrecordReader<std::io::BufReader<std::fs::File>>,
+        input: PathBuf,
         categories: BTreeMap<u64, usize>,
     },
 }
@@ -1308,6 +1310,7 @@ impl TrainingSource {
                     document,
                     images,
                     position,
+                    rollover_position: 0,
                     annotations,
                     categories,
                 })
@@ -1328,7 +1331,8 @@ impl TrainingSource {
                     .into());
                 }
                 Ok(Self::Tfrecord {
-                    reader: TfrecordReader::open(input)?,
+                    reader: TfrecordReader::open(&input)?,
+                    input,
                     categories: category_map(COCO_CATEGORY_IDS),
                 })
             }
@@ -1341,12 +1345,17 @@ impl TrainingSource {
                 document,
                 images,
                 position,
+                rollover_position,
                 annotations,
                 categories,
             } => {
-                let Some(image) = document.images.get(*position) else {
-                    return Ok(None);
-                };
+                if document.images.get(*position).is_none() {
+                    *position = *rollover_position;
+                }
+                let image = document
+                    .images
+                    .get(*position)
+                    .ok_or("COCO dataset contains no image at its start position")?;
                 *position += 1;
                 let mut boxes = Vec::new();
                 let mut classes = Vec::new();
@@ -1368,9 +1377,19 @@ impl TrainingSource {
                     classes,
                 }))
             }
-            Self::Tfrecord { reader, categories } => {
-                let Some(payload) = reader.read_record()? else {
-                    return Ok(None);
+            Self::Tfrecord {
+                reader,
+                input,
+                categories,
+            } => {
+                let payload = if let Some(payload) = reader.read_record()? {
+                    payload
+                } else {
+                    *reader = TfrecordReader::open(&*input)?;
+                    let Some(payload) = reader.read_record()? else {
+                        return Ok(None);
+                    };
+                    payload
                 };
                 let row = from_row::<DetectionRecord>(payload)?;
                 let boxes = row.boxes()?;
@@ -1560,5 +1579,38 @@ mod tests {
                 .all(|&size| size % 32 == 0 && (320..=640).contains(&size))
         );
         assert_eq!(training_sizes(416, 31, 7, false, 10, 20), vec![416; 31]);
+    }
+
+    #[test]
+    fn coco_source_rolls_over_without_ending_the_training_stream() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("one.jpg"), [1]).unwrap();
+        std::fs::write(directory.path().join("two.jpg"), [2]).unwrap();
+        let mut source = TrainingSource::Coco {
+            document: Coco {
+                images: vec![
+                    CocoImage {
+                        id: 1,
+                        file_name: "one.jpg".to_owned(),
+                    },
+                    CocoImage {
+                        id: 2,
+                        file_name: "two.jpg".to_owned(),
+                    },
+                ],
+                annotations: Vec::new(),
+                categories: Vec::new(),
+            },
+            images: directory.path().to_owned(),
+            position: 0,
+            rollover_position: 0,
+            annotations: HashMap::new(),
+            categories: BTreeMap::new(),
+        };
+
+        let ids = (0..5)
+            .map(|_| source.next_sample().unwrap().unwrap().id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["1", "2", "1", "2", "1"]);
     }
 }
