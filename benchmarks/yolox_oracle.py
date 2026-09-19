@@ -118,6 +118,145 @@ def pytorch_outputs(model: torch.nn.Module, size: int) -> list[tuple[str, np.nda
     return output
 
 
+def pytorch_assignments(
+    model: torch.nn.Module, outputs: dict[str, np.ndarray]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    decoded = []
+    objectness = []
+    classes = []
+    x_shifts = []
+    y_shifts = []
+    expanded_strides = []
+    for index, stride in enumerate((8, 16, 32)):
+        raw = torch.from_numpy(outputs[f"head{index}"])
+        _, height, width, channels = raw.shape
+        flat = raw.reshape(1, height * width, channels)
+        y, x = torch.meshgrid(torch.arange(height), torch.arange(width), indexing="ij")
+        grid = torch.stack((x, y), -1).reshape(1, height * width, 2).float()
+        boxes = flat[..., :4].clone()
+        boxes[..., :2] = (boxes[..., :2] + grid) * stride
+        boxes[..., 2:4] = boxes[..., 2:4].exp() * stride
+        decoded.append(boxes)
+        objectness.append(flat[..., 4:5])
+        classes.append(flat[..., 5:])
+        x_shifts.append(grid[..., 0])
+        y_shifts.append(grid[..., 1])
+        expanded_strides.append(torch.full((1, height * width), float(stride)))
+
+    boxes = torch.cat(decoded, 1)
+    objectness_logits = torch.cat(objectness, 1)
+    class_logits = torch.cat(classes, 1)
+    x_shifts_tensor = torch.cat(x_shifts, 1)
+    y_shifts_tensor = torch.cat(y_shifts, 1)
+    strides_tensor = torch.cat(expanded_strides, 1)
+    ground_truth = torch.tensor(
+        [[20.0, 20.0, 12.0, 16.0], [44.0, 42.0, 18.0, 14.0]]
+    )
+    ground_truth_classes = torch.tensor([0.0, 7.0])
+    (
+        matched_classes,
+        foreground,
+        matched_ious,
+        matched_indices,
+        _count,
+    ) = model.head.get_assignments(
+        0,
+        2,
+        ground_truth,
+        ground_truth_classes,
+        boxes[0],
+        strides_tensor,
+        x_shifts_tensor,
+        y_shifts_tensor,
+        class_logits,
+        objectness_logits,
+    )
+    anchors = boxes.shape[1]
+    dense_boxes = torch.zeros((anchors, 4))
+    dense_objectness = foreground.float()
+    dense_classes = torch.zeros((anchors, 80))
+    dense_boxes[foreground] = ground_truth[matched_indices]
+    dense_classes[foreground, matched_classes.long()] = matched_ious
+    return (
+        dense_boxes.numpy(),
+        dense_objectness.numpy(),
+        dense_classes.numpy(),
+    )
+
+
+def pytorch_losses(
+    outputs: dict[str, np.ndarray],
+    assignments: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> np.ndarray:
+    decoded = []
+    raw_boxes = []
+    objectness_logits = []
+    class_logits = []
+    l1_targets = []
+    boxes_target = torch.from_numpy(assignments[0]).unsqueeze(0)
+    foreground = torch.from_numpy(assignments[1]).reshape(1, -1, 1)
+    classes_target = torch.from_numpy(assignments[2]).unsqueeze(0)
+    anchor_offset = 0
+    for index, stride in enumerate((8, 16, 32)):
+        raw = torch.from_numpy(outputs[f"head{index}"])
+        batch, height, width, channels = raw.shape
+        flat = raw.reshape(batch, height * width, channels)
+        y, x = torch.meshgrid(torch.arange(height), torch.arange(width), indexing="ij")
+        grid = torch.stack((x, y), -1).reshape(1, height * width, 2).float()
+        decoded_box = flat[..., :4].clone()
+        decoded_box[..., :2] = (decoded_box[..., :2] + grid) * stride
+        decoded_box[..., 2:4] = decoded_box[..., 2:4].exp() * stride
+        decoded.append(decoded_box)
+        raw_boxes.append(flat[..., :4])
+        objectness_logits.append(flat[..., 4:5])
+        class_logits.append(flat[..., 5:])
+        count = height * width
+        target = boxes_target[:, anchor_offset : anchor_offset + count]
+        l1_targets.append(
+            torch.cat(
+                [
+                    target[..., :2] / stride - grid,
+                    torch.log(target[..., 2:4] / stride + 1e-8),
+                ],
+                -1,
+            )
+        )
+        anchor_offset += count
+
+    decoded_boxes = torch.cat(decoded, 1)
+    raw_boxes_tensor = torch.cat(raw_boxes, 1)
+    objectness_tensor = torch.cat(objectness_logits, 1)
+    classes_tensor = torch.cat(class_logits, 1)
+    l1_target = torch.cat(l1_targets, 1)
+    mask = foreground.bool().reshape(-1)
+    normalizer = foreground.sum().clamp(min=1.0)
+    prediction = decoded_boxes.reshape(-1, 4)[mask]
+    target = boxes_target.reshape(-1, 4)[mask]
+    top_left = torch.maximum(prediction[:, :2] - prediction[:, 2:] / 2, target[:, :2] - target[:, 2:] / 2)
+    bottom_right = torch.minimum(prediction[:, :2] + prediction[:, 2:] / 2, target[:, :2] + target[:, 2:] / 2)
+    intersection = (bottom_right - top_left).prod(1) * (top_left < bottom_right).all(1)
+    union = prediction[:, 2:].prod(1) + target[:, 2:].prod(1) - intersection
+    iou = intersection / (union + 1e-16)
+    box_loss = (1.0 - iou.square()).sum() / normalizer
+    objectness_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+        objectness_tensor, foreground, reduction="sum"
+    ) / normalizer
+    class_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+        classes_tensor.reshape(-1, 80)[mask],
+        classes_target.reshape(-1, 80)[mask],
+        reduction="sum",
+    ) / normalizer
+    l1_loss = torch.nn.functional.l1_loss(
+        raw_boxes_tensor.reshape(-1, 4)[mask],
+        l1_target.reshape(-1, 4)[mask],
+        reduction="sum",
+    ) / normalizer
+    total = 5.0 * box_loss + objectness_loss + class_loss + l1_loss
+    return torch.stack(
+        [total, box_loss, objectness_loss, class_loss, l1_loss]
+    ).numpy()
+
+
 def main() -> None:
     args = Args.parse_args()
     if args.size <= 0 or args.size % 32:
@@ -142,7 +281,8 @@ def main() -> None:
         ],
         check=True,
     )
-    expected = pytorch_outputs(official_model(args.yolox_source, args.checkpoint), args.size)
+    model = official_model(args.yolox_source, args.checkpoint)
+    expected = pytorch_outputs(model, args.size)
     failed = False
     for name, reference in expected:
         actual = np.fromfile(args.output / f"{name}.f32", dtype="<f4").reshape(
@@ -156,6 +296,43 @@ def main() -> None:
             f"mean_abs={mean:.8g}"
         )
         failed |= not np.isfinite(difference).all() or maximum > args.atol
+    expected_by_name = dict(expected)
+    expected_assignment = pytorch_assignments(model, expected_by_name)
+    anchors = sum((args.size // stride) ** 2 for stride in (8, 16, 32))
+    actual_assignment = (
+        np.fromfile(args.output / "assignment_boxes.f32", dtype="<f4").reshape(
+            anchors, 4
+        ),
+        np.fromfile(
+            args.output / "assignment_objectness.f32", dtype="<f4"
+        ).reshape(anchors),
+        np.fromfile(args.output / "assignment_classes.f32", dtype="<f4").reshape(
+            anchors, 80
+        ),
+    )
+    assignment_names = ("boxes", "objectness", "classes")
+    for name, actual, reference in zip(
+        assignment_names, actual_assignment, expected_assignment, strict=True
+    ):
+        difference = np.abs(actual - reference)
+        maximum = float(difference.max(initial=0.0))
+        print(
+            f"assignment={name} foreground={int(actual_assignment[1].sum())} "
+            f"max_abs={maximum:.8g}"
+        )
+        failed |= not np.array_equal(actual != 0, reference != 0) or maximum > args.atol
+    expected_loss = pytorch_losses(expected_by_name, expected_assignment)
+    actual_loss = np.fromfile(args.output / "loss.f32", dtype="<f4")
+    loss_difference = np.abs(actual_loss - expected_loss)
+    print(
+        f"loss actual={actual_loss.tolist()} expected={expected_loss.tolist()} "
+        f"max_abs={float(loss_difference.max()):.8g}"
+    )
+    failed |= (
+        actual_loss.shape != expected_loss.shape
+        or not np.isfinite(actual_loss).all()
+        or float(loss_difference.max()) > args.atol * 5
+    )
     if failed:
         raise SystemExit(f"YOLOX oracle exceeded atol={args.atol}")
 

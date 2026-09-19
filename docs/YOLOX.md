@@ -18,9 +18,9 @@ uv run python benchmarks/convert_yolox.py \
 The converter records the `rxla-yolox-v1` format marker and maps PyTorch
 BatchNorm state names to RXLA's model schema.
 
-The deterministic raw-head oracle checks the converted checkpoint and model
-topology against the official-compatible PyTorch implementation without image
-resize or decoding differences:
+The deterministic training oracle checks the converted checkpoint, model
+topology, SimOTA matcher, and losses against the official-compatible PyTorch
+implementation without image resize or decoding differences:
 
 ```sh
 uv run --no-sync python benchmarks/yolox_oracle.py \
@@ -29,8 +29,11 @@ uv run --no-sync python benchmarks/yolox_oracle.py \
 ```
 
 At the default 64×64 oracle size, all five CSPDarknet stages, three PAFPN
-features, and three raw heads are checked. On the CUDA 13 PJRT plugin the largest
-observed raw-head absolute error was `2.10e-5` (default tolerance `5e-5`).
+features, and three raw heads are checked. It then compares dense SimOTA box,
+objectness, and class assignments plus total, IoU, objectness, class, and L1
+losses. On the CUDA 13 PJRT plugin, the largest observed raw-head absolute error
+was `2.10e-5`, the assignments selected the same two foreground anchors, and
+the largest loss error was `4.30e-6` (default tensor tolerance `5e-5`).
 
 ## Inference
 

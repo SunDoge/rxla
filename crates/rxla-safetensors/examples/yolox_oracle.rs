@@ -2,9 +2,12 @@
 
 use clap::Parser;
 use rxla_core::{Buffer, CacheLimits, Client, Compiler};
-use rxla_models::{YoloConfig, yolo_forward};
+use rxla_models::{
+    YoloAssignments, YoloConfig, YoloLossConfig, yolo_forward, yolox_loss_with_l1_weight,
+};
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
+use rxla_train::{DecodedYoloBatch, DetectionTarget, SimOtaConfig, YoloHead};
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -75,6 +78,102 @@ fn main() -> Result<()> {
             &output.to_vec::<f32>()?,
         )?;
     }
+    let heads = outputs[8..]
+        .iter()
+        .map(Buffer::to_vec::<f32>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let size = usize::try_from(args.size)?;
+    let shapes = [8, 16, 32].map(|stride| [1, size / stride, size / stride, 85]);
+    let model_shapes = [8, 16, 32].map(|stride| [1, args.size / stride, args.size / stride, 85]);
+    let decoded = DecodedYoloBatch::from_heads([
+        YoloHead::new(&heads[0], shapes[0]).stride(8),
+        YoloHead::new(&heads[1], shapes[1]).stride(16),
+        YoloHead::new(&heads[2], shapes[2]).stride(32),
+    ])?;
+    let assignments = SimOtaConfig::default().assign(
+        &decoded.input(),
+        &[
+            DetectionTarget {
+                batch: 0,
+                class: 0,
+                cxcywh: [20.0, 20.0, 12.0, 16.0],
+            },
+            DetectionTarget {
+                batch: 0,
+                class: 7,
+                cxcywh: [44.0, 42.0, 18.0, 14.0],
+            },
+        ],
+    )?;
+    write_f32(
+        &args.output.join("assignment_boxes.f32"),
+        &assignments.boxes,
+    )?;
+    write_f32(
+        &args.output.join("assignment_objectness.f32"),
+        &assignments.objectness,
+    )?;
+    write_f32(
+        &args.output.join("assignment_classes.f32"),
+        &assignments.classes,
+    )?;
+
+    let anchors = i64::try_from(assignments.anchors)?;
+    let loss_definition = Model::new(
+        |_cx: Cx, head0, head1, head2, boxes, objectness, classes, l1_weight| {
+            let loss = yolox_loss_with_l1_weight(
+                &[head0, head1, head2],
+                &YoloAssignments {
+                    boxes,
+                    objectness,
+                    classes,
+                },
+                YoloLossConfig::default(),
+                &l1_weight,
+            )?;
+            Ok::<_, rxla_models::Error>((
+                loss.total,
+                loss.boxes,
+                loss.objectness,
+                loss.classes,
+                loss.l1,
+            ))
+        },
+    )
+    .inputs((
+        ModelInput::new(model_shapes[0]),
+        ModelInput::new(model_shapes[1]),
+        ModelInput::new(model_shapes[2]),
+        ModelInput::new([1, anchors, 4]),
+        ModelInput::new([1, anchors, 1]),
+        ModelInput::new([1, anchors, 80]),
+        ModelInput::new([]),
+    ))
+    .inference();
+    let (_, loss_model) = loss_definition.trace_resident_all()?;
+    let metrics = rxla_core::Tensor::stack(loss_model.outputs(), 0)?;
+    let loss_program = loss_model.compile_stateful_tensors(&mut compiler, &[metrics])?;
+    let mut loss_session = loss_model
+        .session(&loss_program)
+        .initialize_parameters(0)?
+        .build()?;
+    let boxes = client.buffer(&[1, anchors, 4], &assignments.boxes)?;
+    let objectness = client.buffer(&[1, anchors, 1], &assignments.objectness)?;
+    let classes = client.buffer(&[1, anchors, 80], &assignments.classes)?;
+    let l1_weight = client.buffer(&[], &[1.0_f32])?;
+    let loss_outputs = loss_session.run(&[
+        &outputs[8],
+        &outputs[9],
+        &outputs[10],
+        &boxes,
+        &objectness,
+        &classes,
+        &l1_weight,
+    ])?;
+    write_f32(
+        &args.output.join("loss.f32"),
+        &loss_outputs[0].to_vec::<f32>()?,
+    )?;
     println!("output={} size={}", args.output.display(), args.size);
     Ok(())
 }

@@ -240,10 +240,10 @@ impl YoloLrSchedule {
 impl Default for SimOtaConfig {
     fn default() -> Self {
         Self {
-            center_radius: 2.5,
+            center_radius: 1.5,
             candidate_top_k: 10,
             iou_weight: 3.0,
-            outside_penalty: 100_000.0,
+            outside_penalty: 1_000_000.0,
         }
     }
 }
@@ -359,10 +359,9 @@ impl SimOtaConfig {
         }
         let candidates = (0..input.anchors)
             .filter_map(|anchor| {
-                let mut inside_either = false;
-                let mut inside_both = Vec::with_capacity(targets.len());
+                let mut inside_any_center = false;
+                let mut inside_centers = Vec::with_capacity(targets.len());
                 for target in targets {
-                    let in_box = contains(target.cxcywh, input.anchor_centers[anchor]);
                     let radius = self.center_radius * input.anchor_strides[anchor];
                     let center_box = [
                         target.cxcywh[0],
@@ -371,10 +370,10 @@ impl SimOtaConfig {
                         radius * 2.0,
                     ];
                     let in_center = contains(center_box, input.anchor_centers[anchor]);
-                    inside_either |= in_box || in_center;
-                    inside_both.push(in_box && in_center);
+                    inside_any_center |= in_center;
+                    inside_centers.push(in_center);
                 }
-                inside_either.then_some((anchor, inside_both))
+                inside_any_center.then_some((anchor, inside_centers))
             })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
@@ -406,14 +405,14 @@ impl SimOtaConfig {
             })
             .collect::<Vec<_>>();
         for (target_index, target) in targets.iter().enumerate() {
-            for (candidate_index, (anchor, inside_both)) in candidates.iter().enumerate() {
+            for (candidate_index, (anchor, inside_centers)) in candidates.iter().enumerate() {
                 let prediction = input.boxes[batch * input.anchors + anchor];
                 let iou = box_iou(target.cxcywh, prediction);
                 ious[target_index][candidate_index] = iou;
                 let (negative_sum, positive_delta) = &classification[candidate_index];
                 costs[target_index][candidate_index] = negative_sum + positive_delta[target.class]
                     - self.iou_weight * (iou + 1e-8).ln()
-                    + if inside_both[target_index] {
+                    + if inside_centers[target_index] {
                         0.0
                     } else {
                         self.outside_penalty
