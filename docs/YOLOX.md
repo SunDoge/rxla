@@ -113,6 +113,14 @@ StableHLO precision contract used by the numerical oracle. Precision is part of
 `Conv2dOptions` and propagates through both input- and weight-gradient
 convolutions rather than being a process-global flag.
 
+The PyTorch training benchmark accepts the same
+`--convolution-precision default|highest` option. It controls cuDNN TF32 so
+performance and evolving-loss comparisons do not accidentally compare RXLA's
+strict F32 convolutions with PyTorch's default TF32 convolutions. Dynamic
+SimOTA assignments are discontinuous, so multi-step loss trajectories remain a
+diagnostic rather than a numerical oracle; the fixed-assignment one-step oracle
+is the authoritative gradient and update check.
+
 For sequential training, COCO can instead be stored as standard TFRecord
 framing with Apache Fory Standard Row payloads. The JPEG remains compressed;
 Fory provides typed, borrowed views of its bytes and the box/label arrays.

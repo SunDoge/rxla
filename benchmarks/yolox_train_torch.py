@@ -20,6 +20,9 @@ class Args(TypedArgs):
     targets_per_image: Annotated[int, Arg("--targets-per-image")] = 12
     learning_rate: Annotated[float, Arg("--learning-rate")] = 0.00015625
     precision: Annotated[Literal["f32", "bf16", "f16"], Arg("--precision")] = "f32"
+    convolution_precision: Annotated[
+        Literal["default", "highest"], Arg("--convolution-precision")
+    ] = "default"
     execution: Annotated[Literal["eager", "compile"], Arg("--execution")] = "eager"
     l1: Annotated[bool, Arg("--l1")] = False
     profile: Annotated[
@@ -112,6 +115,10 @@ def main() -> None:
         raise SystemExit("PyTorch CUDA is unavailable")
 
     torch.backends.cudnn.benchmark = True
+    # Match RXLA's StableHLO convolution precision contract.  PyTorch 2.14
+    # exposes the setting per backend; `allow_tf32` remains the compatible API
+    # for older releases used by this benchmark.
+    torch.backends.cudnn.allow_tf32 = args.convolution_precision == "default"
     inner_model = load_model(args.yolox_source, args.checkpoint).train().cuda()
     inner_model.head.use_l1 = args.l1
     model = U8InputModel(inner_model).cuda()
@@ -171,7 +178,9 @@ def main() -> None:
         torch.cuda.cudart().cudaProfilerStop()
     total_ms = sum(samples)
     print(
-        f"pytorch={args.execution} precision={args.precision} size={args.size} batch={args.batch_size} "
+        f"pytorch={args.execution} precision={args.precision} "
+        f"convolution_precision={args.convolution_precision} "
+        f"size={args.size} batch={args.batch_size} "
         f"iterations={args.iterations} targets_per_image={args.targets_per_image} "
         f"l1={args.l1} loss={loss.item():.6f}"
     )
