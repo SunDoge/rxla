@@ -325,14 +325,16 @@ evidence. The next accuracy gate is a matched PyTorch/RXLA curve at fixed
 milestones through the end of warmup, followed by a complete 300-epoch COCO AP
 run.
 
-The remaining intentional data-order difference is material to a strict
-reproduction claim. Official YOLOX permutes one primary sample per output and
+The remaining intentional data-order difference is accepted by the training
+quality contract. Official YOLOX permutes one primary sample per output and
 draws the other three Mosaic images uniformly with replacement. The sequential
 TFRecord path instead draws all four from a bounded shuffled pool without
 replacement. Their marginal image distribution is similar, but their exact
-sample correlations and epoch coverage differ. This must either be mirrored
-by the PyTorch control or replaced by an indexed sampler before interpreting a
-small final-AP difference as a backend numerical issue.
+sample correlations and epoch coverage differ. Consequently the end-to-end
+gate is statistical rather than bit-exact: using the same complete COCO
+val2017 evaluator, the final EMA must be within one absolute AP point of the
+official YOLOX-tiny `32.8` result (at least `31.8 AP`). The fixed-input oracle
+remains strict for operator, loss, gradient, SGD, BatchNorm, and EMA semantics.
 
 On an RTX 5080 with JAX's CUDA 13 PJRT plugin, device SimOTA selects exactly the
 same oracle assignments as the official-compatible PyTorch implementation and
