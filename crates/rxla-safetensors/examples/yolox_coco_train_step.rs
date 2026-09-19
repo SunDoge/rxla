@@ -1192,9 +1192,29 @@ fn apply_mixup(
 }
 
 fn decode_sample(sample: &DetectionSample) -> std::result::Result<RgbImage, String> {
-    let image = image::load_from_memory(&sample.encoded_image)
-        .map_err(|error| error.to_string())?
-        .into_rgb8();
+    use zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
+
+    // Both supported training sources guarantee JPEG payloads. Calling zune
+    // directly avoids `image::load_from_memory` format detection and its copy
+    // of the encoded input while retaining the same SIMD decoder.
+    let options = DecoderOptions::default()
+        .set_strict_mode(false)
+        .set_max_width(usize::MAX)
+        .set_max_height(usize::MAX)
+        .jpeg_set_out_colorspace(ColorSpace::RGB);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(
+        ZCursor::new(sample.encoded_image.as_slice()),
+        options,
+    );
+    decoder
+        .decode_headers()
+        .map_err(|error| error.to_string())?;
+    let (width, height) = decoder
+        .dimensions()
+        .ok_or_else(|| "JPEG dimensions are unavailable after decoding headers".to_owned())?;
+    let pixels = decoder.decode().map_err(|error| error.to_string())?;
+    let image = RgbImage::from_raw(width as u32, height as u32, pixels)
+        .ok_or_else(|| "decoded JPEG RGB buffer has invalid dimensions".to_owned())?;
     if sample
         .dimensions
         .is_some_and(|dimensions| dimensions != [image.width(), image.height()])

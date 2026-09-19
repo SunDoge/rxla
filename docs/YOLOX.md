@@ -349,6 +349,14 @@ it was 4%-5% slower in this workload and would not address the augmentation
 kernel costs. Decoder choice should be re-evaluated with end-to-end concurrent
 loading rather than inferred from single-image library benchmarks.
 
+The known-JPEG training path does call the existing zune backend directly. It
+avoids generic format detection, `DynamicImage`, and `image`'s defensive copy
+of the encoded byte slice. On the same 512-image microbenchmark this reached
+`788.2`, `787.0`, and `792.9 images/s`, 2%-3% above the wrapper. Two complete
+400-step COCO runs reached `554.4` and `549.4 images/s` (551.9 average), versus
+the previous corrected-affine pair's 546.6 average. This is a modest roughly
+1% end-to-end gain, as expected now that decode overlaps device execution.
+
 Affine border sampling also follows OpenCV's constant-border interpolation:
 each out-of-range neighbor contributes the value 114 independently. The former
 implementation replaced an entire output pixel with 114 whenever its sampling

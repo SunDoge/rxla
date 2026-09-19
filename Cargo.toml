@@ -38,6 +38,8 @@ image = { version = "0.25.10", default-features = false }
 memmap2 = "0.9.11"
 snafu = "0.9.2"
 tfrecord-lite = { version = "0.1.0", path = "../tfrecord-fast" }
+zune-core = "0.5.3"
+zune-jpeg = "0.5.15"
 
 [profile.dev.package."*"]
 opt-level = 2

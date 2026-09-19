@@ -2389,6 +2389,8 @@ dependencies = [
  "serde_json",
  "snafu",
  "tempfile",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
