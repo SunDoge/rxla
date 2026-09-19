@@ -710,12 +710,23 @@ fn prepare_mosaic(
         ids.push(sample.id);
     }
 
-    let matrix = random_affine_matrix(size, rng);
+    let (matrix, affine_scale) = random_affine_matrix(size, rng);
     let mut image = warp_affine(&canvas, size, matrix);
-    let mut transformed = boxes
-        .into_iter()
+    let transformed = boxes
+        .iter()
+        .copied()
         .map(|bbox| transform_box(bbox, matrix, size as f32))
         .collect::<Vec<_>>();
+    let mut retained_boxes = Vec::with_capacity(transformed.len());
+    let mut retained_classes = Vec::with_capacity(classes.len());
+    for ((source, transformed), class) in boxes.into_iter().zip(transformed).zip(classes) {
+        if affine_box_candidate(source, transformed, affine_scale) {
+            retained_boxes.push(transformed);
+            retained_classes.push(class);
+        }
+    }
+    let mut transformed = retained_boxes;
+    let mut classes = retained_classes;
     if let Some(mixup) = mixup {
         ids.push(format!("mixup:{}", mixup.id));
         apply_mixup(&mut image, &mut transformed, &mut classes, mixup, size, rng)?;
@@ -1003,7 +1014,7 @@ fn mosaic_coordinates(
     }
 }
 
-fn random_affine_matrix(size: u32, rng: SampleRng) -> [[f32; 3]; 2] {
+fn random_affine_matrix(size: u32, rng: SampleRng) -> ([[f32; 3]; 2], f32) {
     let angle = (-10.0 + 20.0 * rng.uniform(2, 0)).to_radians();
     // YOLOX-tiny overrides the base recipe's 0.1..2.0 range with 0.5..1.5.
     let scale = 0.5 + rng.uniform(2, 1);
@@ -1012,7 +1023,7 @@ fn random_affine_matrix(size: u32, rng: SampleRng) -> [[f32; 3]; 2] {
     let alpha = scale * angle.cos();
     let beta = scale * angle.sin();
     let extent = size as f32;
-    [
+    let matrix = [
         [
             alpha - shear_y * beta,
             beta + shear_y * alpha,
@@ -1023,7 +1034,20 @@ fn random_affine_matrix(size: u32, rng: SampleRng) -> [[f32; 3]; 2] {
             alpha + shear_x * beta,
             (-0.1 + 0.2 * rng.uniform(2, 5)) * extent,
         ],
-    ]
+    ];
+    (matrix, scale)
+}
+
+fn affine_box_candidate(source: [f32; 4], transformed: [f32; 4], scale: f32) -> bool {
+    let source_width = (source[2] - source[0]) * scale;
+    let source_height = (source[3] - source[1]) * scale;
+    let width = transformed[2] - transformed[0];
+    let height = transformed[3] - transformed[1];
+    let aspect_ratio = (width / (height + 1e-16)).max(height / (width + 1e-16));
+    width > 2.0
+        && height > 2.0
+        && width * height / (source_width * source_height + 1e-16) > 0.2
+        && aspect_ratio < 20.0
 }
 
 fn transform_box(bbox: [f32; 4], matrix: [[f32; 3]; 2], extent: f32) -> [f32; 4] {
@@ -1326,6 +1350,15 @@ mod tests {
         );
         let image = RgbImage::from_fn(8, 8, |x, y| Rgb([x as u8, y as u8, 3]));
         assert_eq!(warp_affine(&image, 8, matrix), image);
+    }
+
+    #[test]
+    fn affine_candidates_match_yolox_geometry_thresholds() {
+        let source = [0.0, 0.0, 10.0, 10.0];
+        assert!(affine_box_candidate(source, source, 1.0));
+        assert!(!affine_box_candidate(source, [0.0, 0.0, 1.0, 10.0], 1.0));
+        assert!(!affine_box_candidate(source, [0.0, 0.0, 3.0, 3.0], 1.0));
+        assert!(!affine_box_candidate(source, [0.0, 0.0, 100.0, 3.0], 1.0));
     }
 
     #[test]
