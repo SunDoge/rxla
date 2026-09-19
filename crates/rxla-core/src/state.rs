@@ -1164,6 +1164,39 @@ impl Session {
         validate_slot(&self.program.0.owner, self.states.len(), slot)?;
         Ok(&self.states[slot.index])
     }
+
+    /// Borrow the exact executable ABI arguments for diagnostic or portable
+    /// StableHLO export.
+    ///
+    /// The returned order includes dynamic inputs, fixed inputs, and resident
+    /// state exactly as the compiled transition consumes them. No execution or
+    /// state mutation occurs. Callers should not persist this process-local
+    /// ordering without also persisting the matching lowered program.
+    pub fn execution_arguments<'a>(&'a self, inputs: &[&'a Buffer]) -> Result<Vec<&'a Buffer>> {
+        let plan = &self.program.0;
+        if inputs.len() != self.dynamic_input_count {
+            return Err(Error::ExecutableInputCount {
+                expected: self.dynamic_input_count,
+                actual: inputs.len(),
+            });
+        }
+        plan.arguments
+            .iter()
+            .map(|arg| -> Result<&Buffer> {
+                Ok(match *arg {
+                    Argument::Input(i) => match &self.inputs[i] {
+                        InputBinding::Dynamic(index) => inputs[*index],
+                        InputBinding::Fixed(buffer) => buffer,
+                        InputBinding::Unused => {
+                            return Err(Error::PrunedExecutionInput { index: i });
+                        }
+                    },
+                    Argument::State(i) => &self.states[i],
+                })
+            })
+            .collect()
+    }
+
     pub fn run(&mut self, inputs: &[&Buffer]) -> Result<Vec<Buffer>> {
         let _span = tracing::debug_span!(
             "xla.session.run",
@@ -1179,29 +1212,8 @@ impl Session {
         inputs: &[&Buffer],
         execute: impl FnOnce(&[&Buffer]) -> Result<Vec<Buffer>>,
     ) -> Result<Vec<Buffer>> {
+        let arguments = self.execution_arguments(inputs)?;
         let plan = &self.program.0;
-        if inputs.len() != self.dynamic_input_count {
-            return Err(Error::ExecutableInputCount {
-                expected: self.dynamic_input_count,
-                actual: inputs.len(),
-            });
-        }
-        let arguments: Vec<_> = plan
-            .arguments
-            .iter()
-            .map(|arg| -> Result<&Buffer> {
-                Ok(match *arg {
-                    Argument::Input(i) => match &self.inputs[i] {
-                        InputBinding::Dynamic(index) => inputs[*index],
-                        InputBinding::Fixed(buffer) => buffer,
-                        InputBinding::Unused => {
-                            return Err(Error::PrunedExecutionInput { index: i });
-                        }
-                    },
-                    Argument::State(i) => &self.states[i],
-                })
-            })
-            .collect::<Result<_>>()?;
         let mut outputs = execute(&arguments)?;
         if outputs.len() != plan.types.len() {
             return Err(Error::EvaluationOutputCount {

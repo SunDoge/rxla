@@ -56,6 +56,80 @@ impl SchemaBuffers {
 }
 
 impl<R: Read + Seek> SafeTensors<R> {
+    /// Load the packed model EMA written by RXLA training transformations.
+    ///
+    /// Model parameters and floating-point model state are stored contiguously
+    /// in `__model_ema.parameters`, in schema order. Non-F32 model state is not
+    /// averaged and is loaded from its canonical checkpoint key. This turns a
+    /// resumable training snapshot directly into inference bindings without an
+    /// intermediate checkpoint rewrite.
+    pub fn load_model_ema_schema(
+        &mut self,
+        client: &Client,
+        schema: &ModelSchema,
+    ) -> Result<SchemaBuffers> {
+        const PACKED_EMA: &str = "__model_ema.parameters";
+        let packed = self.read_f32(PACKED_EMA)?;
+        if packed.shape.len() != 1 {
+            return Err(invalid(format!(
+                "tensor {PACKED_EMA:?}: expected one-dimensional packed EMA"
+            )));
+        }
+
+        let mut offset = 0usize;
+        let mut parameters = Vec::with_capacity(schema.parameters().len());
+        for spec in schema.parameters() {
+            if spec.dtype() != DType::F32 {
+                return Err(invalid(format!(
+                    "packed model EMA requires F32 parameter {:?}, got {:?}",
+                    spec.path(),
+                    spec.dtype()
+                )));
+            }
+            let end = packed_slice_end(offset, spec.shape(), spec.path())?;
+            let values = packed.values.get(offset..end).ok_or_else(|| {
+                invalid(format!(
+                    "packed model EMA is truncated at {:?}",
+                    spec.path()
+                ))
+            })?;
+            parameters.push((
+                spec.path().to_owned(),
+                client
+                    .buffer(spec.shape(), values)
+                    .map_err(|source| Error::Runtime { source })?,
+            ));
+            offset = end;
+        }
+
+        let mut states = Vec::with_capacity(schema.states().len());
+        for spec in schema.states() {
+            let buffer = if spec.dtype() == DType::F32 {
+                let end = packed_slice_end(offset, spec.shape(), spec.path())?;
+                let values = packed.values.get(offset..end).ok_or_else(|| {
+                    invalid(format!(
+                        "packed model EMA is truncated at {:?}",
+                        spec.path()
+                    ))
+                })?;
+                offset = end;
+                client
+                    .buffer(spec.shape(), values)
+                    .map_err(|source| Error::Runtime { source })?
+            } else {
+                upload_typed(self, client, spec.path(), spec.dtype())?
+            };
+            states.push((spec.path().to_owned(), buffer));
+        }
+        if offset != packed.values.len() {
+            return Err(invalid(format!(
+                "packed model EMA has {} trailing values",
+                packed.values.len() - offset
+            )));
+        }
+        Ok(SchemaBuffers { parameters, states })
+    }
+
     /// Restore every resident parameter plus model- and transform-owned state.
     ///
     /// `template` supplies the exact runtime ABI, including optimizer moments,
@@ -290,6 +364,16 @@ impl<R: Read + Seek> SafeTensors<R> {
 
         Ok(sources)
     }
+}
+
+fn packed_slice_end(offset: usize, shape: &[i64], path: &str) -> Result<usize> {
+    let elements = shape.iter().try_fold(1usize, |elements, &dimension| {
+        elements.checked_mul(usize::try_from(dimension).ok()?)
+    });
+    let elements = elements.ok_or_else(|| invalid(format!("tensor {path:?}: shape overflow")))?;
+    offset
+        .checked_add(elements)
+        .ok_or_else(|| invalid(format!("tensor {path:?}: packed EMA offset overflow")))
 }
 
 fn validate_tensor_info<R: Read + Seek>(

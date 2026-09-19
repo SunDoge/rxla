@@ -96,6 +96,39 @@ only all 5,000 `val2017` images produce comparable COCO AP. Both inference
 checkpoints and resumable training snapshots are accepted; evaluating a
 training snapshot measures its raw model parameters, while the normal
 `--output` checkpoint measures the EMA parameters used for deployment.
+Pass `--ema` to evaluate the packed EMA directly from a resumable training
+snapshot, without first rewriting it as an inference checkpoint.
+
+Training intentionally does not run COCO AP in the hot loop. Loss components,
+learning rate, foreground count, and data-pipeline timing are cheap health
+signals; decode, NMS, and all 5,000 validation images belong in an asynchronous
+checkpoint evaluator. The final metrics still come from the standard
+`pycocotools.COCOeval`, not from a framework-specific approximation.
+
+For an independent execution check, the evaluator can export the exact
+StableHLO module and first-image ABI (including EMA parameters and BatchNorm
+state), then JAX can compile that module without tracing an alternate model:
+
+```sh
+cargo run -p rxla-safetensors --release --features model \
+  --example yolox_coco_eval -- \
+  /path/to/xla_cpu_plugin.so training.safetensors \
+  /data/datasets/coco2017/annotations/instances_val2017.json \
+  /data/datasets/coco2017/val2017 rxla-detections.json \
+  --ema --max-images 1 --export-jax /tmp/yolox-jax
+
+JAX_PLATFORMS=cpu uv run --no-sync python \
+  benchmarks/yolox_stablehlo_coco.py /tmp/yolox-jax \
+  /data/datasets/coco2017/annotations/instances_val2017.json \
+  /data/datasets/coco2017/val2017 jax-detections.json \
+  --backend cpu --max-images 1 --use-fixture-input
+```
+
+`--use-fixture-input` isolates StableHLO execution and postprocessing by using
+the exact pixels exported by Rust. Without it, the Python runner preprocesses
+images with Pillow; interpolation differences can change boxes near confidence
+or NMS thresholds. Either detection JSON can be passed to
+`benchmarks/coco_eval.py` for the official twelve COCO bbox metrics.
 
 As a baseline, the converted official `yolox_tiny.pth` produced 249,721
 post-NMS detections over all 5,000 images and reached `AP=0.328`, `AP50=0.504`,

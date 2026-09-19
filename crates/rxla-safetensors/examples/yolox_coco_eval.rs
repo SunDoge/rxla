@@ -12,9 +12,9 @@ use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::File,
-    io::{BufReader, BufWriter},
-    path::PathBuf,
+    fs::{self, File},
+    io::{BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
     time::Instant,
 };
 
@@ -43,6 +43,12 @@ struct Args {
     /// Evaluate only the first N images (useful for smoke tests).
     #[arg(long)]
     max_images: Option<usize>,
+    /// Evaluate the packed EMA stored in a resumable training snapshot.
+    #[arg(long)]
+    ema: bool,
+    /// Export this exact StableHLO program and its first-image ABI arguments.
+    #[arg(long)]
+    export_jax: Option<PathBuf>,
     #[arg(long, default_value_t = 0.01)]
     confidence: f32,
     #[arg(long, default_value_t = 0.65)]
@@ -86,6 +92,11 @@ fn main() -> Result<()> {
         .inputs(ModelInput::new([1, i64::from(SIZE), i64::from(SIZE), 3]))
         .inference();
     let (_, model) = definition.trace_resident_all()?;
+    let lowered = args
+        .export_jax
+        .as_ref()
+        .map(|_| model.prepare_stateful())
+        .transpose()?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let compiled = model.compile_stateful(&mut compiler)?;
     let mut checkpoint = SafeTensors::open(&args.weights)?;
@@ -99,7 +110,17 @@ fn main() -> Result<()> {
     ) {
         return Err(format!("unsupported YOLOX checkpoint format {format:?}").into());
     }
-    let weights = checkpoint.load_model_schema(&client, model.schema())?;
+    let weights = if args.ema {
+        if !matches!(
+            format,
+            Some("rxla-yolox-training-v2" | "rxla-yolox-training-v3")
+        ) {
+            return Err("--ema requires an RXLA YOLOX training snapshot".into());
+        }
+        checkpoint.load_model_ema_schema(&client, model.schema())?
+    } else {
+        checkpoint.load_model_schema(&client, model.schema())?
+    };
     let mut session = weights.initialize(compiled.session())?.build()?;
     let decoder = YoloDecodeConfig::default()
         .confidence(args.confidence)
@@ -111,6 +132,12 @@ fn main() -> Result<()> {
         let image = image::open(args.images.join(&record.file_name))?.into_rgb8();
         let (input, ratio) = letterbox_bgr(&image)?;
         let input = client.buffer(&[1, 416, 416, 3], &input)?;
+        if index == 0
+            && let (Some(directory), Some(lowered)) = (&args.export_jax, &lowered)
+        {
+            let arguments = session.raw().execution_arguments(&[&input])?;
+            export_jax_fixture(directory, lowered.lowered_program().code(), &arguments)?;
+        }
         let outputs: [Buffer; 3] = session.run(&input)?;
         let heads = outputs
             .iter()
@@ -147,6 +174,41 @@ fn main() -> Result<()> {
         started.elapsed().as_secs_f64(),
         args.output.display(),
     );
+    Ok(())
+}
+
+fn export_jax_fixture(directory: &Path, stablehlo: &[u8], arguments: &[&Buffer]) -> Result<()> {
+    fs::create_dir_all(directory)?;
+    fs::write(directory.join("module.mlir"), stablehlo)?;
+    let mut manifest = BufWriter::new(File::create(directory.join("arguments.txt"))?);
+    for (index, argument) in arguments.iter().enumerate() {
+        let dtype = argument.dtype()?;
+        if dtype != rxla_core::DType::F32 {
+            return Err(
+                format!("JAX fixture argument {index} has unsupported dtype {dtype:?}").into(),
+            );
+        }
+        let shape = argument.dimensions()?;
+        writeln!(
+            manifest,
+            "{}",
+            shape
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )?;
+        let values = argument.to_vec::<f32>()?;
+        let mut output =
+            BufWriter::new(File::create(directory.join(format!("arg-{index:04}.f32")))?);
+        for value in values {
+            output.write_all(&value.to_le_bytes())?;
+        }
+        output.flush()?;
+    }
+    manifest.flush()?;
+    fs::write(directory.join("dynamic-input.txt"), "0\n")?;
+    fs::write(directory.join("visible-outputs.txt"), "3\n")?;
     Ok(())
 }
 
