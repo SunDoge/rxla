@@ -59,6 +59,9 @@ struct Args {
     size: i64,
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
+    /// Per-image padded target capacity; official YOLOX uses 120.
+    #[arg(long, default_value_t = MAX_TARGETS)]
+    target_capacity: usize,
     /// Use YOLOX's random 32-pixel-multiple input size every 10 steps.
     #[arg(long)]
     random_resize: bool,
@@ -319,6 +322,7 @@ fn build_training_variant(
     compiler: &mut Compiler,
     batch: i64,
     size: i64,
+    target_capacity: i64,
     config: YoloConfig,
     use_ema: bool,
 ) -> Result<TrainingVariant> {
@@ -358,9 +362,9 @@ fn build_training_variant(
     )
     .inputs((
         ModelInput::new([batch, size, size, 3]).with_dtype(DType::U8),
-        ModelInput::new([batch, MAX_TARGETS as i64, 4]),
-        ModelInput::new([batch, MAX_TARGETS as i64, 1]).with_dtype(DType::I32),
-        ModelInput::new([batch, MAX_TARGETS as i64, 1]),
+        ModelInput::new([batch, target_capacity, 4]),
+        ModelInput::new([batch, target_capacity, 1]).with_dtype(DType::I32),
+        ModelInput::new([batch, target_capacity, 1]),
         ModelInput::new([]),
         ModelInput::new([]),
     ))
@@ -406,6 +410,7 @@ fn training_metadata(
         ("completed_steps", completed_steps.to_string()),
         ("total_steps", args.steps.to_string()),
         ("batch_size", args.batch_size.to_string()),
+        ("target_capacity", args.target_capacity.to_string()),
         ("base_learning_rate", base_learning_rate.to_string()),
         ("warmup_steps", warmup_steps.to_string()),
         ("no_augmentation_steps", no_augmentation_steps.to_string()),
@@ -463,6 +468,14 @@ fn resume_step(
     );
     expected.remove("completed_steps");
     for (key, value) in expected {
+        if key == "target_capacity"
+            && value == MAX_TARGETS.to_string()
+            && !metadata.contains_key(&key)
+        {
+            // v1 snapshots written before configurable target padding always
+            // used the official capacity and remain exactly compatible.
+            continue;
+        }
         if metadata.get(&key) != Some(&value) {
             return Err(
                 format!("training snapshot metadata {key:?} does not match this run").into(),
@@ -483,6 +496,7 @@ fn main() -> Result<()> {
         || args.run_steps == Some(0)
         || args.log_every == 0
         || args.batch_size == 0
+        || !(1..=MAX_TARGETS).contains(&args.target_capacity)
         || args.prefetch == 0
         || args.augmentation_workers == 0
         || args.shuffle_buffer == 0
@@ -601,6 +615,7 @@ fn main() -> Result<()> {
             &mut compiler,
             batch,
             i64::from(size),
+            i64::try_from(args.target_capacity)?,
             training_config,
             !args.disable_model_ema,
         )?;
@@ -676,10 +691,11 @@ fn main() -> Result<()> {
         };
         let l1_weight = client.buffer(&[], &[l1_weight_value])?;
         let (target_boxes, target_classes, target_valid) =
-            padded_targets(args.batch_size, MAX_TARGETS, 80, &targets)?;
-        let target_boxes = client.buffer(&[batch, MAX_TARGETS as i64, 4], &target_boxes)?;
-        let target_classes = client.buffer(&[batch, MAX_TARGETS as i64, 1], &target_classes)?;
-        let target_valid = client.buffer(&[batch, MAX_TARGETS as i64, 1], &target_valid)?;
+            padded_targets(args.batch_size, args.target_capacity, 80, &targets)?;
+        let capacity = i64::try_from(args.target_capacity)?;
+        let target_boxes = client.buffer(&[batch, capacity, 4], &target_boxes)?;
+        let target_classes = client.buffer(&[batch, capacity, 1], &target_classes)?;
+        let target_valid = client.buffer(&[batch, capacity, 1], &target_valid)?;
         let train_started = Instant::now();
         let outputs = training_session.run(&[
             &input,

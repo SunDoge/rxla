@@ -45,6 +45,9 @@ struct Args {
     iterations: usize,
     #[arg(long, default_value_t = 12)]
     targets_per_image: usize,
+    /// Static padded target capacity used by device SimOTA.
+    #[arg(long, default_value_t = MAX_TARGETS)]
+    target_capacity: usize,
     #[arg(long, default_value_t = 0.00015625)]
     learning_rate: f32,
     #[arg(long, value_enum, default_value_t = ComputeDtype::F32)]
@@ -100,7 +103,8 @@ fn main() -> Result<()> {
         || args.size % 32 != 0
         || args.batch_size == 0
         || args.iterations == 0
-        || !(1..=MAX_TARGETS).contains(&args.targets_per_image)
+        || !(1..=MAX_TARGETS).contains(&args.target_capacity)
+        || !(1..=args.target_capacity).contains(&args.targets_per_image)
         || !args.learning_rate.is_finite()
         || args.learning_rate < 0.0
     {
@@ -144,9 +148,9 @@ fn main() -> Result<()> {
     )
     .inputs((
         ModelInput::new([batch, args.size, args.size, 3]).with_dtype(DType::U8),
-        ModelInput::new([batch, MAX_TARGETS as i64, 4]),
-        ModelInput::new([batch, MAX_TARGETS as i64, 1]).with_dtype(DType::I32),
-        ModelInput::new([batch, MAX_TARGETS as i64, 1]),
+        ModelInput::new([batch, args.target_capacity as i64, 4]),
+        ModelInput::new([batch, args.target_capacity as i64, 1]).with_dtype(DType::I32),
+        ModelInput::new([batch, args.target_capacity as i64, 1]),
         ModelInput::new([]),
         ModelInput::new([]),
     ))
@@ -202,7 +206,7 @@ fn main() -> Result<()> {
     drop(profiler);
     let total_ms = samples.iter().sum::<f64>();
     println!(
-        "rxla precision={} convolution_precision={} direct_launches={} size={} batch={} iterations={} targets_per_image={} l1={} loss={loss:.6}",
+        "rxla precision={} convolution_precision={} direct_launches={} size={} batch={} iterations={} targets_per_image={} target_capacity={} l1={} loss={loss:.6}",
         match args.compute_dtype {
             ComputeDtype::F32 => "f32",
             ComputeDtype::Bf16 => "bf16",
@@ -216,6 +220,7 @@ fn main() -> Result<()> {
         args.batch_size,
         args.iterations,
         args.targets_per_image,
+        args.target_capacity,
         args.l1,
     );
     println!(
@@ -243,13 +248,13 @@ fn synthetic_inputs(client: &Client, args: &Args) -> Result<Inputs> {
     let image = (0..elements)
         .map(|index| ((index * 17 + 13) % 256) as u8)
         .collect::<Vec<_>>();
-    let mut boxes = vec![0.0_f32; args.batch_size * MAX_TARGETS * 4];
-    let mut classes = vec![0_i32; args.batch_size * MAX_TARGETS];
-    let mut valid = vec![0.0_f32; args.batch_size * MAX_TARGETS];
+    let mut boxes = vec![0.0_f32; args.batch_size * args.target_capacity * 4];
+    let mut classes = vec![0_i32; args.batch_size * args.target_capacity];
+    let mut valid = vec![0.0_f32; args.batch_size * args.target_capacity];
     let scale = args.size as f32 / 64.0;
     for batch_index in 0..args.batch_size {
         for target in 0..args.targets_per_image {
-            let slot = batch_index * MAX_TARGETS + target;
+            let slot = batch_index * args.target_capacity + target;
             boxes[slot * 4..slot * 4 + 4].copy_from_slice(&[
                 (8 + target * 11 % 48) as f32 * scale,
                 (8 + target * 17 % 48) as f32 * scale,
@@ -262,9 +267,9 @@ fn synthetic_inputs(client: &Client, args: &Args) -> Result<Inputs> {
     }
     Ok(Inputs {
         image: client.buffer(&[batch, args.size, args.size, 3], &image)?,
-        boxes: client.buffer(&[batch, MAX_TARGETS as i64, 4], &boxes)?,
-        classes: client.buffer(&[batch, MAX_TARGETS as i64, 1], &classes)?,
-        valid: client.buffer(&[batch, MAX_TARGETS as i64, 1], &valid)?,
+        boxes: client.buffer(&[batch, args.target_capacity as i64, 4], &boxes)?,
+        classes: client.buffer(&[batch, args.target_capacity as i64, 1], &classes)?,
+        valid: client.buffer(&[batch, args.target_capacity as i64, 1], &valid)?,
         learning_rate: client.buffer(&[], &[args.learning_rate])?,
         l1_weight: client.buffer(&[], &[f32::from(args.l1)])?,
     })

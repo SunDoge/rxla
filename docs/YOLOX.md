@@ -258,6 +258,18 @@ instead of the preceding fully synchronized `490.8 images/s`. A matching
 no-EMA asynchronous run reached `502.2 images/s`, so packed parameter and
 BatchNorm EMA had no measurable throughput cost in this pair of short runs.
 
+Device SimOTA normally retains the official per-image padding capacity of 120.
+For datasets or augmentation policies with a known lower object-count ceiling,
+`--target-capacity` reduces that static matching dimension; excess targets are
+explicitly capped in the same way as the official 120-entry preprocessing
+limit. On the RTX 5080 BF16 synthetic workload at 416×416, batch 8, and 12 valid
+targets per image, capacity 120 measured `12.466 ms` (`641.8 images/s`), while
+capacity 64 measured `11.779 ms` (`679.2 images/s`), a 5.8% throughput gain.
+Capacity 32 measured `11.880 ms`, so smaller shapes are not monotonically faster
+under XLA code generation. The default remains 120 for recipe compatibility;
+this knob is fixed per compiled variant and does not create an automatic bucket
+cross-product with multi-scale image sizes.
+
 `--random-resize` enables YOLOX's ten-step multi-scale schedule. It selects a
 square 32-pixel multiple in the inclusive `--random-size-min` to
 `--random-size-max` range (official defaults `10..20`), precompiles only the
