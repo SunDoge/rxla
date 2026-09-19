@@ -93,7 +93,10 @@ fn main() -> Result<()> {
         .metadata()
         .and_then(|metadata| metadata.get("format"))
         .map(String::as_str);
-    if !matches!(format, Some("rxla-yolox-v1" | "rxla-yolox-training-v2")) {
+    if !matches!(
+        format,
+        Some("rxla-yolox-v1" | "rxla-yolox-training-v2" | "rxla-yolox-training-v3")
+    ) {
         return Err(format!("unsupported YOLOX checkpoint format {format:?}").into());
     }
     let weights = checkpoint.load_model_schema(&client, model.schema())?;
