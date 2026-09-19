@@ -1080,9 +1080,7 @@ fn apply_mixup(
     let resized =
         image::imageops::resize(&source, resized_width, resized_height, FilterType::Triangle);
     let mut copy = RgbImage::from_pixel(size, size, Rgb([114; 3]));
-    for (x, y, pixel) in resized.enumerate_pixels() {
-        copy.put_pixel(x, y, *pixel);
-    }
+    image::imageops::replace(&mut copy, &resized, 0, 0);
 
     let jitter = 0.5 + rng.uniform(5, 0);
     let width = (size as f32 * jitter) as u32;
@@ -1097,25 +1095,27 @@ fn apply_mixup(
     let x_offset = (rng.uniform(5, 2) * x_range as f32) as u32;
     let y_offset = (rng.uniform(5, 3) * y_range as f32) as u32;
 
-    for y in 0..size {
-        for x in 0..size {
-            let copy_x = x + x_offset;
-            let copy_y = y + y_offset;
-            let overlay = if copy_x < width && copy_y < height {
-                copy.get_pixel(copy_x, copy_y).0
-            } else {
-                [0; 3]
-            };
-            let origin = image.get_pixel(x, y).0;
-            image.put_pixel(
-                x,
-                y,
-                Rgb(std::array::from_fn(|channel| {
-                    ((u16::from(origin[channel]) + u16::from(overlay[channel])) / 2) as u8
-                })),
-            );
-        }
-    }
+    image
+        .as_mut()
+        .par_chunks_mut(size as usize * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..size as usize {
+                let offset = x * 3;
+                let copy_x = x as u32 + x_offset;
+                let copy_y = y as u32 + y_offset;
+                let overlay = if copy_x < width && copy_y < height {
+                    copy.get_pixel(copy_x, copy_y).0
+                } else {
+                    [0; 3]
+                };
+                for channel in 0..3 {
+                    row[offset + channel] = ((u16::from(row[offset + channel])
+                        + u16::from(overlay[channel]))
+                        / 2) as u8;
+                }
+            }
+        });
 
     let scale = base_scale * jitter;
     for (bbox, class) in sample.boxes.into_iter().zip(sample.classes) {
@@ -1244,13 +1244,14 @@ fn augment_hsv(image: &mut RgbImage, rng: SampleRng) {
     if hue_delta == 0.0 && saturation_delta == 0.0 && value_delta == 0.0 {
         return;
     }
-    for pixel in image.pixels_mut() {
-        let [mut hue, mut saturation, mut value] = rgb_to_opencv_hsv(pixel.0);
+    image.as_mut().par_chunks_mut(3).for_each(|pixel| {
+        let [mut hue, mut saturation, mut value] =
+            rgb_to_opencv_hsv([pixel[0], pixel[1], pixel[2]]);
         hue = (hue + hue_delta).rem_euclid(180.0);
         saturation = (saturation + saturation_delta).clamp(0.0, 255.0);
         value = (value + value_delta).clamp(0.0, 255.0);
-        *pixel = Rgb(opencv_hsv_to_rgb([hue, saturation, value]));
-    }
+        pixel.copy_from_slice(&opencv_hsv_to_rgb([hue, saturation, value]));
+    });
 }
 
 fn rgb_to_opencv_hsv([red, green, blue]: [u8; 3]) -> [f32; 3] {
@@ -1435,19 +1436,24 @@ fn warp_affine(image: &RgbImage, size: u32, matrix: [[f32; 3]; 2]) -> RgbImage {
         [matrix[1][1] / determinant, -matrix[0][1] / determinant],
         [-matrix[1][0] / determinant, matrix[0][0] / determinant],
     ];
-    let mut output = RgbImage::from_pixel(size, size, Rgb([114; 3]));
-    for y in 0..size {
-        for x in 0..size {
-            let translated_x = x as f32 - matrix[0][2];
-            let translated_y = y as f32 - matrix[1][2];
-            let source_x = inverse[0][0] * translated_x + inverse[0][1] * translated_y;
-            let source_y = inverse[1][0] * translated_x + inverse[1][1] * translated_y;
-            if let Some(pixel) = image::imageops::interpolate_bilinear(image, source_x, source_y) {
-                output.put_pixel(x, y, pixel);
-            }
-        }
-    }
+    let mut output = vec![114; (size * size * 3) as usize];
     output
+        .par_chunks_mut(size as usize * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..size as usize {
+                let translated_x = x as f32 - matrix[0][2];
+                let translated_y = y as f32 - matrix[1][2];
+                let source_x = inverse[0][0] * translated_x + inverse[0][1] * translated_y;
+                let source_y = inverse[1][0] * translated_x + inverse[1][1] * translated_y;
+                if let Some(pixel) =
+                    image::imageops::interpolate_bilinear(image, source_x, source_y)
+                {
+                    row[x * 3..x * 3 + 3].copy_from_slice(&pixel.0);
+                }
+            }
+        });
+    RgbImage::from_raw(size, size, output).expect("affine output has exact RGB dimensions")
 }
 
 impl TrainingSource {
@@ -1653,10 +1659,16 @@ fn letterbox(image: &RgbImage, size: u32) -> (Vec<u8>, f32) {
     let height = (image.height() as f32 * ratio) as u32;
     let resized = image::imageops::resize(image, width, height, FilterType::Triangle);
     let mut output = vec![114; (size * size * 3) as usize];
-    for (x, y, pixel) in resized.enumerate_pixels() {
-        let offset = ((y * size + x) * 3) as usize;
-        output[offset..offset + 3].copy_from_slice(&[pixel[2], pixel[1], pixel[0]]);
-    }
+    output
+        .par_chunks_mut(size as usize * 3)
+        .take(height as usize)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..width as usize {
+                let pixel = resized.get_pixel(x as u32, y as u32);
+                row[x * 3..x * 3 + 3].copy_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+            }
+        });
     (output, ratio)
 }
 

@@ -235,6 +235,15 @@ steady device observations were `10.8–12.4 ms`. This is within the observed
 run-to-run range of the earlier `513.6 images/s` host-pipeline result rather
 than evidence of a separate end-to-end gain.
 
+Host augmentation now parallelizes affine warp rows, HSV pixels, MixUp blend
+rows, and letterbox conversion in addition to batch and Mosaic JPEG work. In a
+paired 200-step BF16 run at 416×416, batch 8, three augmentation workers, and
+the same executable-cache hit, the preceding scalar-pixel implementation
+reached `388.1 images/s`; the parallel implementation reached `444.9
+images/s`, a 14.6% end-to-end improvement. Typical Mosaic preparation fell
+from `51–59 ms` to `26–39 ms` per batch, while the ordered bounded pipeline
+retained deterministic sample order.
+
 The real trainer now enables the official YOLOX parameter EMA by default,
 including its `0.9998 * (1 - exp(-updates / 2000))` decay ramp. SGD and EMA are
 one stateful device program, with no parameter download between them; the
