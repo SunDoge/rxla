@@ -302,6 +302,36 @@ uninterrupted two-step run; replaying the first TFRecord step took 1.7 ms.
 
 ## Verified baseline
 
+### Accuracy status
+
+Inference is matched end to end: the converted official checkpoint reproduces
+the published `AP=0.328` on all 5,000 COCO val2017 images. Training is not yet
+claimed to reproduce that AP. The fixed-input oracle establishes one-update
+model, loss, gradient, BatchNorm, momentum-SGD, and EMA semantics, while a
+from-scratch run establishes that the real COCO input pipeline remains finite
+and resumable. Neither check substitutes for a complete training curve.
+
+The first full-dataset convergence checkpoint used the official 300-epoch
+schedule, effective batch 64 (`batch=8`, eight accumulated microbatches),
+default multi-scale training, Mosaic, and model EMA. At update 1,000 the loss
+had fallen from `17.845` to the `12`-`15` range. After resuming to update 2,000
+it was typically `10`-`12`. Both the raw model and EMA still rounded to
+`AP=0.000` on val2017, with `AR@100=0.002`. This checkpoint is only 1.08 epochs
+into the five-epoch quadratic warmup: its learning rate is `4.68e-4`, versus
+the eventual `1e-2`. It is therefore a pipeline/convergence smoke test, not
+accuracy evidence. The next accuracy gate is a matched PyTorch/RXLA curve at
+fixed milestones through the end of warmup, followed by a complete 300-epoch
+COCO AP run.
+
+The remaining intentional data-order difference is material to a strict
+reproduction claim. Official YOLOX permutes one primary sample per output and
+draws the other three Mosaic images uniformly with replacement. The sequential
+TFRecord path instead draws all four from a bounded shuffled pool without
+replacement. Their marginal image distribution is similar, but their exact
+sample correlations and epoch coverage differ. This must either be mirrored
+by the PyTorch control or replaced by an indexed sampler before interpreting a
+small final-AP difference as a backend numerical issue.
+
 On an RTX 5080 with JAX's CUDA 13 PJRT plugin, device SimOTA selects exactly the
 same oracle assignments as the official-compatible PyTorch implementation and
 the retained Rust host reference. At 416×416 and batch size 8, a 20-step run
@@ -527,8 +557,10 @@ semantics and are rejected instead of silently resuming a different data
 stream. A separate real check verified the official empty-match behavior:
 after augmentation removed every box, SimOTA produced zero foreground and the
 normalized objectness-only loss continued instead of treating the batch as an
-error. Multi-scale remains opt-in because compiling several static XLA
-programs is expensive; two tiny size variants took 43.7 seconds in this check.
+error. Multi-scale is enabled by default for recipe compatibility; pass
+`--random-resize false` only for controlled diagnostics. Each distinct static
+size needs its own compiled program; two tiny size variants took 43.7 seconds
+in this check.
 Building the example with
 `--features model,disk-cache` and passing a trusted `--compile-cache DIR`
 persists PJRT-native executables per exact StableHLO/shape. In a fresh-process
