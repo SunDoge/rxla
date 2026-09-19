@@ -72,7 +72,7 @@ uv run --no-sync python benchmarks/fory_tfrecord.py \
 cargo run -p rxla-safetensors --release --features model \
   --example yolox_coco_train_step -- \
   /path/to/xla_cuda_plugin.so yolox_tiny.safetensors \
-  --size 416 --batch-size 8 --steps 100 \
+  --size 416 --batch-size 8 --prefetch 2 --steps 100 \
   tfrecord /data/datasets/coco2017-fory-4096.tfrecord
 ```
 
@@ -88,14 +88,17 @@ produced finite losses on both steps. After warmup, inference for assignment was
 ZML CPU PJRT plugin; its warm step measured 8.5 ms for inference and 24.6 ms for
 training. These are smoke-test timings, not throughput benchmarks.
 
-At 416×416 and batch size 8, a five-step run over the Fory TFRecord measured
-about 8.0–8.2 ms for assignment inference and 36.3–37.3 ms for the fused
+At 416×416 and batch size 8, a twenty-step run over the Fory TFRecord measured
+about 7.5–8.5 ms for assignment inference and 36.4–36.5 ms for the fused
 forward/backward/SGD program after warmup (roughly 180 images/s for device work).
-Parallel JPEG decode plus letterboxing took 14.6–18.7 ms and host SimOTA took
-13.0–19.2 ms. The stages are currently sequential, so observed end-to-end
-throughput is roughly 96–111 images/s; overlapping input preparation and moving
-matching onto the device remain the largest opportunities. Timings vary with
-image contents, target counts, host CPU, and PJRT/XLA versions.
+Parallel JPEG decode plus letterboxing took 12–16 ms and host SimOTA typically
+took 12–15 ms. The bounded producer keeps two prepared batches ahead, reducing
+consumer wait to 0.0 ms after the first batch. The complete 160-image measured
+region, including first-step execution warmup, took 1.377 seconds (116.2
+images/s), compared with roughly 96–111 images/s when input preparation was
+sequential. Moving matching onto the device remains the largest pipeline-level
+opportunity. Timings vary with image contents, target counts, host CPU, and
+PJRT/XLA versions.
 
 The exported checkpoint was then loaded by the 416×416 inference example on
 both CPU and CUDA. CUDA inference measured 9.4 ms after compilation and produced

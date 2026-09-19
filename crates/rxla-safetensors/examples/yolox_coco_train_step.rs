@@ -10,8 +10,8 @@ use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::{SafeTensors, save_model_new};
 use rxla_tfrecord::Reader as TfrecordReader;
 use rxla_train::{
-    DecodedYoloBatch, DetectionTarget, SgdOptions, SimOtaConfig, YoloHead, YoloLrSchedule,
-    apply_model_sgd_with_learning_rate,
+    BoundedPipeline, DecodedYoloBatch, DetectionTarget, SgdOptions, SimOtaConfig, YoloHead,
+    YoloLrSchedule, apply_model_sgd_with_learning_rate,
 };
 use serde::Deserialize;
 use std::{
@@ -38,6 +38,9 @@ struct Args {
     size: i64,
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
+    /// Number of prepared host batches retained ahead of the device.
+    #[arg(long, default_value_t = 2)]
+    prefetch: usize,
     #[arg(long, default_value_t = 0.00015625)]
     learning_rate: f32,
     /// Override warmup duration (default: 5/300 of all steps).
@@ -120,6 +123,20 @@ struct DetectionSample {
     classes: Vec<usize>,
 }
 
+struct PreparedBatch {
+    sample_ids: Vec<String>,
+    pixels: Vec<f32>,
+    targets: Vec<DetectionTarget>,
+    load_ms: f64,
+}
+
+struct PreparedBatches {
+    source: TrainingSource,
+    remaining: usize,
+    batch_size: usize,
+    size: u32,
+}
+
 enum TrainingSource {
     Coco {
         document: Coco,
@@ -142,13 +159,14 @@ fn main() -> Result<()> {
         || args.steps == 0
         || args.log_every == 0
         || args.batch_size == 0
+        || args.prefetch == 0
     {
         return Err(
-            "size must be a positive multiple of 32; learning rate must be finite; steps, batch-size and log-every must be non-zero"
+            "size must be a positive multiple of 32; learning rate must be finite; steps, batch-size, prefetch and log-every must be non-zero"
                 .into(),
         );
     }
-    let mut source = TrainingSource::open(args.source)?;
+    let source = TrainingSource::open(args.source)?;
     let batch = i64::try_from(args.batch_size)?;
     let client = unsafe { Client::load(&args.plugin) }?;
     let config = YoloConfig::yolox_tiny(80);
@@ -228,50 +246,30 @@ fn main() -> Result<()> {
     let schedule = YoloLrSchedule::new(args.learning_rate, args.steps)
         .warmup_steps(args.warmup_steps.unwrap_or(args.steps / 60))
         .no_augmentation_steps(args.no_augmentation_steps.unwrap_or(args.steps / 20));
+    let batches = PreparedBatches {
+        source,
+        remaining: args.steps,
+        batch_size: args.batch_size,
+        size: u32::try_from(args.size)?,
+    };
+    let pipeline = BoundedPipeline::from_iter(args.prefetch, batches)?;
     let mut completed = 0;
-    while completed < args.steps {
-        let load_started = Instant::now();
-        let mut samples = Vec::with_capacity(args.batch_size);
-        for _ in 0..args.batch_size {
-            let Some(sample) = source.next_sample()? else {
-                break;
-            };
-            samples.push(sample);
-        }
-        if samples.len() != args.batch_size {
+    let run_started = Instant::now();
+    loop {
+        let wait_started = Instant::now();
+        let Some(prepared) = pipeline.recv() else {
             break;
-        }
-        let prepared = samples
-            .into_par_iter()
-            .enumerate()
-            .map(|(batch_index, sample)| {
-                let image = image::load_from_memory(&sample.encoded_image)
-                    .map_err(|error| error.to_string())?
-                    .into_rgb8();
-                if sample
-                    .dimensions
-                    .is_some_and(|dimensions| dimensions != [image.width(), image.height()])
-                {
-                    return Err("image dimensions do not match Fory metadata".to_owned());
-                }
-                let (pixels, ratio) = letterbox(&image, args.size as u32);
-                let targets = sample.targets(ratio, batch_index);
-                Ok((sample.id, pixels, targets))
-            })
-            .collect::<std::result::Result<Vec<_>, String>>()?;
-        let mut pixels =
-            Vec::with_capacity(args.batch_size * usize::try_from(args.size * args.size * 3)?);
-        let mut targets = Vec::new();
-        let mut sample_ids = Vec::with_capacity(args.batch_size);
-        for (id, sample_pixels, sample_targets) in prepared {
-            sample_ids.push(id);
-            pixels.extend(sample_pixels);
-            targets.extend(sample_targets);
-        }
+        };
+        let wait_ms = wait_started.elapsed().as_secs_f64() * 1e3;
+        let PreparedBatch {
+            sample_ids,
+            pixels,
+            targets,
+            load_ms,
+        } = prepared?;
         let input = client.buffer(&[batch, args.size, args.size, 3], &pixels)?;
         let step_learning_rate = schedule.at(completed)?;
         let learning_rate = client.buffer(&[], &[step_learning_rate])?;
-        let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
 
         // Buffer clones share their PJRT allocation. The inference detour sees
         // the current weights while the original snapshot retains SGD state.
@@ -327,7 +325,7 @@ fn main() -> Result<()> {
         completed += 1;
         if completed == 1 || completed % args.log_every == 0 || completed == args.steps {
             println!(
-                "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} lr={step_learning_rate:.8} load_ms={load_ms:.1} infer_ms={infer_ms:.1} match_ms={match_ms:.1} train_ms={train_ms:.1}",
+                "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} infer_ms={infer_ms:.1} match_ms={match_ms:.1} train_ms={train_ms:.1}",
                 sample_ids.join(","),
                 targets.len(),
                 assignments.foreground,
@@ -338,6 +336,7 @@ fn main() -> Result<()> {
             );
         }
     }
+    pipeline.finish()?;
     if completed != args.steps {
         return Err(format!(
             "only found {completed} annotated images for {} steps",
@@ -345,6 +344,7 @@ fn main() -> Result<()> {
         )
         .into());
     }
+    let run_seconds = run_started.elapsed().as_secs_f64();
     if let Some(output) = &args.output {
         let metadata = BTreeMap::from([
             ("format".to_owned(), "rxla-yolox-v1".to_owned()),
@@ -354,8 +354,83 @@ fn main() -> Result<()> {
         .collect();
         save_model_new(output, &training, &training_session, Some(&metadata))?;
     }
-    println!("completed={completed} train_compile_ms={train_compile_ms:.1}");
+    println!(
+        "completed={completed} images={} run_ms={:.1} images_per_second={:.1} train_compile_ms={train_compile_ms:.1}",
+        completed * args.batch_size,
+        run_seconds * 1e3,
+        completed as f64 * args.batch_size as f64 / run_seconds,
+    );
     Ok(())
+}
+
+impl Iterator for PreparedBatches {
+    type Item = std::result::Result<PreparedBatch, String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let load_started = Instant::now();
+        let mut samples = Vec::with_capacity(self.batch_size);
+        for _ in 0..self.batch_size {
+            match self.source.next_sample() {
+                Ok(Some(sample)) => samples.push(sample),
+                Ok(None) => {
+                    self.remaining = 0;
+                    return Some(Err(format!(
+                        "dataset ended with only {} of {} samples in the next batch",
+                        samples.len(),
+                        self.batch_size
+                    )));
+                }
+                Err(error) => {
+                    self.remaining = 0;
+                    return Some(Err(error.to_string()));
+                }
+            }
+        }
+        self.remaining -= 1;
+        Some(prepare_batch(samples, self.size, load_started))
+    }
+}
+
+fn prepare_batch(
+    samples: Vec<DetectionSample>,
+    size: u32,
+    load_started: Instant,
+) -> std::result::Result<PreparedBatch, String> {
+    let prepared = samples
+        .into_par_iter()
+        .enumerate()
+        .map(|(batch_index, sample)| {
+            let image = image::load_from_memory(&sample.encoded_image)
+                .map_err(|error| error.to_string())?
+                .into_rgb8();
+            if sample
+                .dimensions
+                .is_some_and(|dimensions| dimensions != [image.width(), image.height()])
+            {
+                return Err("image dimensions do not match Fory metadata".to_owned());
+            }
+            let (pixels, ratio) = letterbox(&image, size);
+            let targets = sample.targets(ratio, batch_index);
+            Ok((sample.id, pixels, targets))
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+    let mut pixels = Vec::with_capacity(prepared.len() * (size * size * 3) as usize);
+    let mut targets = Vec::new();
+    let mut sample_ids = Vec::with_capacity(prepared.len());
+    for (id, sample_pixels, sample_targets) in prepared {
+        sample_ids.push(id);
+        pixels.extend(sample_pixels);
+        targets.extend(sample_targets);
+    }
+    Ok(PreparedBatch {
+        sample_ids,
+        pixels,
+        targets,
+        load_ms: load_started.elapsed().as_secs_f64() * 1e3,
+    })
 }
 
 impl DetectionSample {
