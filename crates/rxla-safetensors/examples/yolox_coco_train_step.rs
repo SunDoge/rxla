@@ -26,6 +26,11 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const MAX_TARGETS: usize = 120;
+const BASIC_LEARNING_RATE_PER_IMAGE: f32 = 0.01 / 64.0;
+
+fn default_learning_rate(batch_size: usize) -> f32 {
+    BASIC_LEARNING_RATE_PER_IMAGE * batch_size as f32
+}
 
 fn default_augmentation_workers() -> usize {
     std::thread::available_parallelism()
@@ -65,8 +70,10 @@ struct Args {
     /// Official YOLOX-tiny disables MixUp; set to 1 for the base recipe.
     #[arg(long, default_value_t = 0.0)]
     mixup_probability: f32,
-    #[arg(long, default_value_t = 0.00015625)]
-    learning_rate: f32,
+    /// Total optimizer learning rate; defaults to YOLOX's 0.01/64 per image
+    /// multiplied by this process's batch size.
+    #[arg(long)]
+    learning_rate: Option<f32>,
     /// Internal CUDA arithmetic; model inputs, parameters, state, and outputs remain F32.
     #[arg(long, value_enum, default_value_t = ComputeDtype::F32)]
     compute_dtype: ComputeDtype,
@@ -256,7 +263,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
     if args.size <= 0
         || args.size % 32 != 0
-        || !args.learning_rate.is_finite()
+        || args
+            .learning_rate
+            .is_some_and(|learning_rate| !learning_rate.is_finite() || learning_rate < 0.0)
         || args.steps == 0
         || args.log_every == 0
         || args.batch_size == 0
@@ -267,10 +276,13 @@ fn main() -> Result<()> {
         || !(0.0..=1.0).contains(&args.mixup_probability)
     {
         return Err(
-            "size must be a positive multiple of 32; learning rate must be finite; steps, batch-size, prefetch, augmentation-workers, shuffle-buffer and log-every must be non-zero; mosaic-probability and mixup-probability must be in [0, 1]"
+            "size must be a positive multiple of 32; learning rate must be finite and nonnegative; steps, batch-size, prefetch, augmentation-workers, shuffle-buffer and log-every must be non-zero; mosaic-probability and mixup-probability must be in [0, 1]"
                 .into(),
         );
     }
+    let base_learning_rate = args
+        .learning_rate
+        .unwrap_or_else(|| default_learning_rate(args.batch_size));
     let source = TrainingSource::open(args.source)?;
     let no_augmentation_steps = args.no_augmentation_steps.unwrap_or(args.steps / 20);
     let samples = ShufflePool::new(SourceSamples(source), args.shuffle_buffer, args.seed)?;
@@ -382,7 +394,7 @@ fn main() -> Result<()> {
         .initialize_raw(training.session(&program))?
         .initializer_seed(7)
         .build()?;
-    let schedule = YoloLrSchedule::new(args.learning_rate, args.steps)
+    let schedule = YoloLrSchedule::new(base_learning_rate, args.steps)
         .warmup_steps(args.warmup_steps.unwrap_or(args.steps / 60))
         .no_augmentation_steps(no_augmentation_steps);
     let mut completed = 0;
@@ -1321,5 +1333,11 @@ mod tests {
         for color in [[255, 0, 0], [0, 255, 0], [0, 0, 255], [128, 128, 128]] {
             assert_eq!(opencv_hsv_to_rgb(rgb_to_opencv_hsv(color)), color);
         }
+    }
+
+    #[test]
+    fn default_learning_rate_scales_official_per_image_rate() {
+        assert_eq!(default_learning_rate(8), 0.00125);
+        assert_eq!(default_learning_rate(64), 0.01);
     }
 }

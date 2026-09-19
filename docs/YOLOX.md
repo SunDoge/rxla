@@ -68,7 +68,7 @@ cargo run -p rxla-safetensors --release --features model \
   --example yolox_coco_train_step -- \
   /path/to/xla_cuda_plugin.so \
   yolox_tiny.safetensors \
-  --size 416 --batch-size 8 --steps 100 --learning-rate 0.00015625 \
+  --size 416 --batch-size 8 --steps 100 \
   --output yolox_tiny_trained.safetensors \
   coco \
   /data/datasets/coco2017/annotations/instances_train2017.json \
@@ -84,6 +84,11 @@ classification cost, dynamic-k selection, and conflict resolution to StableHLO.
 Assignments are detached before entering the differentiable loss. The output
 checkpoint excludes optimizer moments but includes parameters and model
 BatchNorm state, so it can be passed directly to `yolox_infer`.
+
+The default total learning rate follows the official trainer and scales
+`basic_lr_per_img = 0.01 / 64` by the local batch size. For example, batch 8
+uses `0.00125`. An explicit `--learning-rate` overrides the resulting total
+optimizer rate rather than the per-image constant.
 
 Freshly initialized models use the official YOLOX policies: convolution weights
 use PyTorch-compatible Kaiming-uniform initialization, BatchNorm uses
