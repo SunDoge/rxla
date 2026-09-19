@@ -20,7 +20,11 @@ class Args(TypedArgs):
     targets_per_image: Annotated[int, Arg("--targets-per-image")] = 12
     learning_rate: Annotated[float, Arg("--learning-rate")] = 0.00015625
     precision: Annotated[Literal["f32", "bf16", "f16"], Arg("--precision")] = "f32"
+    execution: Annotated[Literal["eager", "compile"], Arg("--execution")] = "eager"
     l1: Annotated[bool, Arg("--l1")] = False
+    profile: Annotated[
+        bool, Arg("--profile", help="bracket timed iterations with CUDA profiler API")
+    ] = False
     yolox_source: Annotated[
         Path, Arg("--yolox-source")
     ] = Path("/home/me/code/projects/fcyolox/src")
@@ -98,6 +102,10 @@ def main() -> None:
     model = load_model(args.yolox_source, args.checkpoint).train().cuda()
     model.head.use_l1 = args.l1
     optimizer = optimizer_for(model, args.learning_rate)
+    if args.execution == "compile":
+        # YOLOX caches head grids across calls. CUDA-graph mode overwrites these
+        # user-visible tensors, so use Inductor's default mode for this model.
+        model = torch.compile(model)
     autocast_dtype = {
         "f32": torch.float32,
         "bf16": torch.bfloat16,
@@ -138,14 +146,18 @@ def main() -> None:
         loss = step()
     torch.cuda.synchronize()
     samples = []
+    if args.profile:
+        torch.cuda.cudart().cudaProfilerStart()
     for _ in range(args.iterations):
         started = time.perf_counter()
         loss = step()
         torch.cuda.synchronize()
         samples.append((time.perf_counter() - started) * 1e3)
+    if args.profile:
+        torch.cuda.cudart().cudaProfilerStop()
     total_ms = sum(samples)
     print(
-        f"pytorch=eager precision={args.precision} size={args.size} batch={args.batch_size} "
+        f"pytorch={args.execution} precision={args.precision} size={args.size} batch={args.batch_size} "
         f"iterations={args.iterations} targets_per_image={args.targets_per_image} "
         f"l1={args.l1} loss={loss.item():.6f}"
     )

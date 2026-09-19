@@ -157,6 +157,12 @@ official-compatible PyTorch eager benchmark with 12 synthetic targets per image
 measured 23.87 ms in F32 and 26.61 ms under BF16 autocast. These are useful
 device baselines, not a strict data-pipeline comparison.
 
+Compiling the same PyTorch model with Inductor's default `torch.compile` mode
+measured 18.48 ms (433.0 images/s). The official-compatible Python loss has a
+graph break at its per-image `Tensor.item()` SimOTA loop, but Inductor still
+compiles the convolutional regions. RXLA currently remains slower than this
+stronger device baseline.
+
 The input boundary now preserves decoded images as U8 through host batching and
 PCIe transfer, then performs the exact U8-to-F32 conversion in the compiled
 graph. Mosaic also exposes its four independent JPEG decode/resize jobs to the
@@ -166,6 +172,24 @@ image. On this 24-core host a 100-step real-data run sustained 295.6 images/s
 steps were 22.6–24.8 ms, observed Mosaic preparation was 22.6–28.3 ms, and
 consumer wait remained 0.0 ms. Host preparation is therefore hidden behind the
 unified CUDA training graph at this batch size.
+
+Nsight profiling explains the remaining CUDA gap. RXLA launched about 1,154
+kernels per steady step with 15.21 ms aggregate GPU kernel time, versus about
+2,132 kernels and 7.70 ms for the profiled PyTorch/Inductor step. Despite the
+lower launch count, 61.2% of RXLA kernel time was cuDNN grouped-direct work:
+YOLOX-tiny's depthwise convolutions caused roughly 239 per-channel executions
+per step on this backend. RXLA now preserves grouped input gradients as one
+`feature_group_count` StableHLO convolution instead of expanding a Rust loop;
+CPU scalar-gradient and higher-order tests verify the new lowering. On this
+CUDA stack, XLA/cuDNN still internally chooses the same per-channel execution,
+so this correctness/IR improvement does not yet reduce the 22–27 ms wall time.
+An experimental nine-tap tensor decomposition was rejected: XLA recognized it
+as slower F32 convolutions and doubled profiled GPU work. Closing this gap needs
+a specialized depthwise CUDA kernel/lowering rather than more graph expansion.
+
+For bounded Nsight captures, `--cuda-profile --cuda-runtime /path/to/libcudart.so`
+starts collection after the first training step. Use it with
+`nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop`.
 
 The exported checkpoint was then loaded by the 416×416 inference example on
 both CPU and CUDA. CUDA inference measured 9.4 ms after compilation and produced

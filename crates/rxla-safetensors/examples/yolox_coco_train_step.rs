@@ -73,6 +73,12 @@ struct Args {
     /// Print one progress line every N completed steps.
     #[arg(long, default_value_t = 10)]
     log_every: usize,
+    /// Bracket steady training with the CUDA profiler API (for nsys capture-range).
+    #[arg(long)]
+    cuda_profile: bool,
+    /// CUDA runtime library used by --cuda-profile.
+    #[arg(long, default_value = "libcudart.so.13")]
+    cuda_runtime: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -152,6 +158,38 @@ struct PreparedBatch {
     pixels: Vec<u8>,
     targets: Vec<DetectionTarget>,
     load_ms: f64,
+}
+
+struct CudaProfiler {
+    _library: libloading::Library,
+    stop: unsafe extern "C" fn() -> i32,
+}
+
+impl CudaProfiler {
+    fn start(path: &std::path::Path) -> Result<Self> {
+        // SAFETY: the library is retained for the lifetime of the copied
+        // function pointers and both symbols have CUDA Runtime's stable C ABI.
+        let library = unsafe { libloading::Library::new(path) }?;
+        let start =
+            unsafe { *library.get::<unsafe extern "C" fn() -> i32>(b"cudaProfilerStart\0")? };
+        let stop = unsafe { *library.get::<unsafe extern "C" fn() -> i32>(b"cudaProfilerStop\0")? };
+        // SAFETY: no arguments or borrowed state cross the CUDA C ABI.
+        let status = unsafe { start() };
+        if status != 0 {
+            return Err(format!("cudaProfilerStart failed with status {status}").into());
+        }
+        Ok(Self {
+            _library: library,
+            stop,
+        })
+    }
+}
+
+impl Drop for CudaProfiler {
+    fn drop(&mut self) {
+        // SAFETY: the retained library keeps this CUDA C symbol valid.
+        let _ = unsafe { (self.stop)() };
+    }
 }
 
 struct AugmentationGroup {
@@ -310,6 +348,7 @@ fn main() -> Result<()> {
         .no_augmentation_steps(no_augmentation_steps);
     let mut completed = 0;
     let run_started = Instant::now();
+    let mut profiler = None;
     loop {
         let wait_started = Instant::now();
         let Some(prepared) = pipeline.recv() else {
@@ -361,6 +400,9 @@ fn main() -> Result<()> {
             .into());
         }
         completed += 1;
+        if completed == 1 && args.cuda_profile {
+            profiler = Some(CudaProfiler::start(&args.cuda_runtime)?);
+        }
         if completed == 1 || completed % args.log_every == 0 || completed == args.steps {
             println!(
                 "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} l1={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} train_ms={train_ms:.1}",
@@ -375,6 +417,7 @@ fn main() -> Result<()> {
             );
         }
     }
+    drop(profiler);
     pipeline.finish()?;
     if completed != args.steps {
         return Err(format!(
