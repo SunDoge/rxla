@@ -53,7 +53,8 @@ def main() -> None:
     )
     annotations: dict[int, list[dict]] = {}
     for annotation in document["annotations"]:
-        annotations.setdefault(annotation["image_id"], []).append(annotation)
+        if not annotation.get("iscrowd", 0):
+            annotations.setdefault(annotation["image_id"], []).append(annotation)
     images = random.Random(args.seed).sample(
         document["images"], min(args.samples, len(document["images"]))
     )
@@ -72,7 +73,13 @@ def main() -> None:
             labels = []
             for instance in instances:
                 x, y, width, height = instance["bbox"]
-                coordinates.extend((x, y, x + width, y + height))
+                x1 = max(0.0, x)
+                y1 = max(0.0, y)
+                x2 = min(float(image["width"]), x1 + max(0.0, width))
+                y2 = min(float(image["height"]), y1 + max(0.0, height))
+                if instance["area"] <= 0 or x2 < x1 or y2 < y1:
+                    continue
+                coordinates.extend((x1, y1, x2, y2))
                 labels.append(instance["category_id"])
             jpeg = (args.root / "train2017" / image["file_name"]).read_bytes()
             row = encoder.to_row(
@@ -88,12 +95,13 @@ def main() -> None:
             writer.write(row)
             encoded_bytes += len(row)
             image_bytes += len(jpeg)
-            boxes += len(instances)
+            boxes += len(labels)
     seconds = time.perf_counter() - started
 
     report = {
         "codec": "apache-fory-standard-row-1.7",
         "container": "tfrecord",
+        "annotation_policy": "yolox-coco-v1",
         "schema": schema,
         "schema_sha256": hashlib.sha256(schema.encode()).hexdigest(),
         "samples": len(images),

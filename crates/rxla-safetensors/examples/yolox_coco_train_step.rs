@@ -203,6 +203,8 @@ struct Coco {
 struct CocoImage {
     id: u64,
     file_name: String,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Deserialize)]
@@ -210,6 +212,7 @@ struct CocoAnnotation {
     image_id: u64,
     category_id: u64,
     bbox: [f32; 4],
+    area: f32,
     #[serde(default)]
     iscrowd: u8,
 }
@@ -223,6 +226,8 @@ struct CocoCategory {
 struct ForyManifest {
     codec: String,
     container: String,
+    #[serde(default)]
+    annotation_policy: String,
     schema_sha256: String,
     samples: usize,
 }
@@ -1822,6 +1827,7 @@ impl TrainingSource {
                 ))?;
                 if manifest.codec != "apache-fory-standard-row-1.7"
                     || manifest.container != "tfrecord"
+                    || manifest.annotation_policy != "yolox-coco-v1"
                     || manifest.schema_sha256 != DETECTION_SCHEMA_SHA256
                 {
                     return Err(format!(
@@ -1869,8 +1875,14 @@ impl TrainingSource {
                 let mut classes = Vec::new();
                 for &index in annotations.get(&image.id).into_iter().flatten() {
                     let annotation = &document.annotations[index];
-                    let [x, y, width, height] = annotation.bbox;
-                    boxes.push([x, y, x + width, y + height]);
+                    let Some(bbox) = clean_coco_bbox(
+                        annotation.bbox,
+                        annotation.area,
+                        [image.width, image.height],
+                    ) else {
+                        continue;
+                    };
+                    boxes.push(bbox);
                     classes.push(
                         *categories
                             .get(&annotation.category_id)
@@ -1907,7 +1919,7 @@ impl TrainingSource {
                     return Err("Fory detection row has inconsistent boxes and labels".into());
                 }
                 let dimensions = [u32::try_from(row.width()?)?, u32::try_from(row.height()?)?];
-                let boxes = (0..labels.len())
+                let decoded_boxes = (0..labels.len())
                     .map(|index| {
                         Ok([
                             boxes.get(index * 4)?,
@@ -1917,7 +1929,7 @@ impl TrainingSource {
                         ])
                     })
                     .collect::<std::result::Result<Vec<_>, fory::Error>>()?;
-                let classes = labels
+                let decoded_classes = labels
                     .iter()
                     .map(|label| {
                         let label = u64::try_from(label.map_err(|error| error.to_string())?)
@@ -1928,6 +1940,14 @@ impl TrainingSource {
                             .ok_or_else(|| format!("unknown COCO category {label}"))
                     })
                     .collect::<std::result::Result<Vec<_>, String>>()?;
+                let mut boxes = Vec::with_capacity(decoded_boxes.len());
+                let mut classes = Vec::with_capacity(decoded_classes.len());
+                for (bbox, class) in decoded_boxes.into_iter().zip(decoded_classes) {
+                    if let Some(bbox) = clean_xyxy_bbox(bbox, dimensions) {
+                        boxes.push(bbox);
+                        classes.push(class);
+                    }
+                }
                 Ok(Some(DetectionSample {
                     id: row.sample_id()?.to_owned(),
                     encoded_image: row.image()?.to_vec(),
@@ -1938,6 +1958,38 @@ impl TrainingSource {
             }
         }
     }
+}
+
+fn clean_coco_bbox(
+    [x, y, width, height]: [f32; 4],
+    area: f32,
+    [image_width, image_height]: [u32; 2],
+) -> Option<[f32; 4]> {
+    if ![x, y, width, height, area].into_iter().all(f32::is_finite) || area <= 0.0 {
+        return None;
+    }
+    let x1 = x.max(0.0);
+    let y1 = y.max(0.0);
+    clean_xyxy_bbox(
+        [x1, y1, x1 + width.max(0.0), y1 + height.max(0.0)],
+        [image_width, image_height],
+    )
+}
+
+fn clean_xyxy_bbox(
+    [x1, y1, x2, y2]: [f32; 4],
+    [image_width, image_height]: [u32; 2],
+) -> Option<[f32; 4]> {
+    if ![x1, y1, x2, y2].into_iter().all(f32::is_finite) {
+        return None;
+    }
+    let bbox = [
+        x1.max(0.0),
+        y1.max(0.0),
+        x2.min(image_width as f32),
+        y2.min(image_height as f32),
+    ];
+    (bbox[2] >= bbox[0] && bbox[3] >= bbox[1]).then_some(bbox)
 }
 
 fn category_map(ids: impl IntoIterator<Item = u64>) -> BTreeMap<u64, usize> {
@@ -2067,6 +2119,21 @@ mod tests {
         );
         assert_eq!(official_epoch_schedule(0, 64, 300), None);
         assert_eq!(official_epoch_schedule(118_287, 0, 300), None);
+    }
+
+    #[test]
+    fn coco_boxes_follow_the_official_cleaning_policy() {
+        assert_eq!(
+            clean_coco_bbox([-5.0, 3.0, 12.0, 20.0], 240.0, [10, 15]),
+            Some([0.0, 3.0, 10.0, 15.0])
+        );
+        assert_eq!(
+            clean_coco_bbox([1.0, 2.0, -3.0, 4.0], 1.0, [10, 10]),
+            Some([1.0, 2.0, 1.0, 6.0])
+        );
+        assert_eq!(clean_coco_bbox([1.0; 4], 0.0, [10, 10]), None);
+        assert_eq!(clean_coco_bbox([12.0, 1.0, 3.0, 3.0], 9.0, [10, 10]), None);
+        assert_eq!(clean_xyxy_bbox([0.0, 0.0, f32::NAN, 1.0], [10, 10]), None);
     }
 
     #[test]
@@ -2341,10 +2408,14 @@ mod tests {
                     CocoImage {
                         id: 1,
                         file_name: "one.jpg".to_owned(),
+                        width: 1,
+                        height: 1,
                     },
                     CocoImage {
                         id: 2,
                         file_name: "two.jpg".to_owned(),
+                        width: 1,
+                        height: 1,
                     },
                 ],
                 annotations: Vec::new(),

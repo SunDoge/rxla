@@ -209,8 +209,13 @@ cargo run -p rxla-safetensors --release --features model \
   tfrecord /data/datasets/coco2017-fory-4096.tfrecord
 ```
 
-The training reader requires the adjacent `.tfrecord.json` manifest and checks
-the container, Fory version, and schema hash before reading any records. Each
+The exporter applies the same COCO annotation policy as official YOLOX: crowd
+annotations are omitted, coordinates are clipped to the image, and invalid or
+zero-area annotations are discarded. The training reader requires the adjacent
+`.tfrecord.json` manifest and checks this policy in addition to the container,
+Fory version, and schema hash before reading any records. Older exports without
+`annotation_policy: "yolox-coco-v1"` must be regenerated rather than silently
+training on different targets. Each
 TFRecord length and payload CRC32C is then verified while streaming.
 The reader remains sequential; a deterministic bounded pool above the storage
 layer supplies randomized samples without seeking. This is also the sampling
@@ -273,6 +278,15 @@ mode its values are optimizer updates and the two final phases default to the
 same 15/300 fraction unless overridden separately. The 4,096-sample TFRecord
 used by microbenchmarks is intentionally not an accuracy-training dataset;
 accuracy runs need a manifest containing all of train2017.
+
+Create that full accuracy dataset explicitly with:
+
+```sh
+uv run --no-sync python benchmarks/fory_tfrecord.py \
+  /data/datasets/coco2017 \
+  /data/datasets/coco2017-train2017.tfrecord \
+  --samples 118287
+```
 
 To reconstruct the shuffle pool and variable Mosaic/MixUp consumption exactly,
 resume replays the sampling plan from the beginning without decoding or
