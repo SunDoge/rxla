@@ -8,8 +8,9 @@ use std::{
 
 use crate::generator::Result;
 
-const PUBLIC_PACKAGES: [&str; 7] = [
+const PUBLIC_PACKAGES: [&str; 8] = [
     "rxla-cache",
+    "rxla-log",
     "rxla-pjrt",
     "rxla-xla-proto",
     "rxla-ir",

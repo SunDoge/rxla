@@ -3,11 +3,18 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const BINDINGS: &str = "crates/rxla-pjrt/src/generated.rs";
 const PROTOS: &str = "crates/rxla-xla-proto/src/generated";
+const LOG_PROTO: &str = "crates/rxla-log/proto/rxla/log/v1/events.proto";
+const LOG_PROTOS: &str = "crates/rxla-log/src/generated";
+const LOG_DESCRIPTOR: &str = "crates/rxla-log/schema/events.desc";
+const PYTHON_LOG: &str = "python/rxla-log/src/rxla_log";
+const PYTHON_LOG_PROTO: &str = "python/rxla-log/src/rxla_log/events_pb2.py";
+const PYTHON_LOG_DESCRIPTOR: &str = "python/rxla-log/src/rxla_log/schema/events.desc";
 
 pub(crate) fn run(check_only: bool) -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -17,7 +24,7 @@ pub(crate) fn run(check_only: bool) -> Result<()> {
     // Generate everything successfully before considering any source-tree write.
     // TempDir removes temporary artifacts on both success and ordinary failure.
     let temporary = tempfile::tempdir()?;
-    generate(&root.join("vendor"), temporary.path())?;
+    generate(&root, &root.join("vendor"), temporary.path())?;
     let expected = inventory(temporary.path())?;
     let actual = inventory(&root)?;
     let differences = differences(&expected, &actual);
@@ -54,7 +61,7 @@ pub(crate) fn run(check_only: bool) -> Result<()> {
     Ok(())
 }
 
-fn generate(vendor: &Path, output: &Path) -> Result<()> {
+fn generate(root: &Path, vendor: &Path, output: &Path) -> Result<()> {
     fs::create_dir_all(output.join("crates/rxla-pjrt/src"))?;
     fs::create_dir_all(output.join(PROTOS))?;
     let bindings = bindgen::Builder::default()
@@ -93,6 +100,36 @@ fn generate(vendor: &Path, output: &Path) -> Result<()> {
         }
     }
     config.compile_fds(descriptors)?;
+
+    let protoc = protoc_bin_vendored::protoc_bin_path()?;
+    let log_proto = root.join(LOG_PROTO);
+    let log_include = log_proto.parent().unwrap();
+    fs::create_dir_all(output.join(LOG_PROTOS))?;
+    fs::create_dir_all(output.join("crates/rxla-log/schema"))?;
+    let mut log_config = prost_build::Config::new();
+    log_config.protoc_executable(&protoc);
+    log_config.out_dir(output.join(LOG_PROTOS));
+    log_config.file_descriptor_set_path(output.join(LOG_DESCRIPTOR));
+    log_config.compile_protos(&[log_proto.clone()], &[log_include])?;
+
+    fs::create_dir_all(output.join(PYTHON_LOG).join("schema"))?;
+    let status = Command::new(protoc)
+        .arg("-I")
+        .arg(log_include)
+        .arg(format!(
+            "--python_out={}",
+            output.join(PYTHON_LOG).display()
+        ))
+        .arg(format!(
+            "--descriptor_set_out={}",
+            output.join(PYTHON_LOG_DESCRIPTOR).display()
+        ))
+        .arg("--include_imports")
+        .arg(log_proto)
+        .status()?;
+    if !status.success() {
+        return Err("protoc failed to generate rxla-log Python sources".into());
+    }
     Ok(())
 }
 
@@ -115,7 +152,37 @@ fn inventory(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
             files.insert(relative, fs::read(entry.path())?);
         }
     }
+    collect_generated(root, Path::new(LOG_PROTOS), &mut files)?;
+    for path in [LOG_DESCRIPTOR, PYTHON_LOG_PROTO, PYTHON_LOG_DESCRIPTOR] {
+        if root.join(path).try_exists()? {
+            files.insert(PathBuf::from(path), fs::read(root.join(path))?);
+        }
+    }
     Ok(files)
+}
+
+fn collect_generated(
+    root: &Path,
+    relative: &Path,
+    files: &mut BTreeMap<PathBuf, Vec<u8>>,
+) -> Result<()> {
+    if !root.join(relative).try_exists()? {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root.join(relative))? {
+        let entry = entry?;
+        let path = relative.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            collect_generated(root, &path, files)?;
+        } else if matches!(
+            entry.path().extension().and_then(|value| value.to_str()),
+            Some("rs" | "py" | "desc")
+        ) && !entry.file_name().to_string_lossy().starts_with("__init__")
+        {
+            files.insert(path, fs::read(entry.path())?);
+        }
+    }
+    Ok(())
 }
 
 fn differences(

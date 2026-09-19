@@ -3,3 +3,7 @@
 **/target/
 *.swp
 .cache/
+**/__pycache__/
+**/.pytest_cache/
+**/.venv/
+**/dist/

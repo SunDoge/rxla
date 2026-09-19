@@ -1,0 +1,16 @@
+[package]
+name = "rxla-log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Structured, indexed training logs backed by MCAP"
+
+[dependencies]
+mcap = { workspace = true }
+prost = { workspace = true }
+snafu = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

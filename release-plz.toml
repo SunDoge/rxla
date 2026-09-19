@@ -12,6 +12,10 @@ name = "rxla-cache"
 version_group = "rxla"
 
 [[package]]
+name = "rxla-log"
+version_group = "rxla"
+
+[[package]]
 name = "rxla-pjrt"
 version_group = "rxla"
 

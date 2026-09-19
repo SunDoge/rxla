@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package rxla.log.v1;
+
+message Metric {
+  string name = 1;
+  oneof value {
+    double scalar = 2;
+    sint64 integer = 3;
+    bool boolean = 4;
+    string text = 5;
+    bytes binary = 6;
+  }
+  optional string unit = 7;
+}
+
+message RunStarted {
+  string run_id = 1;
+  string model = 2;
+  string producer = 3;
+  repeated Metric metadata = 4;
+}
+
+message RunFinished {
+  string run_id = 1;
+  uint64 final_step = 2;
+  bool succeeded = 3;
+  optional string message = 4;
+}
+
+message TrainStep {
+  uint64 step = 1;
+  uint64 epoch = 2;
+  uint64 samples_seen = 3;
+  double loss = 4;
+  double learning_rate = 5;
+  repeated Metric metrics = 6;
+  uint64 elapsed_ns = 7;
+}
+
+message Evaluation {
+  uint64 step = 1;
+  string dataset = 2;
+  repeated Metric metrics = 3;
+}
+
+message SystemMetrics {
+  uint64 step = 1;
+  repeated Metric metrics = 2;
+}
+
+message ProfileSpan {
+  string name = 1;
+  uint64 start_ns = 2;
+  uint64 duration_ns = 3;
+  repeated Metric attributes = 4;
+}
+
+message CheckpointPublished {
+  uint64 step = 1;
+  string uri = 2;
+  optional string digest = 3;
+  uint64 byte_length = 4;
+}
+
+message Diagnostic {
+  enum Severity {
+    SEVERITY_UNSPECIFIED = 0;
+    SEVERITY_DEBUG = 1;
+    SEVERITY_INFO = 2;
+    SEVERITY_WARNING = 3;
+    SEVERITY_ERROR = 4;
+  }
+  Severity severity = 1;
+  string message = 2;
+  repeated Metric attributes = 3;
+}

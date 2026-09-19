@@ -119,6 +119,7 @@ The foundational crates are:
 - `rxla-pjrt`: low-level PJRT client and buffer interface.
 - `rxla-xla-proto`: typed XLA configuration and artifact protobufs.
 - `rxla-cache`: filesystem compilation cache primitives.
+- `rxla-log`: indexed Protobuf/MCAP logs shared by Rust and Python.
 - `rxla-nn`: typed model handlers, parameter/state effects, schemas, and
   neural-network operations.
 
@@ -177,6 +178,7 @@ crates.io publishing.
 - [Distributed PJRT and NCCL](docs/PJRT-DISTRIBUTED.md)
 - [MLX layout review](docs/MLX-LAYOUT-REVIEW.md)
 - [Portable model artifact format](docs/MODEL-ARTIFACT-FORMAT.md)
+- [Structured Protobuf/MCAP logging](docs/STRUCTURED-LOGGING.md)
 - [Deployment notes](docs/DEPLOYMENT.md)
 - [Offline Mosaic GPU kernel artifacts](docs/MOSAIC-GPU.md)
 - [Profiling guide](docs/PROFILING.md)

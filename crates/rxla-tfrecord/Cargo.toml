@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 description = "TFRecord integration for RXLA datasets, logs, and storage backends"
+publish = false
 
 [dependencies]
 tfrecord-lite = { workspace = true }
