@@ -196,6 +196,15 @@ faster for this graph. Closing the gap therefore requires a better convolution
 plan rather than merely making XLA classify the operation as dgrad; a
 depthwise-only kernel would not help this model.
 
+Two narrower canonicalization experiments were also rejected. Using the dgrad
+form only for 13x13, 3x3, ungrouped input gradients measured 23.4--24.8 ms and
+278.7 images/s, still below the retained end-to-end baseline. Explicitly
+transposing checkpoint-native OIHW parameters to JAX-style HWIO before every
+convolution measured 22.9--24.4 ms and 272.7 images/s. This indicates that XLA
+already canonicalizes the OIHW dimension numbers adequately; neither a
+model-shape heuristic nor extra layout operations justify permanent API or IR
+complexity.
+
 RXLA now independently preserves genuinely grouped input gradients as one
 `feature_group_count` StableHLO convolution instead of expanding a Rust loop.
 CPU scalar-gradient and higher-order tests verify that lowering, but it is an
