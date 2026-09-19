@@ -157,6 +157,14 @@ official-compatible PyTorch eager benchmark with 12 synthetic targets per image
 measured 23.87 ms in F32 and 26.61 ms under BF16 autocast. These are useful
 device baselines, not a strict data-pipeline comparison.
 
+The input boundary now preserves decoded images as U8 through host batching and
+PCIe transfer, then performs the exact U8-to-F32 conversion in the compiled
+graph. Together with row-wise Mosaic copies, a 100-step real-data run sustained
+214.4 images/s (3.731 seconds for 800 images). Steady device steps were
+23.8–25.2 ms, while observed Mosaic preparation fell to 35.3–38.6 ms; producer
+wait was still 7.8–12.2 ms. The next throughput limit is therefore host-side
+decode/augmentation, not YOLOX CUDA compute.
+
 The exported checkpoint was then loaded by the 416×416 inference example on
 both CPU and CUDA. CUDA inference measured 9.4 ms after compilation and produced
 the same 15 decoded detections as CPU for the validation image used in the test.

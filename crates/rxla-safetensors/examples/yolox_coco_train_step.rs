@@ -149,7 +149,7 @@ struct DetectionSample {
 
 struct PreparedBatch {
     sample_ids: Vec<String>,
-    pixels: Vec<f32>,
+    pixels: Vec<u8>,
     targets: Vec<DetectionTarget>,
     load_ms: f64,
 }
@@ -239,6 +239,7 @@ fn main() -> Result<()> {
               target_valid: Tensor,
               learning_rate: Tensor,
               l1_weight: Tensor| {
+            let image = image.cast(DType::F32)?;
             let outputs = yolo(cx, &image, &training_config)?;
             let assignments = yolox_simota(
                 &outputs,
@@ -268,7 +269,7 @@ fn main() -> Result<()> {
         },
     )
     .inputs((
-        ModelInput::new([batch, args.size, args.size, 3]),
+        ModelInput::new([batch, args.size, args.size, 3]).with_dtype(DType::U8),
         ModelInput::new([batch, MAX_TARGETS as i64, 4]),
         ModelInput::new([batch, MAX_TARGETS as i64, 80]),
         ModelInput::new([batch, MAX_TARGETS as i64, 1]),
@@ -536,7 +537,7 @@ fn prepare_single(
     size: u32,
     batch: usize,
     rng: SampleRng,
-) -> std::result::Result<(String, Vec<f32>, Vec<DetectionTarget>), String> {
+) -> std::result::Result<(String, Vec<u8>, Vec<DetectionTarget>), String> {
     let mut image = decode_sample(&sample)?;
     let mut boxes = sample.boxes.clone();
     train_transform(&mut image, &mut boxes, rng);
@@ -551,7 +552,7 @@ fn prepare_mosaic(
     size: u32,
     batch: usize,
     rng: SampleRng,
-) -> std::result::Result<(String, Vec<f32>, Vec<DetectionTarget>), String> {
+) -> std::result::Result<(String, Vec<u8>, Vec<DetectionTarget>), String> {
     let canvas_size = size * 2;
     let center_x = (size as f32 * (0.5 + rng.uniform(1, 0))) as i32;
     let center_y = (size as f32 * (0.5 + rng.uniform(1, 1))) as i32;
@@ -576,12 +577,15 @@ fn prepare_mosaic(
         );
         let [lx1, ly1, lx2, ly2] = large;
         let [sx1, sy1, _, _] = small;
-        for y in ly1..ly2 {
-            for x in lx1..lx2 {
-                let pixel = resized.get_pixel((sx1 + x - lx1) as u32, (sy1 + y - ly1) as u32);
-                canvas.put_pixel(x as u32, y as u32, *pixel);
-            }
-        }
+        let crop = image::imageops::crop_imm(
+            &resized,
+            sx1 as u32,
+            sy1 as u32,
+            (lx2 - lx1) as u32,
+            (ly2 - ly1) as u32,
+        )
+        .to_image();
+        image::imageops::replace(&mut canvas, &crop, i64::from(lx1), i64::from(ly1));
         let pad_x = (lx1 - sx1) as f32;
         let pad_y = (ly1 - sy1) as f32;
         for (bbox, class) in sample.boxes.iter().zip(&sample.classes) {
@@ -613,7 +617,7 @@ fn prepare_mosaic(
         ids.join("+"),
         image
             .pixels()
-            .flat_map(|pixel| pixel.0.into_iter().rev().map(f32::from))
+            .flat_map(|pixel| pixel.0.into_iter().rev())
             .collect(),
         targets,
     ))
@@ -1148,19 +1152,15 @@ fn padded_targets(
     Ok((boxes, one_hot, valid))
 }
 
-fn letterbox(image: &RgbImage, size: u32) -> (Vec<f32>, f32) {
+fn letterbox(image: &RgbImage, size: u32) -> (Vec<u8>, f32) {
     let ratio = (size as f32 / image.width() as f32).min(size as f32 / image.height() as f32);
     let width = (image.width() as f32 * ratio) as u32;
     let height = (image.height() as f32 * ratio) as u32;
     let resized = image::imageops::resize(image, width, height, FilterType::Triangle);
-    let mut output = vec![114.0; (size * size * 3) as usize];
+    let mut output = vec![114; (size * size * 3) as usize];
     for (x, y, pixel) in resized.enumerate_pixels() {
         let offset = ((y * size + x) * 3) as usize;
-        output[offset..offset + 3].copy_from_slice(&[
-            f32::from(pixel[2]),
-            f32::from(pixel[1]),
-            f32::from(pixel[0]),
-        ]);
+        output[offset..offset + 3].copy_from_slice(&[pixel[2], pixel[1], pixel[0]]);
     }
     (output, ratio)
 }
