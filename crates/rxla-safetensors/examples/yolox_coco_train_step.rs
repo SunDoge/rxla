@@ -10,11 +10,11 @@ use rxla_models::{
     yolox_simota,
 };
 use rxla_nn::{Cx, Model, ModelInput};
-use rxla_safetensors::{SafeTensors, save_model_new};
+use rxla_safetensors::{SafeTensors, save_buffers_new, save_model_new};
 use rxla_tfrecord::Reader as TfrecordReader;
 use rxla_train::{
     BoundedPipeline, DataRng, DetectionTarget, SampleRng, SgdOptions, ShufflePool, YoloLrSchedule,
-    apply_model_sgd_with_learning_rate,
+    apply_model_ema, apply_model_sgd_with_learning_rate,
 };
 use serde::Deserialize;
 use std::{
@@ -83,6 +83,9 @@ struct Args {
     /// Disable XLA CUDA command buffers and launch kernels directly.
     #[arg(long)]
     direct_launches: bool,
+    /// Disable the official YOLOX parameter EMA, primarily for profiling.
+    #[arg(long)]
+    disable_model_ema: bool,
     /// Override warmup duration (default: 5/300 of all steps).
     #[arg(long)]
     warmup_steps: Option<usize>,
@@ -385,6 +388,11 @@ fn main() -> Result<()> {
                 .weight_decay(if decay { 5e-4 } else { 0.0 })
         },
     )?;
+    let model_ema = if args.disable_model_ema {
+        None
+    } else {
+        Some(apply_model_ema(&mut training, &trainable, 0.9998)?)
+    };
     let train_compile_started = Instant::now();
     let program = training.compile_stateful_tensors(&mut compiler, &[metrics])?;
     let train_compile_ms = train_compile_started.elapsed().as_secs_f64() * 1e3;
@@ -485,7 +493,42 @@ fn main() -> Result<()> {
         ])
         .into_iter()
         .collect();
-        save_model_new(output, &training, &training_session, Some(&metadata))?;
+        if let Some(model_ema) = &model_ema {
+            // EMA is packed into one device state to keep the hot step to one
+            // bandwidth-sized update. Checkpointing is cold-path work, so split
+            // it only once here before writing canonical parameter tensors.
+            let packed = model_ema
+                .packed_buffer(&training_session)?
+                .to_vec::<f32>()?;
+            let ema_buffers = model_ema
+                .parameters()
+                .iter()
+                .map(|parameter| {
+                    Ok((
+                        parameter.path().to_owned(),
+                        client.buffer(parameter.shape(), &packed[parameter.range()])?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut buffers = ema_buffers
+                .iter()
+                .map(|(path, buffer)| (path.as_str(), buffer))
+                .collect::<Vec<_>>();
+            let states = training
+                .state_buffers(&training_session)?
+                .into_iter()
+                .collect::<HashMap<_, _>>();
+            for spec in training.schema().states() {
+                let buffer = states
+                    .get(spec.path())
+                    .copied()
+                    .ok_or_else(|| format!("missing model state {:?}", spec.path()))?;
+                buffers.push((spec.path(), buffer));
+            }
+            save_buffers_new(output, &buffers, Some(&metadata))?;
+        } else {
+            save_model_new(output, &training, &training_session, Some(&metadata))?;
+        }
     }
     println!(
         "completed={completed} images={} run_ms={:.1} images_per_second={:.1} train_compile_ms={train_compile_ms:.1}",

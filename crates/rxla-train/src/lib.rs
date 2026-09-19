@@ -12,6 +12,8 @@ pub use model_adam::{
     AdamOptions, ModelAdamError, ModelAdamOutputPlan, ModelAdamResult, ModelAdamState,
     ModelAdamStep, ModelAdamUpdate, apply_model_adam, prepare_model_adam,
 };
+mod model_ema;
+pub use model_ema::{ModelEma, ModelEmaError, ModelEmaParameter, ModelEmaResult, apply_model_ema};
 mod model_sgd;
 pub use model_sgd::{
     ModelSgdError, ModelSgdOutputPlan, ModelSgdResult, ModelSgdStep, ModelSgdUpdate, SgdOptions,

@@ -550,6 +550,29 @@ impl AppliedModel {
             .collect())
     }
 
+    /// Clone the current symbolic values of selected resident parameters.
+    ///
+    /// Unlike [`Self::parameter_tensors`], this observes writes already recorded
+    /// by an optimizer or another graph transform. This is the correct view for
+    /// transforms such as EMA that must consume the post-update parameters in
+    /// the same compiled device program.
+    pub fn current_resident_parameter_tensors(
+        &self,
+        selection: &ParameterSelection,
+    ) -> Result<Vec<Tensor>> {
+        self.validate_resident_parameters(selection)?;
+        selection
+            .ids()
+            .iter()
+            .map(|id| {
+                let slot = self.resident_parameters[id.index()]
+                    .as_ref()
+                    .expect("resident selection validated");
+                Ok(self.state_graph.read(slot)?)
+            })
+            .collect()
+    }
+
     /// Append named resident state owned by a graph transformation.
     ///
     /// Unlike a model `Cx::state` effect, this does not modify `ModelSchema` or

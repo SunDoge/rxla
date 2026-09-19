@@ -196,6 +196,20 @@ steady device observations were `10.8–12.4 ms`. This is within the observed
 run-to-run range of the earlier `513.6 images/s` host-pipeline result rather
 than evidence of a separate end-to-end gain.
 
+The real trainer now enables the official YOLOX parameter EMA by default,
+including its `0.9998 * (1 - exp(-updates / 2000))` decay ramp. SGD and EMA are
+one stateful device program, with no parameter download between them; the
+export path writes EMA parameters under their canonical model names. The EMA
+values are packed into one logical F32 vector for the hot update and split only
+when a checkpoint is requested. On the same seeded 100-step BF16 workload, the
+initial per-parameter implementation reached `447.6 images/s`; packing raised
+that to `470.6 images/s`, versus `492.6 images/s` with
+`--disable-model-ema`. Late observed device time was `11.0 ms` with packed EMA,
+equal to that particular no-EMA run, while total throughput still includes
+first-step and host scheduling variance. BatchNorm running state currently
+remains the live training value in exported checkpoints rather than an EMA
+copy.
+
 Run the comparable RXLA side with:
 
 ```sh
