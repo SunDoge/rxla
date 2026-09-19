@@ -15,12 +15,13 @@ pub use model_adam::{
 mod model_ema;
 pub use model_ema::{
     ModelEma, ModelEmaError, ModelEmaParameter, ModelEmaResult, ModelEmaState, apply_model_ema,
+    apply_model_ema_when,
 };
 mod model_sgd;
 pub use model_sgd::{
-    ModelSgdError, ModelSgdOutputPlan, ModelSgdResult, ModelSgdStep, ModelSgdUpdate, SgdOptions,
-    apply_model_sgd, apply_model_sgd_with_learning_rate, apply_model_sgd_with_options,
-    prepare_model_sgd,
+    ModelSgdAccumulation, ModelSgdError, ModelSgdOutputPlan, ModelSgdResult, ModelSgdStep,
+    ModelSgdUpdate, SgdOptions, apply_model_sgd, apply_model_sgd_accumulating_with_learning_rate,
+    apply_model_sgd_with_learning_rate, apply_model_sgd_with_options, prepare_model_sgd,
 };
 mod pipeline;
 pub use pipeline::{BoundedPipeline, PipelineError, PipelineResult, ShufflePool};

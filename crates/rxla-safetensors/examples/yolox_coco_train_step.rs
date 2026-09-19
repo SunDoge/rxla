@@ -20,7 +20,8 @@ use rxla_safetensors::{SafeTensors, save_buffers_new, save_model_new, save_train
 use rxla_tfrecord::Reader as TfrecordReader;
 use rxla_train::{
     BoundedPipeline, DataRng, DetectionTarget, ModelEma, SampleRng, SgdOptions, ShufflePool,
-    YoloLrSchedule, apply_model_ema, apply_model_sgd_with_learning_rate,
+    YoloLrSchedule, apply_model_ema, apply_model_ema_when,
+    apply_model_sgd_accumulating_with_learning_rate, apply_model_sgd_with_learning_rate,
 };
 use serde::Deserialize;
 use std::{
@@ -68,6 +69,9 @@ struct Args {
     size: i64,
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
+    /// Microbatches averaged before each optimizer and EMA update.
+    #[arg(long, default_value_t = 1)]
+    gradient_accumulation: usize,
     /// Per-image padded target capacity; official YOLOX uses 120.
     #[arg(long, default_value_t = MAX_TARGETS)]
     target_capacity: usize,
@@ -244,6 +248,17 @@ struct TrainingVariant {
     ema: Option<ModelEma>,
 }
 
+#[derive(Clone, Copy)]
+struct TrainingVariantConfig {
+    batch: i64,
+    augmentation_size: i64,
+    size: i64,
+    target_capacity: i64,
+    model: YoloConfig,
+    use_ema: bool,
+    gradient_accumulation: usize,
+}
+
 struct CudaProfiler {
     _library: libloading::Library,
     stop: unsafe extern "C" fn() -> i32,
@@ -342,13 +357,17 @@ fn training_sizes(
 
 fn build_training_variant(
     compiler: &mut Compiler,
-    batch: i64,
-    augmentation_size: i64,
-    size: i64,
-    target_capacity: i64,
-    config: YoloConfig,
-    use_ema: bool,
+    config: TrainingVariantConfig,
 ) -> Result<TrainingVariant> {
+    let TrainingVariantConfig {
+        batch,
+        augmentation_size,
+        size,
+        target_capacity,
+        model: model_config,
+        use_ema,
+        gradient_accumulation,
+    } = config;
     let definition = Model::new(
         move |cx: Cx,
               image: Tensor,
@@ -363,7 +382,7 @@ fn build_training_variant(
                 image = image.resize_bilinear2d([size, size])?;
                 target_boxes = target_boxes.mul_scalar(size as f32 / augmentation_size as f32)?;
             }
-            let outputs = yolo(cx, &image, &config)?;
+            let outputs = yolo(cx, &image, &model_config)?;
             let targets = YoloTargets {
                 boxes: target_boxes,
                 class_indices: target_classes,
@@ -401,23 +420,36 @@ fn build_training_variant(
     let metrics = Tensor::stack(&model.outputs()[..6], 0)?;
     let loss = model.outputs()[0].clone();
     let learning_rate = model.outputs()[6].clone();
-    apply_model_sgd_with_learning_rate(
-        &mut model,
-        &trainable,
-        &loss,
-        &learning_rate,
-        |parameter| {
-            let decay =
-                parameter.path().ends_with(".weight") && !parameter.path().contains(".bn.weight");
-            SgdOptions::default()
-                .momentum(0.9)
-                .nesterov(true)
-                .weight_decay(if decay { 5e-4 } else { 0.0 })
-        },
-    )?;
-    let ema = use_ema
-        .then(|| apply_model_ema(&mut model, &trainable, 0.9998))
-        .transpose()?;
+    let options = |parameter: &rxla_nn::ParameterSpec| {
+        let decay =
+            parameter.path().ends_with(".weight") && !parameter.path().contains(".bn.weight");
+        SgdOptions::default()
+            .momentum(0.9)
+            .nesterov(true)
+            .weight_decay(if decay { 5e-4 } else { 0.0 })
+    };
+    let accumulation = if gradient_accumulation == 1 {
+        apply_model_sgd_with_learning_rate(&mut model, &trainable, &loss, &learning_rate, options)?;
+        None
+    } else {
+        Some(apply_model_sgd_accumulating_with_learning_rate(
+            &mut model,
+            &trainable,
+            &loss,
+            &learning_rate,
+            gradient_accumulation,
+            options,
+        )?)
+    };
+    let ema = if use_ema {
+        Some(if let Some(accumulation) = &accumulation {
+            apply_model_ema_when(&mut model, &trainable, 0.9998, accumulation.applied())?
+        } else {
+            apply_model_ema(&mut model, &trainable, 0.9998)?
+        })
+    } else {
+        None
+    };
     let program = model.compile_stateful_tensors(compiler, &[metrics])?;
     Ok(TrainingVariant {
         model,
@@ -438,6 +470,10 @@ fn training_metadata(
         ("completed_steps", completed_steps.to_string()),
         ("total_steps", args.steps.to_string()),
         ("batch_size", args.batch_size.to_string()),
+        (
+            "gradient_accumulation",
+            args.gradient_accumulation.to_string(),
+        ),
         ("target_capacity", args.target_capacity.to_string()),
         ("base_learning_rate", base_learning_rate.to_string()),
         ("warmup_steps", warmup_steps.to_string()),
@@ -504,6 +540,11 @@ fn resume_step(
             // used the official capacity and remain exactly compatible.
             continue;
         }
+        if key == "gradient_accumulation" && value == "1" && !metadata.contains_key(&key) {
+            // Training-v2 snapshots written before accumulation support imply
+            // one optimizer update per batch.
+            continue;
+        }
         if metadata.get(&key) != Some(&value) {
             return Err(
                 format!("training snapshot metadata {key:?} does not match this run").into(),
@@ -524,6 +565,7 @@ fn main() -> Result<()> {
         || args.run_steps == Some(0)
         || args.log_every == 0
         || args.batch_size == 0
+        || args.gradient_accumulation == 0
         || !(1..=MAX_TARGETS).contains(&args.target_capacity)
         || args.prefetch == 0
         || args.augmentation_workers == 0
@@ -540,7 +582,7 @@ fn main() -> Result<()> {
                 .into(),
         );
     }
-    let step_sizes = training_sizes(
+    let optimizer_step_sizes = training_sizes(
         u32::try_from(args.size)?,
         args.steps,
         args.seed,
@@ -548,9 +590,21 @@ fn main() -> Result<()> {
         args.random_size_min,
         args.random_size_max,
     );
+    let total_micro_steps = args
+        .steps
+        .checked_mul(args.gradient_accumulation)
+        .ok_or("training microstep count overflow")?;
+    let step_sizes = optimizer_step_sizes
+        .into_iter()
+        .flat_map(|size| std::iter::repeat_n(size, args.gradient_accumulation))
+        .collect::<Vec<_>>();
+    let effective_batch_size = args
+        .batch_size
+        .checked_mul(args.gradient_accumulation)
+        .ok_or("effective batch size overflow")?;
     let base_learning_rate = args
         .learning_rate
-        .unwrap_or_else(|| default_learning_rate(args.batch_size));
+        .unwrap_or_else(|| default_learning_rate(effective_batch_size));
     let no_augmentation_steps = args.no_augmentation_steps.unwrap_or(args.steps / 20);
     let warmup_steps = args.warmup_steps.unwrap_or(args.steps / 60);
     if warmup_steps + no_augmentation_steps > args.steps {
@@ -566,9 +620,12 @@ fn main() -> Result<()> {
     let samples = ShufflePool::new(SourceSamples(source), args.shuffle_buffer, args.seed)?;
     let mut batches = PlannedBatches {
         samples,
-        remaining: args.steps,
+        remaining: total_micro_steps,
         step: 0,
-        mosaic_steps: args.steps.saturating_sub(no_augmentation_steps),
+        mosaic_steps: args
+            .steps
+            .saturating_sub(no_augmentation_steps)
+            .saturating_mul(args.gradient_accumulation),
         mosaic_probability: args.mosaic_probability,
         mixup_probability: args.mixup_probability,
         batch_size: args.batch_size,
@@ -576,15 +633,22 @@ fn main() -> Result<()> {
         rng: DataRng::new(args.seed),
     };
     let replay_started = Instant::now();
-    for step in 0..resumed_at {
+    let replay_micro_steps = resumed_at
+        .checked_mul(args.gradient_accumulation)
+        .ok_or("resume microstep count overflow")?;
+    for step in 0..replay_micro_steps {
         batches
             .next()
             .ok_or_else(|| format!("training data ended while replaying step {step}"))??;
     }
     if let Some(run_steps) = args.run_steps {
-        batches.remaining = batches.remaining.min(run_steps);
+        let run_micro_steps = run_steps
+            .checked_mul(args.gradient_accumulation)
+            .ok_or("run microstep count overflow")?;
+        batches.remaining = batches.remaining.min(run_micro_steps);
     }
-    let expected_completed = resumed_at + batches.remaining;
+    let expected_micro_steps = replay_micro_steps + batches.remaining;
+    let expected_completed = expected_micro_steps / args.gradient_accumulation;
     let replay_ms = replay_started.elapsed().as_secs_f64() * 1e3;
     // Host input preparation starts before XLA compilation so initial pool fill
     // and the first augmented batches are normally hidden by compilation.
@@ -633,25 +697,28 @@ fn main() -> Result<()> {
         .convolution_precision(convolution_precision);
     let train_compile_started = Instant::now();
     let mut variants = BTreeMap::new();
-    let active_sizes = if resumed_at < expected_completed {
-        &step_sizes[resumed_at..expected_completed]
+    let active_sizes = if replay_micro_steps < expected_micro_steps {
+        &step_sizes[replay_micro_steps..expected_micro_steps]
     } else {
-        &step_sizes[args.steps - 1..]
+        &step_sizes[total_micro_steps - 1..]
     };
     for size in active_sizes.iter().copied().collect::<BTreeSet<_>>() {
         let variant = build_training_variant(
             &mut compiler,
-            batch,
-            args.size,
-            i64::from(size),
-            i64::try_from(args.target_capacity)?,
-            training_config,
-            !args.disable_model_ema,
+            TrainingVariantConfig {
+                batch,
+                augmentation_size: args.size,
+                size: i64::from(size),
+                target_capacity: i64::try_from(args.target_capacity)?,
+                model: training_config,
+                use_ema: !args.disable_model_ema,
+                gradient_accumulation: args.gradient_accumulation,
+            },
         )?;
         variants.insert(size, variant);
     }
     let train_compile_ms = train_compile_started.elapsed().as_secs_f64() * 1e3;
-    let mut current_size = step_sizes[resumed_at.min(args.steps - 1)];
+    let mut current_size = step_sizes[replay_micro_steps.min(total_micro_steps - 1)];
     let initial = variants
         .get(&current_size)
         .expect("the first scheduled size was compiled");
@@ -687,6 +754,7 @@ fn main() -> Result<()> {
         client.buffer(&[], &[1.0_f32])?,
     ];
     let mut completed = resumed_at;
+    let mut completed_micro_steps = replay_micro_steps;
     let mut maximum_targets_per_image = 0;
     let mut dropped_targets = 0;
     let mut warned_about_dropped_targets = false;
@@ -764,10 +832,15 @@ fn main() -> Result<()> {
             &learning_rate,
             l1_weight,
         ])?;
-        completed += 1;
-        let observe = completed == resumed_at + 1
-            || completed % args.log_every == 0
-            || completed == args.steps;
+        completed_micro_steps += 1;
+        let optimizer_step = completed_micro_steps % args.gradient_accumulation == 0;
+        if optimizer_step {
+            completed += 1;
+        }
+        let observe = optimizer_step
+            && (completed == resumed_at + 1
+                || completed % args.log_every == 0
+                || completed == expected_completed);
         let losses = if observe {
             let losses = outputs[0].to_vec::<f32>()?;
             if losses.len() != 6 || losses.iter().any(|value| !value.is_finite()) {
@@ -779,7 +852,7 @@ fn main() -> Result<()> {
         };
         let train_ms = train_started.elapsed().as_secs_f64() * 1e3;
         total_train_ms += train_ms;
-        if completed == resumed_at + 1 && args.cuda_profile {
+        if optimizer_step && completed == resumed_at + 1 && args.cuda_profile {
             profiler = Some(CudaProfiler::start(&args.cuda_runtime)?);
         }
         if let Some(losses) = losses {
@@ -801,9 +874,12 @@ fn main() -> Result<()> {
     }
     drop(profiler);
     pipeline.finish()?;
-    if completed != expected_completed {
+    if completed_micro_steps != expected_micro_steps || completed != expected_completed {
         return Err(
-            format!("training stopped at step {completed}, expected {expected_completed}").into(),
+            format!(
+                "training stopped at optimizer step {completed} / microstep {completed_micro_steps}, expected {expected_completed} / {expected_micro_steps}"
+            )
+            .into(),
         );
     }
     let run_seconds = run_started.elapsed().as_secs_f64();
@@ -880,15 +956,16 @@ fn main() -> Result<()> {
         save_training_state_new(output, &current.model, &training_session, Some(&metadata))?;
     }
     let cache = compiler.stats();
-    let executed = completed - resumed_at;
-    let executed_f64 = executed as f64;
+    let executed_micro_steps = completed_micro_steps - replay_micro_steps;
+    let executed_f64 = executed_micro_steps as f64;
     println!(
-        "completed={completed} resumed_at={resumed_at} images={} augmentation_workers={} prefetch={} maximum_targets_per_image={maximum_targets_per_image} dropped_targets={dropped_targets} run_ms={:.1} images_per_second={:.1} mean_wait_ms={:.3} mean_load_ms={:.3} mean_staging_ms={:.3} mean_image_upload_ms={:.3} mean_train_ms={:.3} replay_ms={replay_ms:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
-        executed * args.batch_size,
+        "completed={completed} resumed_at={resumed_at} microsteps={completed_micro_steps} gradient_accumulation={} images={} augmentation_workers={} prefetch={} maximum_targets_per_image={maximum_targets_per_image} dropped_targets={dropped_targets} run_ms={:.1} images_per_second={:.1} mean_wait_ms={:.3} mean_load_ms={:.3} mean_staging_ms={:.3} mean_image_upload_ms={:.3} mean_train_ms={:.3} replay_ms={replay_ms:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
+        args.gradient_accumulation,
+        executed_micro_steps * args.batch_size,
         args.augmentation_workers,
         args.prefetch,
         run_seconds * 1e3,
-        executed as f64 * args.batch_size as f64 / run_seconds,
+        executed_micro_steps as f64 * args.batch_size as f64 / run_seconds,
         total_wait_ms / executed_f64,
         total_load_ms / executed_f64,
         total_staging_ms / executed_f64,

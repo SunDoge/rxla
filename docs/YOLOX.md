@@ -129,9 +129,20 @@ checkpoint excludes optimizer moments but includes parameters and model
 BatchNorm state, so it can be passed directly to `yolox_infer`.
 
 The default total learning rate follows the official trainer and scales
-`basic_lr_per_img = 0.01 / 64` by the local batch size. For example, batch 8
-uses `0.00125`. An explicit `--learning-rate` overrides the resulting total
-optimizer rate rather than the per-image constant.
+`basic_lr_per_img = 0.01 / 64` by the effective batch size. For example,
+`--batch-size 8 --gradient-accumulation 8` represents batch 64 and uses `0.01`.
+An explicit `--learning-rate` overrides the resulting total optimizer rate
+rather than the per-image constant.
+
+Gradient accumulation is part of the compiled stateful transform, not a host
+approximation. Each microbatch adds to resident F32 gradient buffers. Only the
+last microbatch divides the sum by `--gradient-accumulation`, applies weight
+decay and Nesterov momentum, updates parameters, and advances model EMA. The
+learning-rate schedule, random-size schedule, `--steps`, `--run-steps`, and
+checkpoint `completed_steps` therefore count optimizer updates. BatchNorm state
+still advances on each physical microbatch, matching ordinary local-batch
+training. Resumable snapshots include the accumulation counter and buffers and
+are written only at optimizer-step boundaries.
 
 The initial checkpoint is optional. Omitting both the positional weights path
 and `--resume` initializes every parameter from the model schema, including
@@ -230,26 +241,30 @@ data-pipeline configuration before restoring exact dtypes and shapes. Use
 global learning-rate/no-augmentation schedule:
 
 ```sh
-# COCO train2017 has 118,287 images. At batch 8, 300 logical epochs are
-# ceil(118287 / 8) * 300 = 4,435,800 optimizer steps. This first invocation
-# performs 1,000 updates while retaining that full schedule.
+# COCO train2017 has 118,287 images. Batch 8 accumulated eight ways represents
+# the official effective batch 64, so 300 logical epochs are
+# ceil(118287 / 64) * 300 = 554,700 optimizer steps. This invocation performs
+# 1,000 updates while retaining that full schedule.
 yolox_coco_train_step PLUGIN WEIGHTS \
-  --steps 4435800 --run-steps 1000 \
+  --batch-size 8 --gradient-accumulation 8 \
+  --steps 554700 --run-steps 1000 \
   --training-output step-1000.safetensors \
   tfrecord train.tfrecord
 
 # Continue the same schedule and deterministic sample stream.
 yolox_coco_train_step PLUGIN --resume step-1000.safetensors \
-  --steps 4435800 \
+  --batch-size 8 --gradient-accumulation 8 --steps 554700 \
   --training-output final.safetensors \
   tfrecord train.tfrecord
 ```
 
-`--steps` means optimizer updates, not examples seen. Derive it from dataset
-size, global recipe epochs, and the effective batch represented by one update;
-otherwise the default 5/300 warmup and 15/300 no-augmentation fractions are
-compressed into the wrong number of examples. The 4,096-sample TFRecord used by
-microbenchmarks is intentionally not an accuracy-training dataset.
+`--steps` means optimizer updates, not microbatches or examples seen. Derive it
+from dataset size, global recipe epochs, and the effective batch represented by
+one update; otherwise the default 5/300 warmup and 15/300 no-augmentation
+fractions are compressed into the wrong number of examples. Without
+accumulation, physical batch 8 instead requires 4,435,800 updates for the same
+300 passes. The 4,096-sample TFRecord used by microbenchmarks is intentionally
+not an accuracy-training dataset; accuracy runs need all of train2017.
 
 To reconstruct the shuffle pool and variable Mosaic/MixUp consumption exactly,
 resume replays the sampling plan from the beginning without decoding or

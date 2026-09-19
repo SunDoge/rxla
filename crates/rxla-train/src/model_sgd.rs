@@ -20,6 +20,8 @@ pub enum ModelSgdError {
     InvalidLearningRate,
     #[snafu(display("invalid momentum SGD options"))]
     InvalidOptions,
+    #[snafu(display("gradient accumulation steps must be nonzero"))]
+    InvalidAccumulationSteps,
     #[snafu(display("model SGD can only update F32 parameter {path:?}, found {dtype:?}"))]
     UnsupportedParameterDType { path: String, dtype: DType },
     #[snafu(display(
@@ -90,6 +92,20 @@ impl ModelSgdUpdate {
 /// next step.
 pub struct ModelSgdStep {
     updates: Vec<ModelSgdUpdate>,
+}
+
+/// Result of an accumulating SGD transform.
+///
+/// `applied` is a scalar F32 mask: one when this invocation committed an
+/// optimizer update and zero while it only accumulated a microbatch gradient.
+pub struct ModelSgdAccumulation {
+    applied: Tensor,
+}
+
+impl ModelSgdAccumulation {
+    pub fn applied(&self) -> &Tensor {
+        &self.applied
+    }
 }
 
 /// One explicit visible-result layout followed by this SGD step's replacements.
@@ -319,8 +335,10 @@ pub fn apply_model_sgd_with_options(
         selection,
         loss,
         LearningRate::Scalar(learning_rate),
+        None,
         &mut options_for,
-    )
+    )?;
+    Ok(())
 }
 
 /// The grouped momentum-SGD transform with a runtime scalar learning rate.
@@ -341,8 +359,40 @@ pub fn apply_model_sgd_with_learning_rate(
         selection,
         loss,
         LearningRate::Tensor(learning_rate),
+        None,
         &mut options_for,
-    )
+    )?;
+    Ok(())
+}
+
+/// Accumulate averaged microbatch gradients in resident state and run grouped
+/// momentum SGD once every `accumulation_steps` invocations.
+///
+/// Weight decay, momentum, Nesterov, and the learning rate are applied only on
+/// a completed optimizer step, matching the usual `loss / accumulation_steps`
+/// PyTorch recipe. Model state such as BatchNorm still advances per microbatch.
+pub fn apply_model_sgd_accumulating_with_learning_rate(
+    model: &mut AppliedModel,
+    selection: &ParameterSelection,
+    loss: &Tensor,
+    learning_rate: &Tensor,
+    accumulation_steps: usize,
+    mut options_for: impl FnMut(&ParameterSpec) -> SgdOptions,
+) -> ModelSgdResult<ModelSgdAccumulation> {
+    ensure!(accumulation_steps > 0, InvalidAccumulationStepsSnafu);
+    ensure!(
+        learning_rate.shape().is_empty() && learning_rate.dtype() == DType::F32,
+        InvalidLearningRateSnafu
+    );
+    Ok(apply_model_sgd_grouped(
+        model,
+        selection,
+        loss,
+        LearningRate::Tensor(learning_rate),
+        Some(accumulation_steps),
+        &mut options_for,
+    )?
+    .expect("an accumulation count produces an update mask"))
 }
 
 enum LearningRate<'a> {
@@ -355,8 +405,9 @@ fn apply_model_sgd_grouped(
     selection: &ParameterSelection,
     loss: &Tensor,
     learning_rate: LearningRate<'_>,
+    accumulation_steps: Option<usize>,
     options_for: &mut impl FnMut(&ParameterSpec) -> SgdOptions,
-) -> ModelSgdResult<()> {
+) -> ModelSgdResult<Option<ModelSgdAccumulation>> {
     ensure!(!selection.is_empty(), EmptySelectionSnafu);
     ensure!(
         loss.shape().is_empty() && loss.dtype() == DType::F32,
@@ -379,7 +430,35 @@ fn apply_model_sgd_grouped(
         })
         .collect::<ModelSgdResult<Vec<_>>>()?;
     let parameters = model.parameter_tensors(selection)?;
-    let gradients = loss.grad(&parameters)?;
+    let mut gradients = loss.grad(&parameters)?;
+    let accumulation = accumulation_steps
+        .map(|steps| {
+            let count =
+                model.transform_state("__optimizer.sgd.accumulation_step", &[], DType::F32)?;
+            let next_count = count.value().add_scalar(1.0)?;
+            let applied = next_count.eq_mask(&next_count.scalar(steps as f32)?)?;
+            let next = applied.select(&next_count.scalar(0.0)?, &next_count)?;
+            model.write_transform_states(&[(&count, &next)])?;
+            Ok::<_, ModelSgdError>((steps, applied))
+        })
+        .transpose()?;
+    let mut next_accumulators = Vec::new();
+    if let Some((steps, applied)) = &accumulation {
+        for (((_, spec), parameter), gradient) in
+            selection.parameters().zip(&parameters).zip(&mut gradients)
+        {
+            let accumulator = model.transform_state(
+                format!("__optimizer.sgd.{}.gradient_accumulator", spec.path()),
+                parameter.shape(),
+                DType::F32,
+            )?;
+            let total = accumulator.value().add(gradient)?;
+            *gradient = total.mul_scalar(1.0 / *steps as f32)?;
+            let mask = applied.broadcast_to(parameter.shape())?;
+            let next = mask.select(&total.mul_scalar(0.0)?, &total)?;
+            next_accumulators.push((accumulator, next));
+        }
+    }
     let velocities = selection
         .parameters()
         .zip(&parameters)
@@ -411,14 +490,21 @@ fn apply_model_sgd_grouped(
             gradient.add(&parameter.mul_scalar(options.weight_decay)?)?
         };
         let direction = if let Some(velocity) = velocity {
-            let next = velocity
+            let candidate = velocity
                 .value()
                 .mul_scalar(options.momentum)?
                 .add(&gradient.mul_scalar(1.0 - options.dampening)?)?;
             let direction = if options.nesterov {
-                gradient.add(&next.mul_scalar(options.momentum)?)?
+                gradient.add(&candidate.mul_scalar(options.momentum)?)?
             } else {
-                next.clone()
+                candidate.clone()
+            };
+            let next = if let Some((_, applied)) = &accumulation {
+                applied
+                    .broadcast_to(parameter.shape())?
+                    .select(&candidate, velocity.value())?
+            } else {
+                candidate
             };
             next_velocities.push((velocity, next));
             direction
@@ -431,16 +517,28 @@ fn apply_model_sgd_grouped(
                 direction.mul(&value.broadcast_to(parameter.shape())?)?
             }
         };
-        next_parameters.push(parameter.sub(&update)?);
+        let candidate = parameter.sub(&update)?;
+        next_parameters.push(if let Some((_, applied)) = &accumulation {
+            applied
+                .broadcast_to(parameter.shape())?
+                .select(&candidate, parameter)?
+        } else {
+            candidate
+        });
     }
     model.write_transform_states(
         &next_velocities
             .iter()
             .map(|(state, value)| (*state, value))
+            .chain(
+                next_accumulators
+                    .iter()
+                    .map(|(state, value)| (state, value)),
+            )
             .collect::<Vec<_>>(),
     )?;
     model.write_resident_parameters(selection, &next_parameters)?;
-    Ok(())
+    Ok(accumulation.map(|(_, applied)| ModelSgdAccumulation { applied }))
 }
 
 fn valid_sgd_options(options: SgdOptions) -> bool {
@@ -456,6 +554,7 @@ fn valid_sgd_options(options: SgdOptions) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::apply_model_ema_when;
     use rxla_core::{CacheLimits, Client, DType};
     use rxla_nn::{Cx, Linear, Model, Result, TensorApply};
 
@@ -591,6 +690,120 @@ mod tests {
             }),
             Err(ModelSgdError::InvalidOptions)
         ));
+    }
+
+    #[test]
+    fn accumulating_sgd_adds_resident_gradient_and_counter_state() {
+        let definition = Model::new(linear_loss);
+        let (selection, mut model) = definition.trace_resident_under("linear").unwrap();
+        let loss = model.outputs()[0].clone();
+        let learning_rate = loss.scalar(0.1).unwrap();
+        let accumulation = apply_model_sgd_accumulating_with_learning_rate(
+            &mut model,
+            &selection,
+            &loss,
+            &learning_rate,
+            4,
+            |_| SgdOptions::default().momentum(0.9).nesterov(true),
+        )
+        .unwrap();
+
+        assert_eq!(accumulation.applied().shape(), []);
+        let paths = model.states().map(|(path, _)| path).collect::<Vec<_>>();
+        assert!(paths.contains(&"__optimizer.sgd.accumulation_step"));
+        assert!(paths.contains(&"__optimizer.sgd.linear.weight.gradient_accumulator"));
+        assert!(paths.contains(&"__optimizer.sgd.linear.weight.momentum"));
+    }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
+    fn accumulating_nesterov_matches_two_microbatch_reference() {
+        fn regression_loss(cx: Cx) -> Result<Tensor> {
+            let input = cx.input(&[1, 1])?;
+            let target = cx.input(&[1, 1])?;
+            let prediction = input.apply(&cx.named_layer("linear", Linear::new(1).bias(false))?)?;
+            let error = prediction.sub(&target)?;
+            Ok(error.square()?.sum(&[0, 1], false)?)
+        }
+
+        let client = unsafe {
+            Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
+        }
+        .expect("load CPU plugin");
+        let (selection, mut model) = Model::new(regression_loss)
+            .trace_resident_under("linear")
+            .unwrap();
+        let loss = model.outputs()[0].clone();
+        let learning_rate = loss.scalar(0.1).unwrap();
+        let accumulation = apply_model_sgd_accumulating_with_learning_rate(
+            &mut model,
+            &selection,
+            &loss,
+            &learning_rate,
+            2,
+            |_| {
+                SgdOptions::default()
+                    .momentum(0.9)
+                    .nesterov(true)
+                    .weight_decay(0.5)
+            },
+        )
+        .unwrap();
+        let ema =
+            apply_model_ema_when(&mut model, &selection, 0.9998, accumulation.applied()).unwrap();
+        let visible = [loss, accumulation.applied().clone()];
+        let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+        let program = model
+            .compile_stateful_tensors(&mut compiler, &visible)
+            .unwrap();
+        let mut session = model
+            .session(&program)
+            .parameter("linear.weight", client.buffer(&[1, 1], &[1.0_f32]).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+        let parameter_slot = model.resident_parameters().next().unwrap().2;
+        let momentum_slot = model
+            .states()
+            .find(|(path, _)| *path == "__optimizer.sgd.linear.weight.momentum")
+            .unwrap()
+            .1;
+        let decay1 = 0.9998 * (1.0 - (-1.0_f32 / 2000.0).exp());
+        let ema1 = 1.0 * decay1 + 2.045 * (1.0 - decay1);
+        let decay2 = 0.9998 * (1.0 - (-2.0_f32 / 2000.0).exp());
+        let ema2 = ema1 * decay2 + 2.443_475 * (1.0 - decay2);
+        let cases = [
+            (2.0_f32, 4.0_f32, 0.0_f32, 1.0_f32, 0.0_f32, 1.0_f32),
+            (1.0, 3.0, 1.0, 2.045, -5.5, ema1),
+            (2.0, 4.0, 0.0, 2.045, -5.5, ema1),
+            (1.0, 3.0, 1.0, 2.443_475, -4.702_5, ema2),
+        ];
+        for (input, target, expected_applied, expected_weight, expected_momentum, expected_ema) in
+            cases
+        {
+            let input = client.buffer(&[1, 1], &[input]).unwrap();
+            let target = client.buffer(&[1, 1], &[target]).unwrap();
+            let outputs: Vec<Buffer> = session.run(&[&input, &target]).unwrap();
+            assert_eq!(outputs[1].to_vec::<f32>().unwrap(), [expected_applied]);
+            let weight = session
+                .state(parameter_slot)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap()[0];
+            let momentum = session
+                .state(momentum_slot)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap()[0];
+            assert!((weight - expected_weight).abs() < 1e-5, "{weight}");
+            assert!((momentum - expected_momentum).abs() < 1e-5, "{momentum}");
+            let actual_ema = ema
+                .packed_buffer(&session)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap()[0];
+            assert!((actual_ema - expected_ema).abs() < 1e-5, "{actual_ema}");
+        }
     }
 
     #[test]

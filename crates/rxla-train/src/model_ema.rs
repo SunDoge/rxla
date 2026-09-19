@@ -11,6 +11,8 @@ pub enum ModelEmaError {
     EmptySelection,
     #[snafu(display("model EMA decay must be finite and in [0, 1)"))]
     InvalidDecay,
+    #[snafu(display("model EMA update mask must be a scalar F32 tensor"))]
+    InvalidUpdateMask,
     #[snafu(display("model EMA can only track F32 parameter {path:?}, found {dtype:?}"))]
     UnsupportedParameterDType { path: String, dtype: DType },
     #[snafu(display("model EMA parameter layout overflows for {path:?}"))]
@@ -112,6 +114,33 @@ pub fn apply_model_ema(
     selection: &ParameterSelection,
     decay: f32,
 ) -> ModelEmaResult<ModelEma> {
+    apply_model_ema_inner(model, selection, decay, None)
+}
+
+/// Append a YOLOX-style EMA that advances only when `update_mask` is one.
+///
+/// This composes with gradient accumulation: microbatches may update model
+/// state, but the EMA counter and values follow completed optimizer steps just
+/// like a host-side `optimizer.step(); ema.update(model)` sequence.
+pub fn apply_model_ema_when(
+    model: &mut AppliedModel,
+    selection: &ParameterSelection,
+    decay: f32,
+    update_mask: &Tensor,
+) -> ModelEmaResult<ModelEma> {
+    ensure!(
+        update_mask.shape().is_empty() && update_mask.dtype() == DType::F32,
+        InvalidUpdateMaskSnafu
+    );
+    apply_model_ema_inner(model, selection, decay, Some(update_mask))
+}
+
+fn apply_model_ema_inner(
+    model: &mut AppliedModel,
+    selection: &ParameterSelection,
+    decay: f32,
+    update_mask: Option<&Tensor>,
+) -> ModelEmaResult<ModelEma> {
     ensure!(!selection.is_empty(), EmptySelectionSnafu);
     ensure!(
         decay.is_finite() && (0.0..1.0).contains(&decay),
@@ -133,7 +162,11 @@ pub fn apply_model_ema(
     let initial_states = model.initial_model_state_tensors().to_vec();
     let current_states = model.current_model_state_tensors()?;
     let updates = model.transform_state("__model_ema.updates", &[], DType::F32)?;
-    let next_updates = updates.value().add_scalar(1.0)?;
+    let increment = match update_mask {
+        Some(mask) => mask.clone(),
+        None => updates.value().scalar(1.0)?,
+    };
+    let next_updates = updates.value().add(&increment)?;
     let effective_decay = next_updates
         .mul_scalar(-1.0 / 2000.0)?
         .exp()?
@@ -232,11 +265,17 @@ pub fn apply_model_ema(
     let first = first_update.broadcast_to(previous.shape())?;
     let previous = first.select(&initial, previous)?;
     let packed_decay = effective_decay.broadcast_to(previous.shape())?;
-    let next_packed = previous.add(
+    let candidate = previous.add(
         &current
             .sub(&previous)?
             .mul(&packed_decay.neg()?.add_scalar(1.0)?)?,
     )?;
+    let next_packed = match update_mask {
+        Some(mask) => mask
+            .broadcast_to(previous.shape())?
+            .select(&candidate, &previous)?,
+        None => candidate,
+    };
     model.write_transform_states(&[(&values, &next_packed), (&updates, &next_updates)])?;
 
     Ok(ModelEma {
