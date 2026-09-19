@@ -33,6 +33,21 @@ log.attach("sample.jpg", "image/jpeg", image_bytes, 124)?;
 log.finish()?;
 ```
 
+`RunLog::flush` closes the current MCAP chunk and makes it durable without
+finishing the run. `read_flushed_events` reads those complete, CRC-validated
+chunks while the writer is still active (or after an interrupted run):
+
+```rust,ignore
+let bytes = std::fs::read("train.mcap")?;
+let steps = rxla_log::read_flushed_events::<TrainStep>(&bytes)?;
+```
+
+The latest YOLOX training event can also be inspected directly:
+
+```console
+cargo run -p rxla-log --example latest_train_step -- path/to/training.mcap
+```
+
 ## Python
 
 ```python

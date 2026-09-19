@@ -2428,6 +2428,7 @@ dependencies = [
 name = "rxla-log"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "enumset",
  "mcap",
  "prost",
  "snafu",

@@ -172,8 +172,29 @@ pub struct TimedEvent<E> {
 
 /// Decode all events of one type from a mapped or otherwise resident MCAP.
 pub fn read_events<E: Event + Default>(bytes: &[u8]) -> Result<Vec<TimedEvent<E>>> {
+    read_events_from_stream(mcap::MessageStream::new(bytes).context(McapSnafu)?)
+}
+
+/// Decode events from a log that is still being written or lost its final MCAP footer.
+///
+/// Only complete, CRC-valid chunks are returned. A partial final record remains an error;
+/// callers should retry after the writer's next [`RunLog::flush`] rather than treating
+/// partially persisted data as an event.
+pub fn read_flushed_events<E: Event + Default>(bytes: &[u8]) -> Result<Vec<TimedEvent<E>>> {
+    use enumset::enum_set;
+    use mcap::read::Options;
+
+    read_events_from_stream(
+        mcap::MessageStream::new_with_options(bytes, enum_set!(Options::IgnoreEndMagic))
+            .context(McapSnafu)?,
+    )
+}
+
+fn read_events_from_stream<E: Event + Default>(
+    messages: mcap::MessageStream<'_>,
+) -> Result<Vec<TimedEvent<E>>> {
     let mut events = Vec::new();
-    for message in mcap::MessageStream::new(bytes).context(McapSnafu)? {
+    for message in messages {
         let message = message.context(McapSnafu)?;
         if message.channel.topic != E::TOPIC {
             continue;
@@ -273,6 +294,24 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event.step, 7);
         assert_eq!(events[0].event.metrics[0].name, "box_loss");
+        Ok(())
+    }
+
+    #[test]
+    fn reads_complete_chunks_before_log_is_finished() -> Result<()> {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("live.mcap");
+        let mut log = RunLog::create(&path)?;
+        log.write(&proto::TrainStep::new(100, 2.5), 123)?;
+        log.flush()?;
+
+        let bytes = std::fs::read(&path).expect("read live MCAP");
+        let events = read_flushed_events::<proto::TrainStep>(&bytes)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event.step, 100);
+
+        // Keep the writer alive until after the incomplete-file assertion.
+        log.finish()?;
         Ok(())
     }
 

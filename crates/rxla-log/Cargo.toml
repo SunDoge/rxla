@@ -8,6 +8,7 @@ readme.workspace = true
 description = "Structured, indexed training logs backed by MCAP"
 
 [dependencies]
+enumset = { workspace = true }
 mcap = { workspace = true }
 prost = { workspace = true }
 snafu = { workspace = true }
