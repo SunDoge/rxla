@@ -305,6 +305,18 @@ reached `466.9` and `467.5 images/s` in two interleaved runs. The new
 or batches can still make a deep queue costly; both values remain explicit CLI
 overrides for memory-constrained hosts.
 
+CPU sampling then identified generic `image::imageops::resize` as the largest
+remaining host hotspot: it accounted for 14,444 leaf samples, ahead of JPEG
+entropy decoding (6,773), HSV (5,204), and affine interpolation (4,124).
+Mosaic, MixUp, and letterbox resizing now use `fast_image_resize`'s SIMD RGB8
+linear interpolation. A fixed resize reference agrees with OpenCV
+`INTER_LINEAR` within one integer LSB per channel. In interleaved 400-step
+BF16/COCO runs, the old implementation reached `467.0` and `495.0 images/s`;
+the SIMD implementation reached `531.6` and `534.1 images/s`. This is a 7.4%
+gain even against the faster old run and a 10.8% gain between pair averages.
+The follow-up CPU profile no longer contained the former generic resize
+hotspot; JPEG, HSV, and affine interpolation became the leading host costs.
+
 `--random-resize` enables YOLOX's ten-step multi-scale schedule. It selects a
 square 32-pixel multiple in the inclusive `--random-size-min` to
 `--random-size-max` range (official defaults `10..20`), precompiles only the

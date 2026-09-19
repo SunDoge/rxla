@@ -1,8 +1,12 @@
 //! Train YOLOX on real COCO samples with device SimOTA and resident momentum SGD.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use fast_image_resize::{
+    FilterType as FastFilterType, PixelType, ResizeAlg, ResizeOptions, Resizer,
+    images::{Image as FastImage, ImageRef},
+};
 use fory::{ForyRow, from_row};
-use image::{Rgb, RgbImage, imageops::FilterType};
+use image::{Rgb, RgbImage};
 use rayon::prelude::*;
 #[cfg(feature = "disk-cache")]
 use rxla_core::DiskCache;
@@ -677,6 +681,10 @@ fn main() -> Result<()> {
     let schedule = YoloLrSchedule::new(base_learning_rate, args.steps)
         .warmup_steps(warmup_steps)
         .no_augmentation_steps(no_augmentation_steps);
+    let l1_weights = [
+        client.buffer(&[], &[0.0_f32])?,
+        client.buffer(&[], &[1.0_f32])?,
+    ];
     let mut completed = resumed_at;
     let mut maximum_targets_per_image = 0;
     let mut dropped_targets = 0;
@@ -710,17 +718,14 @@ fn main() -> Result<()> {
                 .build()?;
             current_size = size;
         }
+        let staging_started = Instant::now();
         let input = client.buffer(&[batch, args.size, args.size, 3], &pixels)?;
+        let image_upload_ms = staging_started.elapsed().as_secs_f64() * 1e3;
         let step_learning_rate = schedule.at(completed)?;
         let learning_rate = client.buffer(&[], &[step_learning_rate])?;
-        let l1_weight_value = if no_augmentation_steps != 0
-            && completed >= args.steps.saturating_sub(no_augmentation_steps)
-        {
-            1.0
-        } else {
-            0.0
-        };
-        let l1_weight = client.buffer(&[], &[l1_weight_value])?;
+        let use_l1 = no_augmentation_steps != 0
+            && completed >= args.steps.saturating_sub(no_augmentation_steps);
+        let l1_weight = &l1_weights[usize::from(use_l1)];
         let padded = padded_targets(args.batch_size, args.target_capacity, 80, &targets)?;
         let target_stats = padded.stats;
         maximum_targets_per_image = maximum_targets_per_image.max(target_stats.maximum_per_image);
@@ -739,6 +744,7 @@ fn main() -> Result<()> {
         let target_boxes = client.buffer(&[batch, capacity, 4], &padded.boxes)?;
         let target_classes = client.buffer(&[batch, capacity, 1], &padded.classes)?;
         let target_valid = client.buffer(&[batch, capacity, 1], &padded.valid)?;
+        let staging_ms = staging_started.elapsed().as_secs_f64() * 1e3;
         let train_started = Instant::now();
         let outputs = training_session.run(&[
             &input,
@@ -746,7 +752,7 @@ fn main() -> Result<()> {
             &target_classes,
             &target_valid,
             &learning_rate,
-            &l1_weight,
+            l1_weight,
         ])?;
         completed += 1;
         let observe = completed == resumed_at + 1
@@ -768,7 +774,7 @@ fn main() -> Result<()> {
         if let Some(losses) = losses {
             let foreground = losses[5] as usize;
             println!(
-                "step={completed} size={size} image_id={} targets={} max_targets={} dropped_targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} l1={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} train_ms={train_ms:.1}",
+                "step={completed} size={size} image_id={} targets={} max_targets={} dropped_targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} l1={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} staging_ms={staging_ms:.1} image_upload_ms={image_upload_ms:.1} train_ms={train_ms:.1}",
                 sample_ids.join(","),
                 targets.len(),
                 target_stats.maximum_per_image,
@@ -1025,7 +1031,7 @@ fn prepare_single(
         size,
         batch,
         rng,
-    );
+    )?;
     Ok((sample.id, pixels, targets))
 }
 
@@ -1056,7 +1062,7 @@ fn prepare_mosaic(
                 (size as f32 / image.height() as f32).min(size as f32 / image.width() as f32);
             let width = (image.width() as f32 * scale) as u32;
             let height = (image.height() as f32 * scale) as u32;
-            let resized = image::imageops::resize(&image, width, height, FilterType::Triangle);
+            let resized = resize_rgb(&image, width, height)?;
             Ok((sample, resized, scale))
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
@@ -1109,7 +1115,7 @@ fn prepare_mosaic(
         ids.push(format!("mixup:{}", mixup.id));
         apply_mixup(&mut image, &mut transformed, &mut classes, mixup, size, rng)?;
     }
-    let (pixels, targets) = finish_training_sample(image, transformed, &classes, size, batch, rng);
+    let (pixels, targets) = finish_training_sample(image, transformed, &classes, size, batch, rng)?;
     Ok((ids.join("+"), pixels, targets))
 }
 
@@ -1126,15 +1132,14 @@ fn apply_mixup(
         (size as f32 / source.height() as f32).min(size as f32 / source.width() as f32);
     let resized_width = (source.width() as f32 * base_scale) as u32;
     let resized_height = (source.height() as f32 * base_scale) as u32;
-    let resized =
-        image::imageops::resize(&source, resized_width, resized_height, FilterType::Triangle);
+    let resized = resize_rgb(&source, resized_width, resized_height)?;
     let mut copy = RgbImage::from_pixel(size, size, Rgb([114; 3]));
     image::imageops::replace(&mut copy, &resized, 0, 0);
 
     let jitter = 0.5 + rng.uniform(5, 0);
     let width = (size as f32 * jitter) as u32;
     let height = (size as f32 * jitter) as u32;
-    let mut copy = image::imageops::resize(&copy, width, height, FilterType::Triangle);
+    let mut copy = resize_rgb(&copy, width, height)?;
     let flipped = rng.uniform(5, 1) > 0.5;
     if flipped {
         image::imageops::flip_horizontal_in_place(&mut copy);
@@ -1228,7 +1233,7 @@ fn finish_training_sample(
     size: u32,
     batch: usize,
     rng: SampleRng,
-) -> (Vec<u8>, Vec<DetectionTarget>) {
+) -> std::result::Result<(Vec<u8>, Vec<DetectionTarget>), String> {
     let ratio = (size as f32 / image.width() as f32).min(size as f32 / image.height() as f32);
     let valid = boxes
         .iter()
@@ -1241,21 +1246,21 @@ fn finish_training_sample(
     // The validity predicate is invariant under HSV and horizontal flip, so
     // avoid cloning/mutating the image when the fallback is already known.
     if !boxes.is_empty() && !valid.iter().any(|&keep| keep) {
-        let (pixels, ratio) = letterbox(&image, size);
-        return (pixels, detection_targets(&boxes, classes, ratio, batch));
+        let (pixels, ratio) = letterbox(&image, size)?;
+        return Ok((pixels, detection_targets(&boxes, classes, ratio, batch)));
     }
     if boxes.is_empty() {
-        return (letterbox(&image, size).0, Vec::new());
+        return Ok((letterbox(&image, size)?.0, Vec::new()));
     }
 
     train_transform(&mut image, &mut boxes, rng);
-    let (pixels, ratio) = letterbox(&image, size);
+    let (pixels, ratio) = letterbox(&image, size)?;
     let targets = detection_targets(&boxes, classes, ratio, batch)
         .into_iter()
         .zip(valid)
         .filter_map(|(target, keep)| keep.then_some(target))
         .collect();
-    (pixels, targets)
+    Ok((pixels, targets))
 }
 
 fn train_transform(image: &mut RgbImage, boxes: &mut [[f32; 4]], rng: SampleRng) {
@@ -1715,11 +1720,29 @@ fn padded_targets(
     })
 }
 
-fn letterbox(image: &RgbImage, size: u32) -> (Vec<u8>, f32) {
+fn resize_rgb(image: &RgbImage, width: u32, height: u32) -> std::result::Result<RgbImage, String> {
+    let source = ImageRef::new(
+        image.width(),
+        image.height(),
+        image.as_raw(),
+        PixelType::U8x3,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut destination = FastImage::new(width, height, PixelType::U8x3);
+    let options =
+        ResizeOptions::new().resize_alg(ResizeAlg::Interpolation(FastFilterType::Bilinear));
+    Resizer::new()
+        .resize(&source, &mut destination, &options)
+        .map_err(|error| error.to_string())?;
+    RgbImage::from_raw(width, height, destination.into_vec())
+        .ok_or_else(|| "resized RGB buffer has invalid dimensions".to_owned())
+}
+
+fn letterbox(image: &RgbImage, size: u32) -> std::result::Result<(Vec<u8>, f32), String> {
     let ratio = (size as f32 / image.width() as f32).min(size as f32 / image.height() as f32);
     let width = (image.width() as f32 * ratio) as u32;
     let height = (image.height() as f32 * ratio) as u32;
-    let resized = image::imageops::resize(image, width, height, FilterType::Triangle);
+    let resized = resize_rgb(image, width, height)?;
     let mut output = vec![114; (size * size * 3) as usize];
     output
         .par_chunks_mut(size as usize * 3)
@@ -1731,7 +1754,7 @@ fn letterbox(image: &RgbImage, size: u32) -> (Vec<u8>, f32) {
                 row[x * 3..x * 3 + 3].copy_from_slice(&[pixel[2], pixel[1], pixel[0]]);
             }
         });
-    (output, ratio)
+    Ok((output, ratio))
 }
 
 #[cfg(test)]
@@ -1775,7 +1798,8 @@ mod tests {
             2,
             0,
             DataRng::new(3).sample(0, 0),
-        );
+        )
+        .unwrap();
         assert_eq!(pixels, [30, 20, 10].repeat(4));
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].class, 7);
@@ -1792,7 +1816,8 @@ mod tests {
             8,
             0,
             DataRng::new(3).sample(0, 0),
-        );
+        )
+        .unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].class, 8);
     }
@@ -1824,6 +1849,25 @@ mod tests {
         );
         let image = RgbImage::from_fn(8, 8, |x, y| Rgb([x as u8, y as u8, 3]));
         assert_eq!(warp_affine(&image, 8, matrix), image);
+    }
+
+    #[test]
+    fn simd_resize_matches_opencv_linear_within_one_lsb() {
+        let pixels = (0..36).map(|value| (value * 7) as u8).collect();
+        let image = RgbImage::from_raw(4, 3, pixels).unwrap();
+        let resized = resize_rgb(&image, 3, 5).unwrap();
+        let opencv = [
+            3, 10, 17, 31, 38, 45, 59, 66, 73, 37, 44, 51, 65, 72, 79, 93, 100, 107, 87, 94, 101,
+            116, 123, 130, 144, 151, 158, 138, 145, 152, 166, 173, 180, 194, 201, 208, 171, 178,
+            185, 199, 206, 213, 227, 234, 241,
+        ];
+        assert!(
+            resized
+                .into_raw()
+                .into_iter()
+                .zip(opencv)
+                .all(|(actual, expected)| actual.abs_diff(expected) <= 1)
+        );
     }
 
     #[test]
