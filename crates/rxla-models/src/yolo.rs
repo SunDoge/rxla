@@ -584,6 +584,7 @@ pub struct YoloLoss {
     pub boxes: Tensor,
     pub objectness: Tensor,
     pub classes: Tensor,
+    pub l1: Tensor,
 }
 
 /// Build the YOLOX IoU, objectness and classification objective in RXLA IR.
@@ -595,6 +596,33 @@ pub fn yolox_loss(
     outputs: &[Tensor; 3],
     assignments: &YoloAssignments,
     config: YoloLossConfig,
+) -> Result<YoloLoss> {
+    yolox_loss_impl(outputs, assignments, config, None)
+}
+
+/// Build the YOLOX objective with a runtime-controlled L1 box term.
+///
+/// Passing the weight as a scalar tensor lets the official no-augmentation
+/// phase enable L1 without compiling a second training program.
+pub fn yolox_loss_with_l1_weight(
+    outputs: &[Tensor; 3],
+    assignments: &YoloAssignments,
+    config: YoloLossConfig,
+    l1_weight: &Tensor,
+) -> Result<YoloLoss> {
+    if !l1_weight.shape().is_empty() || l1_weight.dtype() != DType::F32 {
+        return Err(Error::InvalidModel {
+            kind: ModelDefinitionError::InvalidYoloAssignments,
+        });
+    }
+    yolox_loss_impl(outputs, assignments, config, Some(l1_weight))
+}
+
+fn yolox_loss_impl(
+    outputs: &[Tensor; 3],
+    assignments: &YoloAssignments,
+    config: YoloLossConfig,
+    l1_weight: Option<&Tensor>,
 ) -> Result<YoloLoss> {
     let [batch, _, _, channels] =
         <[i64; 4]>::try_from(outputs[0].shape()).map_err(|_| Error::InvalidModel {
@@ -627,17 +655,44 @@ pub fn yolox_loss(
     let mut decoded = Vec::with_capacity(3);
     let mut objectness_logits = Vec::with_capacity(3);
     let mut class_logits = Vec::with_capacity(3);
+    let mut l1_predictions = Vec::with_capacity(3);
+    let mut l1_targets = Vec::with_capacity(3);
+    let mut l1_masks = Vec::with_capacity(3);
+    let mut anchor_offset = 0;
     for (output, stride) in outputs.iter().zip([8, 16, 32]) {
         let [_, height, width, _] = <[i64; 4]>::try_from(output.shape()).unwrap();
         let x = output.iota_i32(&[1, height, width, 1], 2)?.to_f32()?;
         let y = output.iota_i32(&[1, height, width, 1], 1)?.to_f32()?;
         let grid = Tensor::concatenate(&[x, y], 3)?.broadcast_to([batch, height, width, 2])?;
-        let xy = output
+        let raw_box = output.narrow(3, 0, 4)?;
+        let xy = raw_box
             .narrow(3, 0, 2)?
             .add(&grid)?
             .mul_scalar(stride as f32)?;
-        let wh = output.narrow(3, 2, 2)?.exp()?.mul_scalar(stride as f32)?;
+        let wh = raw_box.narrow(3, 2, 2)?.exp()?.mul_scalar(stride as f32)?;
         decoded.push(Tensor::concatenate(&[xy, wh], 3)?.reshape([batch, height * width, 4])?);
+        if l1_weight.is_some() {
+            let head_anchors = height * width;
+            let target = assignments.boxes.narrow(1, anchor_offset, head_anchors)?;
+            let target_xy = target
+                .narrow(2, 0, 2)?
+                .mul_scalar(1.0 / stride as f32)?
+                .sub(&grid.reshape([batch, head_anchors, 2])?)?;
+            let target_wh = target
+                .narrow(2, 2, 2)?
+                .mul_scalar(1.0 / stride as f32)?
+                .add_scalar(1e-8)?
+                .log()?;
+            l1_predictions.push(raw_box.reshape([batch, head_anchors, 4])?);
+            l1_targets.push(Tensor::concatenate(&[target_xy, target_wh], 2)?);
+            l1_masks.push(
+                assignments
+                    .objectness
+                    .narrow(1, anchor_offset, head_anchors)?
+                    .broadcast_to([batch, head_anchors, 4])?,
+            );
+            anchor_offset += head_anchors;
+        }
         objectness_logits.push(
             output
                 .narrow(3, 4, 1)?
@@ -674,15 +729,28 @@ pub fn yolox_loss(
         .mul(&foreground.broadcast_to([batch, anchors, classes])?)?
         .sum([0, 1, 2], false)?
         .div(&normalizer)?;
+    let l1 = if let Some(weight) = l1_weight {
+        Tensor::concatenate(&l1_predictions, 1)?
+            .sub(&Tensor::concatenate(&l1_targets, 1)?)?
+            .abs()?
+            .mul(&Tensor::concatenate(&l1_masks, 1)?)?
+            .sum([0, 1, 2], false)?
+            .div(&normalizer)?
+            .mul(weight)?
+    } else {
+        outputs[0].scalar(0.0)?
+    };
     let total = boxes
         .mul_scalar(config.box_weight)?
         .add(&objectness)?
-        .add(&classes_loss)?;
+        .add(&classes_loss)?
+        .add(&l1)?;
     Ok(YoloLoss {
         total,
         boxes,
         objectness,
         classes: classes_loss,
+        l1,
     })
 }
 
@@ -794,10 +862,33 @@ mod tests {
         assert!(loss.boxes.shape().is_empty());
         assert!(loss.objectness.shape().is_empty());
         assert!(loss.classes.shape().is_empty());
+        assert!(loss.l1.shape().is_empty());
         let gradients = loss.total.grad(&outputs).unwrap();
         assert_eq!(gradients.len(), 3);
         for (gradient, output) in gradients.iter().zip(&outputs) {
             assert_eq!(gradient.shape(), output.shape());
         }
+    }
+
+    #[test]
+    fn runtime_l1_weight_keeps_one_differentiable_training_graph() {
+        let graph = Tracer::default();
+        let outputs = [
+            graph.input([1, 2, 2, 7]).unwrap(),
+            graph.input([1, 1, 1, 7]).unwrap(),
+            graph.input([1, 1, 1, 7]).unwrap(),
+        ];
+        let assignments = YoloAssignments {
+            boxes: graph.input([1, 6, 4]).unwrap(),
+            objectness: graph.input([1, 6, 1]).unwrap(),
+            classes: graph.input([1, 6, 2]).unwrap(),
+        };
+        let weight = graph.input([]).unwrap();
+        let loss =
+            yolox_loss_with_l1_weight(&outputs, &assignments, YoloLossConfig::default(), &weight)
+                .unwrap();
+        assert!(loss.l1.shape().is_empty());
+        let gradients = loss.total.grad(&outputs).unwrap();
+        assert_eq!(gradients.len(), 3);
     }
 }

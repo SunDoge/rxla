@@ -84,9 +84,12 @@ The reader remains sequential; a deterministic bounded pool above the storage
 layer supplies randomized samples without seeking. This is also the sampling
 boundary for compound augmentations: each training Mosaic consumes four samples
 from the pool without replacement, applies the official random-center layout
-and random affine ranges, while the final no-augmentation phase consumes one.
-Decoded RGB images are converted to the BGR channel order used by the official
-OpenCV input pipeline before entering the model.
+and random affine ranges, then applies HSV perturbation and a 0.5-probability
+horizontal flip. The final no-augmentation phase consumes one image and enables
+the official raw-box L1 loss. Its weight is a runtime scalar, so the phase
+transition reuses the same compiled forward/backward/SGD program. Decoded RGB
+images are converted to the BGR channel order used by the official OpenCV input
+pipeline before entering the model.
 
 ## Verified baseline
 

@@ -134,7 +134,7 @@ pub mod sam2;
 mod yolo;
 pub use yolo::{
     Detection, YoloAssignments, YoloConfig, YoloDecodeConfig, YoloDecodeError, YoloLoss,
-    YoloLossConfig, yolo, yolox_loss,
+    YoloLossConfig, yolo, yolox_loss, yolox_loss_with_l1_weight,
 };
 
 /// Learned two-layer projection for a sinusoidal timestep embedding.

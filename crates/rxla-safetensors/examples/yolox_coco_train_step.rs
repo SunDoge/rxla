@@ -5,7 +5,7 @@ use fory::{ForyRow, from_row};
 use image::{Rgb, RgbImage, imageops::FilterType};
 use rayon::prelude::*;
 use rxla_core::{Buffer, CacheLimits, Client, Compiler, Tensor};
-use rxla_models::{YoloAssignments, YoloConfig, YoloLossConfig, yolo, yolox_loss};
+use rxla_models::{YoloAssignments, YoloConfig, YoloLossConfig, yolo, yolox_loss_with_l1_weight};
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::{SafeTensors, save_model_new};
 use rxla_tfrecord::Reader as TfrecordReader;
@@ -217,9 +217,10 @@ fn main() -> Result<()> {
               boxes: Tensor,
               objectness: Tensor,
               classes: Tensor,
-              learning_rate: Tensor| {
+              learning_rate: Tensor,
+              l1_weight: Tensor| {
             let outputs = yolo(cx, &image, &training_config)?;
-            let loss = yolox_loss(
+            let loss = yolox_loss_with_l1_weight(
                 &outputs,
                 &YoloAssignments {
                     boxes,
@@ -227,12 +228,14 @@ fn main() -> Result<()> {
                     classes,
                 },
                 YoloLossConfig::default(),
+                &l1_weight,
             )?;
             Ok::<_, rxla_models::Error>((
                 loss.total,
                 loss.boxes,
                 loss.objectness,
                 loss.classes,
+                loss.l1,
                 learning_rate,
             ))
         },
@@ -243,13 +246,14 @@ fn main() -> Result<()> {
         ModelInput::new([batch, anchors, 1]),
         ModelInput::new([batch, anchors, 80]),
         ModelInput::new([]),
+        ModelInput::new([]),
     ))
     .training();
     let (trainable, mut training) = training.trace_resident_all()?;
     let checkpoint_schema = training.schema().clone();
-    let metrics = Tensor::stack(&training.outputs()[..4], 0)?;
+    let metrics = Tensor::stack(&training.outputs()[..5], 0)?;
     let loss = training.outputs()[0].clone();
-    let learning_rate = training.outputs()[4].clone();
+    let learning_rate = training.outputs()[5].clone();
     apply_model_sgd_with_learning_rate(
         &mut training,
         &trainable,
@@ -293,6 +297,14 @@ fn main() -> Result<()> {
         let input = client.buffer(&[batch, args.size, args.size, 3], &pixels)?;
         let step_learning_rate = schedule.at(completed)?;
         let learning_rate = client.buffer(&[], &[step_learning_rate])?;
+        let l1_weight_value = if no_augmentation_steps != 0
+            && completed >= args.steps.saturating_sub(no_augmentation_steps)
+        {
+            1.0
+        } else {
+            0.0
+        };
+        let l1_weight = client.buffer(&[], &[l1_weight_value])?;
 
         // Buffer clones share their PJRT allocation. The inference detour sees
         // the current weights while the original snapshot retains SGD state.
@@ -338,17 +350,23 @@ fn main() -> Result<()> {
         let objectness = client.buffer(&[batch, anchors, 1], &assignments.objectness)?;
         let classes = client.buffer(&[batch, anchors, 80], &assignments.classes)?;
         let train_started = Instant::now();
-        let outputs =
-            training_session.run(&[&input, &boxes, &objectness, &classes, &learning_rate])?;
+        let outputs = training_session.run(&[
+            &input,
+            &boxes,
+            &objectness,
+            &classes,
+            &learning_rate,
+            &l1_weight,
+        ])?;
         let train_ms = train_started.elapsed().as_secs_f64() * 1e3;
         let losses = outputs[0].to_vec::<f32>()?;
-        if losses.len() != 4 || losses.iter().any(|value| !value.is_finite()) {
+        if losses.len() != 5 || losses.iter().any(|value| !value.is_finite()) {
             return Err("training produced invalid losses".into());
         }
         completed += 1;
         if completed == 1 || completed % args.log_every == 0 || completed == args.steps {
             println!(
-                "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} infer_ms={infer_ms:.1} match_ms={match_ms:.1} train_ms={train_ms:.1}",
+                "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} l1={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} infer_ms={infer_ms:.1} match_ms={match_ms:.1} train_ms={train_ms:.1}",
                 sample_ids.join(","),
                 targets.len(),
                 assignments.foreground,
@@ -356,6 +374,7 @@ fn main() -> Result<()> {
                 losses[1],
                 losses[2],
                 losses[3],
+                losses[4],
             );
         }
     }
@@ -460,7 +479,7 @@ fn prepare_batch(
                     .into_iter()
                     .next()
                     .ok_or_else(|| "empty augmentation sample group".to_owned())?;
-                prepare_single(sample, size, batch_index)
+                prepare_single(sample, size, batch_index, rng)
             }
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
@@ -484,10 +503,13 @@ fn prepare_single(
     sample: DetectionSample,
     size: u32,
     batch: usize,
+    rng: SampleRng,
 ) -> std::result::Result<(String, Vec<f32>, Vec<DetectionTarget>), String> {
-    let image = decode_sample(&sample)?;
+    let mut image = decode_sample(&sample)?;
+    let mut boxes = sample.boxes.clone();
+    train_transform(&mut image, &mut boxes, rng);
     let (pixels, ratio) = letterbox(&image, size);
-    let targets = sample.targets(ratio, batch);
+    let targets = detection_targets(&boxes, &sample.classes, ratio, batch);
     Ok((sample.id, pixels, targets))
 }
 
@@ -542,25 +564,14 @@ fn prepare_mosaic(
     }
 
     let matrix = random_affine_matrix(size, rng);
-    let image = warp_affine(&canvas, size, matrix);
-    let mut targets = Vec::new();
-    for (bbox, class) in boxes.into_iter().zip(classes) {
-        let bbox = transform_box(bbox, matrix, size as f32);
-        let width = bbox[2] - bbox[0];
-        let height = bbox[3] - bbox[1];
-        if width > 1.0 && height > 1.0 {
-            targets.push(DetectionTarget {
-                batch,
-                class,
-                cxcywh: [
-                    (bbox[0] + bbox[2]) * 0.5,
-                    (bbox[1] + bbox[3]) * 0.5,
-                    width,
-                    height,
-                ],
-            });
-        }
-    }
+    let mut image = warp_affine(&canvas, size, matrix);
+    let mut transformed = boxes
+        .into_iter()
+        .map(|bbox| transform_box(bbox, matrix, size as f32))
+        .collect::<Vec<_>>();
+    train_transform(&mut image, &mut transformed, rng);
+    let mut targets = detection_targets(&transformed, &classes, 1.0, batch);
+    targets.retain(|target| target.cxcywh[2] > 1.0 && target.cxcywh[3] > 1.0);
     Ok((
         ids.join("+"),
         image
@@ -582,6 +593,118 @@ fn decode_sample(sample: &DetectionSample) -> std::result::Result<RgbImage, Stri
         return Err("image dimensions do not match Fory metadata".to_owned());
     }
     Ok(image)
+}
+
+fn detection_targets(
+    boxes: &[[f32; 4]],
+    classes: &[usize],
+    ratio: f32,
+    batch: usize,
+) -> Vec<DetectionTarget> {
+    boxes
+        .iter()
+        .zip(classes)
+        .map(|([x0, y0, x1, y1], &class)| DetectionTarget {
+            batch,
+            class,
+            cxcywh: [
+                (x0 + x1) * 0.5 * ratio,
+                (y0 + y1) * 0.5 * ratio,
+                (x1 - x0) * ratio,
+                (y1 - y0) * ratio,
+            ],
+        })
+        .collect()
+}
+
+fn train_transform(image: &mut RgbImage, boxes: &mut [[f32; 4]], rng: SampleRng) {
+    augment_hsv(image, rng);
+    if rng.bernoulli(4, 0, 0.5) {
+        image::imageops::flip_horizontal_in_place(image);
+        let width = image.width() as f32;
+        for bbox in boxes {
+            [bbox[0], bbox[2]] = [width - bbox[2], width - bbox[0]];
+        }
+    }
+}
+
+fn augment_hsv(image: &mut RgbImage, rng: SampleRng) {
+    let enabled = [
+        rng.bernoulli(3, 0, 0.5),
+        rng.bernoulli(3, 1, 0.5),
+        rng.bernoulli(3, 2, 0.5),
+    ];
+    let hue_delta = if enabled[0] {
+        ((rng.uniform(3, 3) * 2.0 - 1.0) * 5.0).trunc()
+    } else {
+        0.0
+    };
+    let saturation_delta = if enabled[1] {
+        ((rng.uniform(3, 4) * 2.0 - 1.0) * 30.0).trunc()
+    } else {
+        0.0
+    };
+    let value_delta = if enabled[2] {
+        ((rng.uniform(3, 5) * 2.0 - 1.0) * 30.0).trunc()
+    } else {
+        0.0
+    };
+    if hue_delta == 0.0 && saturation_delta == 0.0 && value_delta == 0.0 {
+        return;
+    }
+    for pixel in image.pixels_mut() {
+        let [mut hue, mut saturation, mut value] = rgb_to_opencv_hsv(pixel.0);
+        hue = (hue + hue_delta).rem_euclid(180.0);
+        saturation = (saturation + saturation_delta).clamp(0.0, 255.0);
+        value = (value + value_delta).clamp(0.0, 255.0);
+        *pixel = Rgb(opencv_hsv_to_rgb([hue, saturation, value]));
+    }
+}
+
+fn rgb_to_opencv_hsv([red, green, blue]: [u8; 3]) -> [f32; 3] {
+    let red = f32::from(red) / 255.0;
+    let green = f32::from(green) / 255.0;
+    let blue = f32::from(blue) / 255.0;
+    let maximum = red.max(green).max(blue);
+    let minimum = red.min(green).min(blue);
+    let delta = maximum - minimum;
+    let hue = if delta == 0.0 {
+        0.0
+    } else if maximum == red {
+        60.0 * ((green - blue) / delta).rem_euclid(6.0)
+    } else if maximum == green {
+        60.0 * ((blue - red) / delta + 2.0)
+    } else {
+        60.0 * ((red - green) / delta + 4.0)
+    };
+    [
+        hue * 0.5,
+        if maximum == 0.0 {
+            0.0
+        } else {
+            delta / maximum * 255.0
+        },
+        maximum * 255.0,
+    ]
+}
+
+fn opencv_hsv_to_rgb([hue, saturation, value]: [f32; 3]) -> [u8; 3] {
+    let hue = hue * 2.0;
+    let saturation = saturation / 255.0;
+    let value = value / 255.0;
+    let chroma = value * saturation;
+    let section = hue / 60.0;
+    let x = chroma * (1.0 - (section.rem_euclid(2.0) - 1.0).abs());
+    let (red, green, blue) = match section as usize {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let offset = value - chroma;
+    [red, green, blue].map(|channel| ((channel + offset) * 255.0).round() as u8)
 }
 
 fn mosaic_coordinates(
@@ -732,25 +855,6 @@ fn warp_affine(image: &RgbImage, size: u32, matrix: [[f32; 3]; 2]) -> RgbImage {
         }
     }
     output
-}
-
-impl DetectionSample {
-    fn targets(&self, ratio: f32, batch: usize) -> Vec<DetectionTarget> {
-        self.boxes
-            .iter()
-            .zip(&self.classes)
-            .map(|([x0, y0, x1, y1], &class)| DetectionTarget {
-                batch,
-                class,
-                cxcywh: [
-                    (x0 + x1) * 0.5 * ratio,
-                    (y0 + y1) * 0.5 * ratio,
-                    (x1 - x0) * ratio,
-                    (y1 - y0) * ratio,
-                ],
-            })
-            .collect()
-    }
 }
 
 impl TrainingSource {
@@ -965,5 +1069,12 @@ mod tests {
         );
         let image = RgbImage::from_fn(8, 8, |x, y| Rgb([x as u8, y as u8, 3]));
         assert_eq!(warp_affine(&image, 8, matrix), image);
+    }
+
+    #[test]
+    fn hsv_conversion_round_trips_primary_colors() {
+        for color in [[255, 0, 0], [0, 255, 0], [0, 0, 255], [128, 128, 128]] {
+            assert_eq!(opencv_hsv_to_rgb(rgb_to_opencv_hsv(color)), color);
+        }
     }
 }
