@@ -92,7 +92,10 @@ uv run --no-sync python benchmarks/coco_eval.py \
 The evaluator defaults to YOLOX-tiny's official 416×416 test size, `0.01`
 confidence threshold, `0.65` class-aware NMS threshold, and at most 300 retained
 detections per image. `--max-images` provides a short pipeline smoke test, but
-only all 5,000 `val2017` images produce comparable COCO AP.
+only all 5,000 `val2017` images produce comparable COCO AP. Both inference
+checkpoints and resumable training snapshots are accepted; evaluating a
+training snapshot measures its raw model parameters, while the normal
+`--output` checkpoint measures the EMA parameters used for deployment.
 
 As a baseline, the converted official `yolox_tiny.pth` produced 249,721
 post-NMS detections over all 5,000 images and reached `AP=0.328`, `AP50=0.504`,
@@ -129,6 +132,13 @@ The default total learning rate follows the official trainer and scales
 `basic_lr_per_img = 0.01 / 64` by the local batch size. For example, batch 8
 uses `0.00125`. An explicit `--learning-rate` overrides the resulting total
 optimizer rate rather than the per-image constant.
+
+The initial checkpoint is optional. Omitting both the positional weights path
+and `--resume` initializes every parameter from the model schema, including
+Kaiming-uniform convolution weights and the official 0.01 predictor priors.
+This is the normal path for reproducing training from scratch; supplying
+converted weights is a fine-tuning experiment and its BatchNorm statistics may
+temporarily adapt away from their pretrained validation distribution.
 
 Freshly initialized models use the official YOLOX policies: convolution weights
 use PyTorch-compatible Kaiming-uniform initialization, BatchNorm uses
@@ -220,18 +230,26 @@ data-pipeline configuration before restoring exact dtypes and shapes. Use
 global learning-rate/no-augmentation schedule:
 
 ```sh
-# First invocation performs 1,000 updates of a 90,000-step schedule.
+# COCO train2017 has 118,287 images. At batch 8, 300 logical epochs are
+# ceil(118287 / 8) * 300 = 4,435,800 optimizer steps. This first invocation
+# performs 1,000 updates while retaining that full schedule.
 yolox_coco_train_step PLUGIN WEIGHTS \
-  --steps 90000 --run-steps 1000 \
+  --steps 4435800 --run-steps 1000 \
   --training-output step-1000.safetensors \
   tfrecord train.tfrecord
 
 # Continue the same schedule and deterministic sample stream.
 yolox_coco_train_step PLUGIN --resume step-1000.safetensors \
-  --steps 90000 \
-  --training-output step-90000.safetensors \
+  --steps 4435800 \
+  --training-output final.safetensors \
   tfrecord train.tfrecord
 ```
+
+`--steps` means optimizer updates, not examples seen. Derive it from dataset
+size, global recipe epochs, and the effective batch represented by one update;
+otherwise the default 5/300 warmup and 15/300 no-augmentation fractions are
+compressed into the wrong number of examples. The 4,096-sample TFRecord used by
+microbenchmarks is intentionally not an accuracy-training dataset.
 
 To reconstruct the shuffle pool and variable Mosaic/MixUp consumption exactly,
 resume replays the sampling plan from the beginning without decoding or

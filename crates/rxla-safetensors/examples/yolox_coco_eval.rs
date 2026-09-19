@@ -89,7 +89,13 @@ fn main() -> Result<()> {
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
     let compiled = model.compile_stateful(&mut compiler)?;
     let mut checkpoint = SafeTensors::open(&args.weights)?;
-    checkpoint.require_metadata(&[("format", "rxla-yolox-v1")])?;
+    let format = checkpoint
+        .metadata()
+        .and_then(|metadata| metadata.get("format"))
+        .map(String::as_str);
+    if !matches!(format, Some("rxla-yolox-v1" | "rxla-yolox-training-v2")) {
+        return Err(format!("unsupported YOLOX checkpoint format {format:?}").into());
+    }
     let weights = checkpoint.load_model_schema(&client, model.schema())?;
     let mut session = weights.initialize(compiled.session())?.build()?;
     let decoder = YoloDecodeConfig::default()

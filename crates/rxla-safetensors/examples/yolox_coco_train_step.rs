@@ -53,7 +53,8 @@ fn default_prefetch() -> usize {
 struct Args {
     /// Trusted PJRT plugin shared library.
     plugin: PathBuf,
-    /// Initial checkpoint produced by benchmarks/convert_yolox.py; omit with --resume.
+    /// Optional initial checkpoint produced by benchmarks/convert_yolox.py.
+    /// Omit it (and --resume) to initialize the model from its declared policies.
     weights: Option<PathBuf>,
     #[command(subcommand)]
     source: DataSource,
@@ -533,10 +534,9 @@ fn main() -> Result<()> {
         || !(0.0..=1.0).contains(&args.mosaic_probability)
         || !(0.0..=1.0).contains(&args.mixup_probability)
         || args.output.is_some() && args.output == args.training_output
-        || args.weights.is_none() && args.resume.is_none()
     {
         return Err(
-            "invalid training configuration: size must be a positive multiple of 32; rates/probabilities and counts must be in range; output paths must differ; initial weights or --resume is required"
+            "invalid training configuration: size must be a positive multiple of 32; rates/probabilities and counts must be in range; output paths must differ"
                 .into(),
         );
     }
@@ -655,17 +655,21 @@ fn main() -> Result<()> {
     let initial = variants
         .get(&current_size)
         .expect("the first scheduled size was compiled");
-    let initial_checkpoint = args
-        .resume
-        .as_ref()
-        .or(args.weights.as_ref())
-        .expect("weights or resume validated");
-    let mut checkpoint = SafeTensors::open(initial_checkpoint)?;
-    let weights = checkpoint.load_model_schema(&client, initial.model.schema())?;
-    let template = weights
-        .initialize_raw(initial.model.session(&initial.program))?
-        .initializer_seed(7)
-        .build()?;
+    let initial_checkpoint = args.resume.as_ref().or(args.weights.as_ref());
+    let template = if let Some(initial_checkpoint) = initial_checkpoint {
+        let mut checkpoint = SafeTensors::open(initial_checkpoint)?;
+        let weights = checkpoint.load_model_schema(&client, initial.model.schema())?;
+        weights
+            .initialize_raw(initial.model.session(&initial.program))?
+            .initializer_seed(args.seed)
+            .build()?
+    } else {
+        initial
+            .model
+            .session(&initial.program)
+            .initialize_parameters(args.seed)?
+            .build()?
+    };
     let mut training_session = if let Some(path) = &args.resume {
         let mut checkpoint = SafeTensors::open(path)?;
         checkpoint
@@ -1236,27 +1240,32 @@ fn apply_mixup(
 fn decode_sample(sample: &DetectionSample) -> std::result::Result<RgbImage, String> {
     use zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
 
-    // Both supported training sources guarantee JPEG payloads. Calling zune
-    // directly avoids `image::load_from_memory` format detection and its copy
-    // of the encoded input while retaining the same SIMD decoder.
-    let options = DecoderOptions::default()
-        .set_strict_mode(false)
-        .set_max_width(usize::MAX)
-        .set_max_height(usize::MAX)
-        .jpeg_set_out_colorspace(ColorSpace::RGB);
-    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(
-        ZCursor::new(sample.encoded_image.as_slice()),
-        options,
-    );
-    decoder
-        .decode_headers()
-        .map_err(|error| error.to_string())?;
-    let (width, height) = decoder
-        .dimensions()
-        .ok_or_else(|| "JPEG dimensions are unavailable after decoding headers".to_owned())?;
-    let pixels = decoder.decode().map_err(|error| error.to_string())?;
-    let image = RgbImage::from_raw(width as u32, height as u32, pixels)
-        .ok_or_else(|| "decoded JPEG RGB buffer has invalid dimensions".to_owned())?;
+    let image = if sample.encoded_image.starts_with(&[0xff, 0xd8]) {
+        // Keep the common JPEG path direct, but dispatch by content rather than
+        // extension: real datasets may contain PNG payloads under `.jpg` names.
+        let options = DecoderOptions::default()
+            .set_strict_mode(false)
+            .set_max_width(usize::MAX)
+            .set_max_height(usize::MAX)
+            .jpeg_set_out_colorspace(ColorSpace::RGB);
+        let mut decoder = zune_jpeg::JpegDecoder::new_with_options(
+            ZCursor::new(sample.encoded_image.as_slice()),
+            options,
+        );
+        decoder
+            .decode_headers()
+            .map_err(|error| error.to_string())?;
+        let (width, height) = decoder
+            .dimensions()
+            .ok_or_else(|| "JPEG dimensions are unavailable after decoding headers".to_owned())?;
+        let pixels = decoder.decode().map_err(|error| error.to_string())?;
+        RgbImage::from_raw(width as u32, height as u32, pixels)
+            .ok_or_else(|| "decoded JPEG RGB buffer has invalid dimensions".to_owned())?
+    } else {
+        image::load_from_memory(&sample.encoded_image)
+            .map_err(|error| error.to_string())?
+            .into_rgb8()
+    };
     if sample
         .dimensions
         .is_some_and(|dimensions| dimensions != [image.width(), image.height()])
@@ -1883,6 +1892,24 @@ fn letterbox(image: &RgbImage, size: u32) -> std::result::Result<(Vec<u8>, f32),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sample_decoder_dispatches_non_jpeg_payloads_by_content() {
+        let source = RgbImage::from_raw(2, 1, vec![1, 2, 3, 4, 5, 6]).unwrap();
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        source
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let sample = DetectionSample {
+            id: "png-under-any-name".to_owned(),
+            encoded_image: encoded.into_inner(),
+            dimensions: Some([2, 1]),
+            boxes: Vec::new(),
+            classes: Vec::new(),
+        };
+
+        assert_eq!(decode_sample(&sample).unwrap(), source);
+    }
 
     #[test]
     fn targets_are_padded_as_class_indices_and_capped_per_image() {
