@@ -183,7 +183,7 @@ pub struct YoloLrSchedule {
     #[setters(generate)]
     warmup_steps: usize,
     #[setters(generate)]
-    no_augmentation_steps: usize,
+    minimum_rate_steps: usize,
     #[setters(generate)]
     warmup_learning_rate: f32,
     #[setters(generate)]
@@ -196,7 +196,7 @@ impl YoloLrSchedule {
             base_learning_rate,
             total_steps,
             warmup_steps: 0,
-            no_augmentation_steps: 0,
+            minimum_rate_steps: 0,
             warmup_learning_rate: 0.0,
             minimum_ratio: 0.05,
         }
@@ -207,7 +207,7 @@ impl YoloLrSchedule {
             self.base_learning_rate.is_finite()
                 && self.base_learning_rate >= 0.0
                 && self.total_steps > 0
-                && self.warmup_steps + self.no_augmentation_steps <= self.total_steps
+                && self.warmup_steps + self.minimum_rate_steps <= self.total_steps
                 && self.warmup_learning_rate.is_finite()
                 && self.warmup_learning_rate >= 0.0
                 && self.minimum_ratio.is_finite()
@@ -225,8 +225,8 @@ impl YoloLrSchedule {
         }
         let cosine_steps = self
             .total_steps
-            .saturating_sub(self.warmup_steps + self.no_augmentation_steps);
-        if cosine_steps == 0 || step >= self.total_steps - self.no_augmentation_steps {
+            .saturating_sub(self.warmup_steps + self.minimum_rate_steps);
+        if cosine_steps == 0 || step >= self.total_steps - self.minimum_rate_steps {
             return Ok(minimum);
         }
         let progress = (step - self.warmup_steps) as f32 / cosine_steps as f32;
@@ -638,7 +638,7 @@ mod tests {
     fn yolox_schedule_has_warmup_cosine_and_minimum_tail() {
         let schedule = YoloLrSchedule::new(1.0, 100)
             .warmup_steps(10)
-            .no_augmentation_steps(10)
+            .minimum_rate_steps(10)
             .minimum_ratio(0.05);
         assert_eq!(schedule.at(0).unwrap(), 0.0);
         assert!((schedule.at(5).unwrap() - 0.25).abs() < 1e-6);

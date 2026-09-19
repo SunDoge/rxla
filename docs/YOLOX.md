@@ -237,34 +237,35 @@ than only inference weights. `--training-output state.safetensors` includes
 parameters, BatchNorm state, SGD momentum, packed model EMA, and the EMA update
 counter. `--resume state.safetensors` validates the global schedule, model and
 data-pipeline configuration before restoring exact dtypes and shapes. Use
-`--run-steps N` to stop after `N` updates while retaining `--steps` as the
-global learning-rate/no-augmentation schedule:
+`--run-steps N` to stop after `N` updates while retaining the global epoch
+schedule:
 
 ```sh
 # COCO train2017 has 118,287 images. Batch 8 accumulated eight ways represents
-# the official effective batch 64, so 300 logical epochs are
-# ceil(118287 / 64) * 300 = 554,700 optimizer steps. This invocation performs
-# 1,000 updates while retaining that full schedule.
+# the official effective batch 64. --epochs derives 554,700 optimizer steps
+# and the exact official phase boundaries from the source manifest.
 yolox_coco_train_step PLUGIN WEIGHTS \
   --batch-size 8 --gradient-accumulation 8 \
-  --steps 554700 --run-steps 1000 \
+  --epochs 300 --run-steps 1000 \
   --training-output step-1000.safetensors \
   tfrecord train.tfrecord
 
 # Continue the same schedule and deterministic sample stream.
 yolox_coco_train_step PLUGIN --resume step-1000.safetensors \
-  --batch-size 8 --gradient-accumulation 8 --steps 554700 \
+  --batch-size 8 --gradient-accumulation 8 --epochs 300 \
   --training-output final.safetensors \
   tfrecord train.tfrecord
 ```
 
-`--steps` means optimizer updates, not microbatches or examples seen. Derive it
-from dataset size, global recipe epochs, and the effective batch represented by
-one update; otherwise the default 5/300 warmup and 15/300 no-augmentation
-fractions are compressed into the wrong number of examples. Without
-accumulation, physical batch 8 instead requires 4,435,800 updates for the same
-300 passes. The 4,096-sample TFRecord used by microbenchmarks is intentionally
-not an accuracy-training dataset; accuracy runs need all of train2017.
+`--epochs` uses the COCO image count or TFRecord manifest sample count and
+`ceil(samples / effective_batch)` iterations per epoch. It reproduces the
+official five warmup epochs, starts Mosaic-off plus L1 at epoch 285 (16 epochs
+remain, matching the trainer's actual boundary), and keeps the minimum LR tail
+at 15 epochs. `--steps` remains available for controlled experiments; in that
+mode its values are optimizer updates and the two final phases default to the
+same 15/300 fraction unless overridden separately. The 4,096-sample TFRecord
+used by microbenchmarks is intentionally not an accuracy-training dataset;
+accuracy runs need a manifest containing all of train2017.
 
 To reconstruct the shuffle pool and variable Mosaic/MixUp consumption exactly,
 resume replays the sampling plan from the beginning without decoding or

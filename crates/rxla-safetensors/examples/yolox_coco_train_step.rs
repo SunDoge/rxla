@@ -49,6 +49,23 @@ fn default_prefetch() -> usize {
     default_augmentation_workers() * 8
 }
 
+fn official_epoch_schedule(
+    samples: usize,
+    effective_batch: usize,
+    epochs: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    if samples == 0 || effective_batch == 0 || epochs == 0 {
+        return None;
+    }
+    let steps_per_epoch = samples.div_ceil(effective_batch);
+    Some((
+        steps_per_epoch.checked_mul(epochs)?,
+        steps_per_epoch.checked_mul(5)?,
+        steps_per_epoch.checked_mul(16)?,
+        steps_per_epoch.checked_mul(15)?,
+    ))
+}
+
 #[derive(Parser)]
 #[command(about = "Run consecutive real COCO YOLOX training steps")]
 struct Args {
@@ -62,6 +79,10 @@ struct Args {
     /// Total optimizer steps in the global training schedule.
     #[arg(long, default_value_t = 1)]
     steps: usize,
+    /// Derive total, warmup, no-augmentation, and minimum-rate steps from the
+    /// source sample count and effective batch using the official epoch recipe.
+    #[arg(long, conflicts_with = "steps")]
+    epochs: Option<usize>,
     /// Limit updates in this invocation while retaining the global --steps schedule.
     #[arg(long)]
     run_steps: Option<usize>,
@@ -120,9 +141,12 @@ struct Args {
     /// Override warmup duration (default: 5/300 of all steps).
     #[arg(long)]
     warmup_steps: Option<usize>,
-    /// Override the minimum-rate tail (default: 15/300 of all steps).
+    /// Override the Mosaic-off/L1 tail (step mode defaults to 15/300).
     #[arg(long)]
     no_augmentation_steps: Option<usize>,
+    /// Override the minimum-learning-rate tail independently of no-augmentation.
+    #[arg(long)]
+    minimum_rate_steps: Option<usize>,
     /// Write inference-ready trained parameters and BatchNorm state here.
     #[arg(long)]
     output: Option<PathBuf>,
@@ -200,6 +224,7 @@ struct ForyManifest {
     codec: String,
     container: String,
     schema_sha256: String,
+    samples: usize,
 }
 
 #[derive(ForyRow)]
@@ -329,6 +354,7 @@ enum TrainingSource {
         reader: TfrecordReader<std::io::BufReader<std::fs::File>>,
         input: PathBuf,
         categories: BTreeMap<u64, usize>,
+        samples: usize,
     },
 }
 
@@ -460,15 +486,17 @@ fn build_training_variant(
 
 fn training_metadata(
     args: &Args,
+    total_steps: usize,
     base_learning_rate: f32,
     warmup_steps: usize,
     no_augmentation_steps: usize,
+    minimum_rate_steps: usize,
     completed_steps: usize,
 ) -> HashMap<String, String> {
     [
         ("format", "rxla-yolox-training-v2".to_owned()),
         ("completed_steps", completed_steps.to_string()),
-        ("total_steps", args.steps.to_string()),
+        ("total_steps", total_steps.to_string()),
         ("batch_size", args.batch_size.to_string()),
         (
             "gradient_accumulation",
@@ -478,6 +506,7 @@ fn training_metadata(
         ("base_learning_rate", base_learning_rate.to_string()),
         ("warmup_steps", warmup_steps.to_string()),
         ("no_augmentation_steps", no_augmentation_steps.to_string()),
+        ("minimum_rate_steps", minimum_rate_steps.to_string()),
         ("size", args.size.to_string()),
         ("random_resize", args.random_resize.to_string()),
         ("random_size_min", args.random_size_min.to_string()),
@@ -501,9 +530,11 @@ fn training_metadata(
 
 fn resume_step(
     args: &Args,
+    total_steps: usize,
     base_learning_rate: f32,
     warmup_steps: usize,
     no_augmentation_steps: usize,
+    minimum_rate_steps: usize,
 ) -> Result<usize> {
     let Some(path) = &args.resume else {
         return Ok(0);
@@ -516,18 +547,20 @@ fn resume_step(
         .get("completed_steps")
         .ok_or("training snapshot has no completed_steps")?
         .parse::<usize>()?;
-    if completed > args.steps {
+    if completed > total_steps {
         return Err(format!(
             "training snapshot step {completed} exceeds requested total {}",
-            args.steps
+            total_steps
         )
         .into());
     }
     let mut expected = training_metadata(
         args,
+        total_steps,
         base_learning_rate,
         warmup_steps,
         no_augmentation_steps,
+        minimum_rate_steps,
         completed,
     );
     expected.remove("completed_steps");
@@ -543,6 +576,13 @@ fn resume_step(
         if key == "gradient_accumulation" && value == "1" && !metadata.contains_key(&key) {
             // Training-v2 snapshots written before accumulation support imply
             // one optimizer update per batch.
+            continue;
+        }
+        if key == "minimum_rate_steps"
+            && value == no_augmentation_steps.to_string()
+            && !metadata.contains_key(&key)
+        {
+            // Older training-v2 snapshots coupled the LR tail to no-aug.
             continue;
         }
         if metadata.get(&key) != Some(&value) {
@@ -562,6 +602,7 @@ fn main() -> Result<()> {
             .learning_rate
             .is_some_and(|learning_rate| !learning_rate.is_finite() || learning_rate < 0.0)
         || args.steps == 0
+        || args.epochs == Some(0)
         || args.run_steps == Some(0)
         || args.log_every == 0
         || args.batch_size == 0
@@ -582,48 +623,63 @@ fn main() -> Result<()> {
                 .into(),
         );
     }
+    let effective_batch_size = args
+        .batch_size
+        .checked_mul(args.gradient_accumulation)
+        .ok_or("effective batch size overflow")?;
+    let source = TrainingSource::open(args.source.clone())?;
+    let epoch_schedule = args
+        .epochs
+        .map(|epochs| {
+            official_epoch_schedule(source.sample_count(), effective_batch_size, epochs)
+                .ok_or("invalid or overflowing epoch-derived training schedule")
+        })
+        .transpose()?;
+    let total_steps = epoch_schedule.map_or(args.steps, |schedule| schedule.0);
     let optimizer_step_sizes = training_sizes(
         u32::try_from(args.size)?,
-        args.steps,
+        total_steps,
         args.seed,
         args.random_resize,
         args.random_size_min,
         args.random_size_max,
     );
-    let total_micro_steps = args
-        .steps
+    let total_micro_steps = total_steps
         .checked_mul(args.gradient_accumulation)
         .ok_or("training microstep count overflow")?;
     let step_sizes = optimizer_step_sizes
         .into_iter()
         .flat_map(|size| std::iter::repeat_n(size, args.gradient_accumulation))
         .collect::<Vec<_>>();
-    let effective_batch_size = args
-        .batch_size
-        .checked_mul(args.gradient_accumulation)
-        .ok_or("effective batch size overflow")?;
     let base_learning_rate = args
         .learning_rate
         .unwrap_or_else(|| default_learning_rate(effective_batch_size));
-    let no_augmentation_steps = args.no_augmentation_steps.unwrap_or(args.steps / 20);
-    let warmup_steps = args.warmup_steps.unwrap_or(args.steps / 60);
-    if warmup_steps + no_augmentation_steps > args.steps {
-        return Err("warmup and no-augmentation steps exceed total steps".into());
+    let warmup_steps = args
+        .warmup_steps
+        .unwrap_or_else(|| epoch_schedule.map_or(total_steps / 60, |schedule| schedule.1));
+    let no_augmentation_steps = args
+        .no_augmentation_steps
+        .unwrap_or_else(|| epoch_schedule.map_or(total_steps / 20, |schedule| schedule.2));
+    let minimum_rate_steps = args
+        .minimum_rate_steps
+        .unwrap_or_else(|| epoch_schedule.map_or(total_steps / 20, |schedule| schedule.3));
+    if warmup_steps + minimum_rate_steps > total_steps || no_augmentation_steps > total_steps {
+        return Err("warmup, no-augmentation, or minimum-rate steps exceed total steps".into());
     }
     let resumed_at = resume_step(
         &args,
+        total_steps,
         base_learning_rate,
         warmup_steps,
         no_augmentation_steps,
+        minimum_rate_steps,
     )?;
-    let source = TrainingSource::open(args.source.clone())?;
     let samples = ShufflePool::new(SourceSamples(source), args.shuffle_buffer, args.seed)?;
     let mut batches = PlannedBatches {
         samples,
         remaining: total_micro_steps,
         step: 0,
-        mosaic_steps: args
-            .steps
+        mosaic_steps: total_steps
             .saturating_sub(no_augmentation_steps)
             .saturating_mul(args.gradient_accumulation),
         mosaic_probability: args.mosaic_probability,
@@ -746,9 +802,9 @@ fn main() -> Result<()> {
     } else {
         template
     };
-    let schedule = YoloLrSchedule::new(base_learning_rate, args.steps)
+    let schedule = YoloLrSchedule::new(base_learning_rate, total_steps)
         .warmup_steps(warmup_steps)
-        .no_augmentation_steps(no_augmentation_steps);
+        .minimum_rate_steps(minimum_rate_steps);
     let l1_weights = [
         client.buffer(&[], &[0.0_f32])?,
         client.buffer(&[], &[1.0_f32])?,
@@ -800,7 +856,7 @@ fn main() -> Result<()> {
         let step_learning_rate = schedule.at(completed)?;
         let learning_rate = client.buffer(&[], &[step_learning_rate])?;
         let use_l1 = no_augmentation_steps != 0
-            && completed >= args.steps.saturating_sub(no_augmentation_steps);
+            && completed >= total_steps.saturating_sub(no_augmentation_steps);
         let l1_weight = &l1_weights[usize::from(use_l1)];
         let padded = padded_targets(args.batch_size, args.target_capacity, 80, &targets)?;
         let target_stats = padded.stats;
@@ -945,9 +1001,11 @@ fn main() -> Result<()> {
     if let Some(output) = &args.training_output {
         let metadata = training_metadata(
             &args,
+            total_steps,
             base_learning_rate,
             warmup_steps,
             no_augmentation_steps,
+            minimum_rate_steps,
             completed,
         );
         let current = variants
@@ -959,7 +1017,7 @@ fn main() -> Result<()> {
     let executed_micro_steps = completed_micro_steps - replay_micro_steps;
     let executed_f64 = executed_micro_steps as f64;
     println!(
-        "completed={completed} resumed_at={resumed_at} microsteps={completed_micro_steps} gradient_accumulation={} images={} augmentation_workers={} prefetch={} maximum_targets_per_image={maximum_targets_per_image} dropped_targets={dropped_targets} run_ms={:.1} images_per_second={:.1} mean_wait_ms={:.3} mean_load_ms={:.3} mean_staging_ms={:.3} mean_image_upload_ms={:.3} mean_train_ms={:.3} replay_ms={replay_ms:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
+        "completed={completed} total_steps={total_steps} resumed_at={resumed_at} microsteps={completed_micro_steps} gradient_accumulation={} images={} augmentation_workers={} prefetch={} maximum_targets_per_image={maximum_targets_per_image} dropped_targets={dropped_targets} run_ms={:.1} images_per_second={:.1} mean_wait_ms={:.3} mean_load_ms={:.3} mean_staging_ms={:.3} mean_image_upload_ms={:.3} mean_train_ms={:.3} replay_ms={replay_ms:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
         args.gradient_accumulation,
         executed_micro_steps * args.batch_size,
         args.augmentation_workers,
@@ -1773,8 +1831,16 @@ impl TrainingSource {
                     reader: TfrecordReader::open(&input)?,
                     input,
                     categories: category_map(COCO_CATEGORY_IDS),
+                    samples: manifest.samples,
                 })
             }
+        }
+    }
+
+    fn sample_count(&self) -> usize {
+        match self {
+            Self::Coco { document, .. } => document.images.len(),
+            Self::Tfrecord { samples, .. } => *samples,
         }
     }
 
@@ -1820,6 +1886,7 @@ impl TrainingSource {
                 reader,
                 input,
                 categories,
+                ..
             } => {
                 let payload = if let Some(payload) = reader.read_record()? {
                     payload
@@ -1969,6 +2036,16 @@ fn letterbox(image: &RgbImage, size: u32) -> std::result::Result<(Vec<u8>, f32),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_epoch_recipe_keeps_data_and_lr_boundaries_distinct() {
+        assert_eq!(
+            official_epoch_schedule(118_287, 64, 300),
+            Some((554_700, 9_245, 29_584, 27_735))
+        );
+        assert_eq!(official_epoch_schedule(0, 64, 300), None);
+        assert_eq!(official_epoch_schedule(118_287, 0, 300), None);
+    }
 
     #[test]
     fn sample_decoder_dispatches_non_jpeg_payloads_by_content() {
