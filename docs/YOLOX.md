@@ -366,6 +366,15 @@ including all four image boundaries. Two real 400-step runs after the fix
 reached `542.1` and `551.1 images/s`, so the corrected edge semantics have no
 measurable throughput penalty.
 
+Affine inverse-coordinate terms that depend only on the output row are now
+hoisted out of the pixel loop, removing two multiplications and one subtraction
+per output pixel without accumulating incremental-coordinate rounding error.
+The OpenCV boundary reference remains byte-identical. Two complete 400-step
+runs reached `544.7` and `562.6 images/s` (553.7 average); the roughly 0.3%
+difference from the direct-JPEG pair average is within run-to-run variance, so
+this is retained as a local kernel simplification rather than claimed as an
+end-to-end speedup.
+
 `--random-resize` enables YOLOX's ten-step multi-scale schedule. It selects a
 square 32-pixel multiple in the inclusive `--random-size-min` to
 `--random-size-max` range (official defaults `10..20`), precompiles only the

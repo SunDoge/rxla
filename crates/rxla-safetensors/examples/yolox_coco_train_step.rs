@@ -1562,11 +1562,13 @@ fn warp_affine(image: &RgbImage, size: u32, matrix: [[f32; 3]; 2]) -> RgbImage {
         .par_chunks_mut(size as usize * 3)
         .enumerate()
         .for_each(|(y, row)| {
+            let translated_y = y as f32 - matrix[1][2];
+            let source_x_from_y = inverse[0][1] * translated_y;
+            let source_y_from_y = inverse[1][1] * translated_y;
             for x in 0..size as usize {
                 let translated_x = x as f32 - matrix[0][2];
-                let translated_y = y as f32 - matrix[1][2];
-                let source_x = inverse[0][0] * translated_x + inverse[0][1] * translated_y;
-                let source_y = inverse[1][0] * translated_x + inverse[1][1] * translated_y;
+                let source_x = inverse[0][0] * translated_x + source_x_from_y;
+                let source_y = inverse[1][0] * translated_x + source_y_from_y;
                 let pixel = interpolate_rgb_bilinear(image, source_x, source_y, 114);
                 row[x * 3..x * 3 + 3].copy_from_slice(&pixel);
             }
