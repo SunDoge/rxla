@@ -1077,6 +1077,7 @@ fn main() -> Result<()> {
                     log_proto::Metric::scalar("train_ms", train_ms),
                 ];
                 log.write(&event, unix_time_ns()?)?;
+                log.flush()?;
             }
         }
         if optimizer_step

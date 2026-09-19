@@ -99,7 +99,14 @@ def evaluate(
     return stats, time.perf_counter() - started
 
 
-def log_evaluation(log: RunLog, step: int, stats: list[float], seconds: float) -> None:
+def log_evaluation(
+    log: RunLog,
+    directory: Path,
+    run_id: str,
+    step: int,
+    stats: list[float],
+    seconds: float,
+) -> None:
     names = [
         "AP",
         "AP50",
@@ -116,10 +123,23 @@ def log_evaluation(log: RunLog, step: int, stats: list[float], seconds: float) -
     ]
     metrics = [Metric(name=name, scalar=value) for name, value in zip(names, stats)]
     metrics.append(Metric(name="evaluation_seconds", scalar=seconds, unit="s"))
-    log.write(
-        Evaluation(step=step, dataset="coco2017-val", metrics=metrics),
-        time.time_ns(),
-    )
+    event = Evaluation(step=step, dataset="coco2017-val", metrics=metrics)
+    timestamp = time.time_ns()
+    log.write(event, timestamp)
+    with RunLog(directory / f"evaluation-step-{step}.mcap") as snapshot:
+        snapshot.write(
+            RunStarted(
+                run_id=run_id,
+                model="yolox-tiny-evaluation",
+                producer="benchmarks/yolox_train_eval.py",
+            ),
+            timestamp,
+        )
+        snapshot.write(event, timestamp)
+        snapshot.write(
+            RunFinished(run_id=run_id, final_step=step, succeeded=True),
+            timestamp,
+        )
 
 
 def main() -> None:
@@ -243,6 +263,7 @@ def main() -> None:
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
         evaluated: set[int] = set()
         try:
@@ -266,7 +287,7 @@ def main() -> None:
                         args.output,
                         export_stablehlo=not evaluated,
                     )
-                    log_evaluation(log, step, stats, seconds)
+                    log_evaluation(log, args.output, run_id, step, stats, seconds)
                     log.flush()
                     evaluated.add(step)
                 finally:
@@ -283,7 +304,7 @@ def main() -> None:
                 args.output,
                 export_stablehlo=not evaluated,
             )
-            log_evaluation(log, total_steps, stats, seconds)
+            log_evaluation(log, args.output, run_id, total_steps, stats, seconds)
             log.write(
                 RunFinished(run_id=run_id, final_step=total_steps, succeeded=True),
                 time.time_ns(),
