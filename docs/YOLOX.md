@@ -325,6 +325,15 @@ evidence. The next accuracy gate is a matched PyTorch/RXLA curve at fixed
 milestones through the end of warmup, followed by a complete 300-epoch COCO AP
 run.
 
+The clean v3 run has now completed the five-epoch warmup boundary at update
+9,245. It executed 73,960 accumulated microbatches (591,680 augmented output
+images) with all eleven 320..640 multi-scale variants, reached the scheduled
+`9.99784e-3` learning rate, and remained finite. On the complete 5,000-image
+val2017 set, the raw model reached `AP=0.034`, `AP50=0.082`, and `AR@100=0.160`;
+the exported EMA reached `AP=0.049`, `AP50=0.109`, and `AR@100=0.190`. The EMA
+gain and nonzero localization metrics establish genuine early convergence.
+They do not yet satisfy or replace the final 300-epoch AP gate.
+
 The remaining intentional data-order difference is accepted by the training
 quality contract. Official YOLOX permutes one primary sample per output and
 draws the other three Mosaic images uniformly with replacement. The sequential
