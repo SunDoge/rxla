@@ -264,6 +264,7 @@ schedule:
 yolox_coco_train_step PLUGIN WEIGHTS \
   --batch-size 8 --gradient-accumulation 8 \
   --epochs 300 --run-steps 1000 \
+  --checkpoint-every 1000 \
   --training-output step-1000.safetensors \
   tfrecord train.tfrecord
 
@@ -283,6 +284,13 @@ mode its values are optimizer updates and the two final phases default to the
 same 15/300 fraction unless overridden separately. The 4,096-sample TFRecord
 used by microbenchmarks is intentionally not an accuracy-training dataset;
 accuracy runs need a manifest containing all of train2017.
+
+Long invocations can combine `--training-output state.safetensors` with
+`--checkpoint-every N`. Each boundary writes an immutable sibling such as
+`state.step-10000.safetensors`, while successful completion writes the requested
+`state.safetensors`. Publication is atomic and no-clobber, so an interrupted
+multi-hour run loses at most `N` updates and never exposes a partially written
+checkpoint. Existing milestone files are rejected rather than overwritten.
 
 Create that full accuracy dataset explicitly with:
 

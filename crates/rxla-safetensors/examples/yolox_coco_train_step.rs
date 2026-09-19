@@ -26,7 +26,7 @@ use rxla_train::{
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
 };
 
@@ -156,6 +156,9 @@ struct Args {
     /// Write a resumable snapshot including optimizer and EMA state here.
     #[arg(long)]
     training_output: Option<PathBuf>,
+    /// Atomically refresh --training-output every N completed optimizer steps.
+    #[arg(long, requires = "training_output")]
+    checkpoint_every: Option<usize>,
     /// Synchronize, validate, and print metrics every N completed steps.
     #[arg(long, default_value_t = 10)]
     log_every: usize,
@@ -538,6 +541,16 @@ fn training_metadata(
     .collect()
 }
 
+fn periodic_checkpoint_path(path: &Path, completed_steps: usize) -> PathBuf {
+    let mut file_name = path.file_stem().unwrap_or_default().to_os_string();
+    file_name.push(format!(".step-{completed_steps}"));
+    if let Some(extension) = path.extension() {
+        file_name.push(".");
+        file_name.push(extension);
+    }
+    path.with_file_name(file_name)
+}
+
 fn resume_step(
     args: &Args,
     total_steps: usize,
@@ -594,6 +607,7 @@ fn main() -> Result<()> {
         || args.steps == 0
         || args.epochs == Some(0)
         || args.run_steps == Some(0)
+        || args.checkpoint_every == Some(0)
         || args.log_every == 0
         || args.batch_size == 0
         || args.gradient_accumulation == 0
@@ -920,6 +934,32 @@ fn main() -> Result<()> {
                 losses[3],
                 losses[4],
             );
+        }
+        if optimizer_step
+            && completed != expected_completed
+            && args
+                .checkpoint_every
+                .is_some_and(|interval| completed % interval == 0)
+        {
+            let base_output = args
+                .training_output
+                .as_ref()
+                .expect("clap requires training output for periodic checkpoints");
+            let output = periodic_checkpoint_path(base_output, completed);
+            let metadata = training_metadata(
+                &args,
+                total_steps,
+                base_learning_rate,
+                warmup_steps,
+                no_augmentation_steps,
+                minimum_rate_steps,
+                completed,
+            );
+            let current = variants
+                .get(&current_size)
+                .expect("current training size was compiled");
+            save_training_state_new(&output, &current.model, &training_session, Some(&metadata))?;
+            println!("checkpoint_step={completed} output={}", output.display());
         }
     }
     drop(profiler);
@@ -2095,6 +2135,18 @@ mod tests {
         assert_eq!((args.random_size_min, args.random_size_max), (10, 20));
         assert_eq!(args.mosaic_probability, 1.0);
         assert_eq!(args.mixup_probability, 0.0);
+    }
+
+    #[test]
+    fn periodic_checkpoints_are_immutable_versioned_siblings() {
+        assert_eq!(
+            periodic_checkpoint_path(Path::new("runs/train.state.safetensors"), 12_345),
+            PathBuf::from("runs/train.state.step-12345.safetensors")
+        );
+        assert_eq!(
+            periodic_checkpoint_path(Path::new("runs/train-state"), 7),
+            PathBuf::from("runs/train-state.step-7")
+        );
     }
 
     #[test]
