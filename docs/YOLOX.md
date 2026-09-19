@@ -102,6 +102,7 @@ uv run --no-sync python benchmarks/fory_tfrecord.py \
 cargo run -p rxla-safetensors --release --features model \
   --example yolox_coco_train_step -- \
   /path/to/xla_cuda_plugin.so yolox_tiny.safetensors \
+  --compute-dtype bf16 \
   --size 416 --batch-size 8 --prefetch 2 --shuffle-buffer 1024 --seed 7 \
   --steps 100 \
   tfrecord /data/datasets/coco2017-fory-4096.tfrecord
@@ -177,17 +178,30 @@ Nsight profiling explains the remaining CUDA gap. RXLA launched about 1,154
 kernels per steady step with 15.21 ms aggregate GPU kernel time, versus about
 2,132 kernels and 7.70 ms for the profiled PyTorch/Inductor step. Despite the
 lower launch count, 61.2% of RXLA kernel time was cuDNN grouped-direct work:
-YOLOX-tiny's depthwise convolutions caused roughly 239 per-channel executions
-per step on this backend. RXLA now preserves grouped input gradients as one
-`feature_group_count` StableHLO convolution instead of expanding a Rust loop;
-CPU scalar-gradient and higher-order tests verify the new lowering. On this
-CUDA stack, XLA/cuDNN still internally chooses the same per-channel execution,
-so this correctness/IR improvement does not yet reduce the 22–27 ms wall time.
-An experimental nine-tap tensor decomposition was rejected: XLA recognized it
-as slower F32 convolutions and doubled profiled GPU work. Closing this gap needs
-a specialized depthwise CUDA kernel/lowering rather than more graph expansion.
+roughly 239 invocations per step. The kernel name is potentially misleading:
+YOLOX-tiny has `depthwise=false`, and these are ordinary convolutions rather
+than per-channel depthwise work. The PyTorch trace instead spends most
+convolution time in cuDNN/CUTLASS tensor-core implicit-GEMM kernels. BF16 XLA
+autotune logs confirm that forward and weight-gradient convolutions remain
+BF16, while input gradients are represented as reversed/dilated forward
+convolutions and ultimately autotuned as `__cudnn$convForward`; PyTorch uses
+dedicated dgrad kernels. Rewriting the reversal to JAX's explicit
+`stablehlo.reverse` form was mathematically correct but slowed steady training
+to 32.6--37.1 ms, so it was rejected. Autotune inspection showed that 12 BF16
+shapes then became `__cudnn$convBackwardInput`, but an Nsight capture exposed
+the regression: nine profiled steps spent 38.85 ms in 954
+`dgrad2d_grouped_direct` launches, plus about 33 ms in FFT and GEMV support
+kernels. The retained reversed-window forward formulation is substantially
+faster for this graph. Closing the gap therefore requires a better convolution
+plan rather than merely making XLA classify the operation as dgrad; a
+depthwise-only kernel would not help this model.
 
-Three XLA configuration alternatives were also measured against the same real
+RXLA now independently preserves genuinely grouped input gradients as one
+`feature_group_count` StableHLO convolution instead of expanding a Rust loop.
+CPU scalar-gradient and higher-order tests verify that lowering, but it is an
+IR/correctness improvement rather than the explanation for YOLOX-tiny's speed.
+
+Three XLA configuration alternatives were also measured on the F32 real-data
 training path and rejected. Changing convolution precision from `HIGHEST` to
 `DEFAULT` slowed steady steps to 27.7--29.0 ms (250 images/s). Enabling
 `--xla_gpu_experimental_enable_conv_fusion=true` slowed them to 36--37 ms
