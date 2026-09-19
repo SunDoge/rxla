@@ -97,6 +97,13 @@ the cuDNN operation and its adjoints, then converted back at the layer boundary.
 BatchNorm, SimOTA, losses, model state, momentum, and parameter updates remain
 F32. This is deliberately narrower than whole-program dtype demotion.
 
+Training defaults to `--convolution-precision default`, allowing XLA/cuDNN to
+use accelerator-native reduced-precision contraction algorithms such as TF32
+for F32 convolutions. Use `--convolution-precision highest` for the strict
+StableHLO precision contract used by the numerical oracle. Precision is part of
+`Conv2dOptions` and propagates through both input- and weight-gradient
+convolutions rather than being a process-global flag.
+
 For sequential training, COCO can instead be stored as standard TFRecord
 framing with Apache Fory Standard Row payloads. The JPEG remains compressed;
 Fory provides typed, borrowed views of its bytes and the box/label arrays.
@@ -159,16 +166,26 @@ including first-step device warmup and two final no-augmentation/L1 steps.
 Augmentation prepared a typical batch in 63–66 ms, but a three-batch bounded
 prefetch kept measured consumer wait at 0.0 ms throughout the run.
 
-The convolution-only BF16 path initially reduced steady device training time
-from `36.4–37.2 ms` to `23.0–24.0 ms` on the same RTX 5080. For context, an
-official-compatible PyTorch eager benchmark with 12 synthetic targets per image
-measured 23.87 ms in F32 and 26.61 ms under BF16 autocast. These are useful
-device baselines, not a strict data-pipeline comparison.
+A dedicated synthetic benchmark now runs the same U8 input pattern, 12 targets
+per image, device SimOTA, loss, BatchNorm updates, Nesterov SGD, warmup count,
+and per-step synchronization in RXLA and the official-compatible PyTorch model.
+At 416×416, batch 8, 10 warmups, and 100 measured F32 steps, RXLA with default
+convolution precision measured `17.108 ms` (`467.6 images/s`), while
+`torch.compile` measured `21.453 ms` (`372.9 images/s`). A shorter 20-step BF16
+run measured `12.868 ms` (`621.7 images/s`) for RXLA, `16.918 ms` (`472.9
+images/s`) for `torch.compile`, and `24.189 ms` for eager PyTorch. The Python
+loss still has a graph break at its per-image `Tensor.item()` SimOTA loop, while
+RXLA compiles matching and optimization into the same program.
 
-Compiling the same PyTorch model with Inductor's default `torch.compile` mode
-measured 18.48 ms (433.0 images/s). The official-compatible Python loss has a
-graph break at its per-image `Tensor.item()` SimOTA loop, but Inductor still
-compiles the convolutional regions.
+Run the comparable RXLA side with:
+
+```sh
+cargo run -p rxla-safetensors --release --features model \
+  --example yolox_train_benchmark -- \
+  /path/to/xla_cuda_plugin.so yolox_tiny.safetensors \
+  --size 416 --batch-size 8 --warmup 10 --iterations 100 \
+  --targets-per-image 12 --compute-dtype f32
+```
 
 The input boundary preserves decoded images as U8 through host batching and
 PCIe transfer, then performs the exact U8-to-F32 conversion in the compiled
@@ -194,9 +211,8 @@ single-winner tie semantics instead of dividing a cotangent among equal maxima.
 On the same real-data BF16 run, steady training steps fell to 12.2–16.3 ms. A
 100-step run processed 800 output images in 2.618 seconds (305.6 images/s end to
 end); JPEG/Mosaic preparation and producer waits, rather than the device graph,
-now set that throughput. This device time is below the measured 18.48 ms
-`torch.compile` baseline, although the workloads are not a strict end-to-end
-comparison. An 11-step Nsight capture measured 4.07 ms aggregate GPU kernel time
+now set that throughput. An 11-step Nsight capture measured 4.07 ms aggregate
+GPU kernel time
 and about 402 kernel launches per step. Only one grouped-direct launch remained
 per step, consuming less than 0.01 ms. The native lowering therefore removed
 the actual bottleneck instead of tuning unrelated convolutions.
@@ -241,15 +257,23 @@ RXLA now independently preserves genuinely grouped input gradients as one
 CPU scalar-gradient and higher-order tests verify that lowering, but it is an
 IR/correctness improvement rather than the explanation for YOLOX-tiny's speed.
 
-Three XLA configuration alternatives were also measured on the F32 real-data
-training path and rejected. Changing convolution precision from `HIGHEST` to
-`DEFAULT` slowed steady steps to 27.7--29.0 ms (250 images/s). Enabling
+The earlier real-data experiment that appeared to make `DEFAULT` convolution
+precision slower was confounded by the old max-pool adjoint and host pipeline.
+Repeating it after those fixes showed the opposite: strict synthetic F32 steps
+fell from `26.075 ms` at `HIGHEST` to `17.108 ms` at `DEFAULT`. Nsight explains
+the difference: the strict graph spent about 19.4 ms of GPU kernel time per
+profiled step in SIMT/FFT convolution algorithms, while PyTorch used TF32
+tensor-core kernels. `DEFAULT` is now an explicit per-convolution policy and is
+selected by the training example; the model API retains `HIGHEST` as its
+accuracy-first default.
+
+Two other XLA configuration alternatives remain rejected. Enabling
 `--xla_gpu_experimental_enable_conv_fusion=true` slowed them to 36--37 ms
 (196 images/s), and forcing NCHW with `--xla_gpu_force_conv_nchw=true` reached
 28.4--29.2 ms (235 images/s). The plugin already defaults convolution autotuning
 to level 4; the former cuDNN frontend switch is no longer present in this XLA
-version. The retained NHWC, `HIGHEST` path is therefore the best measured
-general XLA lowering, rather than an accidentally disabled autotuning setup.
+version. The retained NHWC path is therefore the best measured general XLA
+lowering rather than an accidentally disabled autotuning setup.
 
 Disabling CUDA command buffers after the native max-pool change was also not a
 meaningful end-to-end improvement. It tightened many steady device observations

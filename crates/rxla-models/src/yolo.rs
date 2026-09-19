@@ -2,7 +2,7 @@
 
 use super::*;
 use derive_setters::Setters;
-use rxla_core::{Conv2dOptions, DType, Pool2dOptions, Tensor, vision};
+use rxla_core::{Conv2dOptions, DType, Pool2dOptions, Precision, Tensor, vision};
 use rxla_nn::{BatchNorm, Conv2d, Initializer, Layer, TensorApply, path};
 use snafu::{Snafu, ensure};
 
@@ -13,6 +13,7 @@ pub struct YoloConfig {
     width: f32,
     depthwise: bool,
     compute_dtype: DType,
+    convolution_precision: Precision,
 }
 
 impl YoloConfig {
@@ -23,6 +24,7 @@ impl YoloConfig {
             width: 0.375,
             depthwise: false,
             compute_dtype: DType::F32,
+            convolution_precision: Precision::Highest,
         }
     }
 
@@ -33,6 +35,7 @@ impl YoloConfig {
             width: 0.25,
             depthwise: true,
             compute_dtype: DType::F32,
+            convolution_precision: Precision::Highest,
         }
     }
 
@@ -43,6 +46,7 @@ impl YoloConfig {
             width: 0.5,
             depthwise: false,
             compute_dtype: DType::F32,
+            convolution_precision: Precision::Highest,
         }
     }
 
@@ -54,6 +58,10 @@ impl YoloConfig {
         self.compute_dtype = dtype;
         self
     }
+    pub fn convolution_precision(mut self, precision: Precision) -> Self {
+        self.convolution_precision = precision;
+        self
+    }
     fn channels(self, base: i64) -> i64 {
         (base as f32 * self.width) as i64
     }
@@ -62,6 +70,12 @@ impl YoloConfig {
     }
     fn neck_depth(self) -> usize {
         (self.depth * 3.).round() as usize
+    }
+    fn conv(self, channels: i64, kernel: i64) -> YoloConv {
+        YoloConv::new(channels, kernel).precision(self.convolution_precision)
+    }
+    fn csp(self, channels: i64) -> CspLayer {
+        CspLayer::new(channels).precision(self.convolution_precision)
     }
 
     fn validate(self) -> Result<()> {
@@ -90,6 +104,8 @@ struct BaseConv {
     stride: i64,
     #[setters(generate)]
     groups: i64,
+    #[setters(generate)]
+    precision: Precision,
 }
 
 impl BaseConv {
@@ -99,6 +115,7 @@ impl BaseConv {
             kernel,
             stride: 1,
             groups: 1,
+            precision: Precision::Highest,
         }
     }
 }
@@ -112,6 +129,7 @@ impl Layer for BaseConv {
                     strides: [self.stride; 2],
                     padding: [[self.kernel / 2, self.kernel / 2]; 2],
                     groups: self.groups,
+                    precision: self.precision,
                     ..Default::default()
                 })
                 .bias(false),
@@ -135,6 +153,8 @@ struct YoloConv {
     stride: i64,
     #[setters(generate)]
     depthwise: bool,
+    #[setters(generate)]
+    precision: Precision,
 }
 
 impl YoloConv {
@@ -144,6 +164,7 @@ impl YoloConv {
             kernel,
             stride: 1,
             depthwise: false,
+            precision: Precision::Highest,
         }
     }
 }
@@ -153,6 +174,7 @@ impl Layer for YoloConv {
         if !self.depthwise {
             return BaseConv::new(self.channels, self.kernel)
                 .stride(self.stride)
+                .precision(self.precision)
                 .apply_in(cx, input);
         }
         let channels = input.shape()[3];
@@ -160,20 +182,30 @@ impl Layer for YoloConv {
             path!(cx / "dconv")?,
             BaseConv::new(channels, self.kernel)
                 .stride(self.stride)
-                .groups(channels),
+                .groups(channels)
+                .precision(self.precision),
         )?;
-        hidden.through(path!(cx / "pconv")?, BaseConv::new(self.channels, 1))
+        hidden.through(
+            path!(cx / "pconv")?,
+            BaseConv::new(self.channels, 1).precision(self.precision),
+        )
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Setters)]
+#[setters(generate = false)]
 struct Focus {
     channels: i64,
+    #[setters(generate)]
+    precision: Precision,
 }
 
 impl Focus {
     fn new(channels: i64) -> Self {
-        Self { channels }
+        Self {
+            channels,
+            precision: Precision::Highest,
+        }
     }
 }
 
@@ -190,8 +222,10 @@ impl Layer for Focus {
             input.slice(&[0, 0, 1, 0], &limits, &strides)?,
             input.slice(&[0, 1, 1, 0], &limits, &strides)?,
         ];
-        Tensor::concatenate(&patches, 3)?
-            .through(path!(cx / "conv")?, YoloConv::new(self.channels, 3))
+        Tensor::concatenate(&patches, 3)?.through(
+            path!(cx / "conv")?,
+            YoloConv::new(self.channels, 3).precision(self.precision),
+        )
     }
 }
 
@@ -203,6 +237,8 @@ struct Bottleneck {
     shortcut: bool,
     #[setters(generate)]
     depthwise: bool,
+    #[setters(generate)]
+    precision: Precision,
 }
 
 impl Bottleneck {
@@ -211,16 +247,22 @@ impl Bottleneck {
             channels,
             shortcut: true,
             depthwise: false,
+            precision: Precision::Highest,
         }
     }
 }
 
 impl Layer for Bottleneck {
     fn apply_in(&self, cx: &Cx, input: &Tensor) -> rxla_nn::Result<Tensor> {
-        let hidden = input.through(path!(cx / "conv1")?, YoloConv::new(self.channels, 1))?;
+        let hidden = input.through(
+            path!(cx / "conv1")?,
+            YoloConv::new(self.channels, 1).precision(self.precision),
+        )?;
         let output = hidden.through(
             path!(cx / "conv2")?,
-            YoloConv::new(self.channels, 3).depthwise(self.depthwise),
+            YoloConv::new(self.channels, 3)
+                .depthwise(self.depthwise)
+                .precision(self.precision),
         )?;
         if self.shortcut && input.shape() == output.shape() {
             input.add(&output).map_err(Into::into)
@@ -240,6 +282,8 @@ struct CspLayer {
     shortcut: bool,
     #[setters(generate)]
     depthwise: bool,
+    #[setters(generate)]
+    precision: Precision,
 }
 
 impl CspLayer {
@@ -249,6 +293,7 @@ impl CspLayer {
             repeats: 1,
             shortcut: true,
             depthwise: false,
+            precision: Precision::Highest,
         }
     }
 }
@@ -256,35 +301,53 @@ impl CspLayer {
 impl Layer for CspLayer {
     fn apply_in(&self, cx: &Cx, input: &Tensor) -> rxla_nn::Result<Tensor> {
         let hidden = self.channels / 2;
-        let mut branch = input.through(path!(cx / "conv1")?, YoloConv::new(hidden, 1))?;
-        let bypass = input.through(path!(cx / "conv2")?, YoloConv::new(hidden, 1))?;
+        let mut branch = input.through(
+            path!(cx / "conv1")?,
+            YoloConv::new(hidden, 1).precision(self.precision),
+        )?;
+        let bypass = input.through(
+            path!(cx / "conv2")?,
+            YoloConv::new(hidden, 1).precision(self.precision),
+        )?;
         for index in 0..self.repeats {
             branch = branch.through(
                 path!(cx / "m" / index)?,
                 Bottleneck::new(hidden)
                     .shortcut(self.shortcut)
-                    .depthwise(self.depthwise),
+                    .depthwise(self.depthwise)
+                    .precision(self.precision),
             )?;
         }
-        Tensor::concatenate(&[branch, bypass], 3)?
-            .through(path!(cx / "conv3")?, YoloConv::new(self.channels, 1))
+        Tensor::concatenate(&[branch, bypass], 3)?.through(
+            path!(cx / "conv3")?,
+            YoloConv::new(self.channels, 1).precision(self.precision),
+        )
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Setters)]
+#[setters(generate = false)]
 struct Spp {
     channels: i64,
+    #[setters(generate)]
+    precision: Precision,
 }
 
 impl Spp {
     fn new(channels: i64) -> Self {
-        Self { channels }
+        Self {
+            channels,
+            precision: Precision::Highest,
+        }
     }
 }
 
 impl Layer for Spp {
     fn apply_in(&self, cx: &Cx, input: &Tensor) -> rxla_nn::Result<Tensor> {
-        let hidden = input.through(path!(cx / "conv1")?, YoloConv::new(self.channels / 2, 1))?;
+        let hidden = input.through(
+            path!(cx / "conv1")?,
+            YoloConv::new(self.channels / 2, 1).precision(self.precision),
+        )?;
         let mut values = vec![hidden.clone()];
         for window in [5, 9, 13] {
             values.push(hidden.max_pool2d(Pool2dOptions {
@@ -293,61 +356,77 @@ impl Layer for Spp {
                 padding: [[window / 2, window / 2]; 2],
             })?);
         }
-        Tensor::concatenate(&values, 3)?
-            .through(path!(cx / "conv2")?, YoloConv::new(self.channels, 1))
+        Tensor::concatenate(&values, 3)?.through(
+            path!(cx / "conv2")?,
+            YoloConv::new(self.channels, 1).precision(self.precision),
+        )
     }
 }
 
 fn csp_darknet(cx: Cx, images: &Tensor, config: YoloConfig) -> Result<[Tensor; 5]> {
     let base = config.channels(64);
     let depth = config.backbone_depth();
-    let stem = images.through(path!(cx / "stem")?, Focus::new(base))?;
+    let stem = images.through(
+        path!(cx / "stem")?,
+        Focus::new(base).precision(config.convolution_precision),
+    )?;
     let dark2_down = stem.through(
         path!(cx / "dark2" / 0)?,
-        YoloConv::new(base * 2, 3)
+        config
+            .conv(base * 2, 3)
             .stride(2)
             .depthwise(config.depthwise),
     )?;
     let dark2 = dark2_down.through(
         path!(cx / "dark2" / 1)?,
-        CspLayer::new(base * 2)
+        config
+            .csp(base * 2)
             .repeats(depth)
             .depthwise(config.depthwise),
     )?;
     let dark3 = dark2.through(
         path!(cx / "dark3" / 0)?,
-        YoloConv::new(base * 4, 3)
+        config
+            .conv(base * 4, 3)
             .stride(2)
             .depthwise(config.depthwise),
     )?;
     let dark3 = dark3.through(
         path!(cx / "dark3" / 1)?,
-        CspLayer::new(base * 4)
+        config
+            .csp(base * 4)
             .repeats(depth * 3)
             .depthwise(config.depthwise),
     )?;
     let dark4 = dark3.through(
         path!(cx / "dark4" / 0)?,
-        YoloConv::new(base * 8, 3)
+        config
+            .conv(base * 8, 3)
             .stride(2)
             .depthwise(config.depthwise),
     )?;
     let dark4 = dark4.through(
         path!(cx / "dark4" / 1)?,
-        CspLayer::new(base * 8)
+        config
+            .csp(base * 8)
             .repeats(depth * 3)
             .depthwise(config.depthwise),
     )?;
     let dark5 = dark4.through(
         path!(cx / "dark5" / 0)?,
-        YoloConv::new(base * 16, 3)
+        config
+            .conv(base * 16, 3)
             .stride(2)
             .depthwise(config.depthwise),
     )?;
-    let dark5 = dark5.through(path!(cx / "dark5" / 1)?, Spp::new(base * 16))?;
+    let dark5 = dark5.through(
+        path!(cx / "dark5" / 1)?,
+        Spp::new(base * 16).precision(config.convolution_precision),
+    )?;
     let dark5 = dark5.through(
         path!(cx / "dark5" / 2)?,
-        CspLayer::new(base * 16)
+        config
+            .csp(base * 16)
             .repeats(depth)
             .shortcut(false)
             .depthwise(config.depthwise),
@@ -362,42 +441,46 @@ fn pafpn(cx: Cx, [x2, x1, x0]: [Tensor; 3], config: YoloConfig) -> Result<[Tenso
         config.channels(512),
         config.channels(1024),
     );
-    let fpn0 = x0.through(path!(cx / "lateral_conv0")?, YoloConv::new(c4, 1))?;
+    let fpn0 = x0.through(path!(cx / "lateral_conv0")?, config.conv(c4, 1))?;
     let top4 = Tensor::concatenate(&[fpn0.upsample_nearest2d([2, 2])?, x1], 3)?;
     let top4 = top4.through(
         path!(cx / "C3_p4")?,
-        CspLayer::new(c4)
+        config
+            .csp(c4)
             .repeats(depth)
             .shortcut(false)
             .depthwise(config.depthwise),
     )?;
-    let fpn1 = top4.through(path!(cx / "reduce_conv1")?, YoloConv::new(c3, 1))?;
+    let fpn1 = top4.through(path!(cx / "reduce_conv1")?, config.conv(c3, 1))?;
     let top3 = Tensor::concatenate(&[fpn1.upsample_nearest2d([2, 2])?, x2], 3)?;
     let out2 = top3.through(
         path!(cx / "C3_p3")?,
-        CspLayer::new(c3)
+        config
+            .csp(c3)
             .repeats(depth)
             .shortcut(false)
             .depthwise(config.depthwise),
     )?;
     let down2 = out2.through(
         path!(cx / "bu_conv2")?,
-        YoloConv::new(c3, 3).stride(2).depthwise(config.depthwise),
+        config.conv(c3, 3).stride(2).depthwise(config.depthwise),
     )?;
     let out1 = Tensor::concatenate(&[down2, fpn1], 3)?.through(
         path!(cx / "C3_n3")?,
-        CspLayer::new(c4)
+        config
+            .csp(c4)
             .repeats(depth)
             .shortcut(false)
             .depthwise(config.depthwise),
     )?;
     let down1 = out1.through(
         path!(cx / "bu_conv1")?,
-        YoloConv::new(c4, 3).stride(2).depthwise(config.depthwise),
+        config.conv(c4, 3).stride(2).depthwise(config.depthwise),
     )?;
     let out0 = Tensor::concatenate(&[down1, fpn0], 3)?.through(
         path!(cx / "C3_n4")?,
-        CspLayer::new(c5)
+        config
+            .csp(c5)
             .repeats(depth)
             .shortcut(false)
             .depthwise(config.depthwise),
@@ -410,26 +493,36 @@ fn head(cx: Cx, features: [Tensor; 3], config: YoloConfig) -> Result<[Tensor; 3]
     let prior_bias = -99.0_f32.ln();
     let mut outputs = Vec::with_capacity(3);
     for (index, feature) in features.into_iter().enumerate() {
-        let stem = feature.through(path!(cx / "stems" / index)?, YoloConv::new(width, 1))?;
+        let stem = feature.through(path!(cx / "stems" / index)?, config.conv(width, 1))?;
         let (mut cls, mut reg) = (stem.clone(), stem);
         for layer in 0..2 {
             cls = cls.through(
                 path!(cx / "cls_convs" / index / layer)?,
-                YoloConv::new(width, 3).depthwise(config.depthwise),
+                config.conv(width, 3).depthwise(config.depthwise),
             )?;
             reg = reg.through(
                 path!(cx / "reg_convs" / index / layer)?,
-                YoloConv::new(width, 3).depthwise(config.depthwise),
+                config.conv(width, 3).depthwise(config.depthwise),
             )?;
         }
-        let boxes = reg.through(path!(cx / "reg_preds" / index)?, Conv2d::new(4, [1, 1]))?;
+        let prediction_options = Conv2dOptions {
+            precision: config.convolution_precision,
+            ..Default::default()
+        };
+        let boxes = reg.through(
+            path!(cx / "reg_preds" / index)?,
+            Conv2d::new(4, [1, 1]).options(prediction_options),
+        )?;
         let objectness = reg.through(
             path!(cx / "obj_preds" / index)?,
-            Conv2d::new(1, [1, 1]).bias_initializer(Initializer::uniform(prior_bias, prior_bias)),
+            Conv2d::new(1, [1, 1])
+                .options(prediction_options)
+                .bias_initializer(Initializer::uniform(prior_bias, prior_bias)),
         )?;
         let classes = cls.through(
             path!(cx / "cls_preds" / index)?,
             Conv2d::new(config.classes, [1, 1])
+                .options(prediction_options)
                 .bias_initializer(Initializer::uniform(prior_bias, prior_bias)),
         )?;
         outputs.push(Tensor::concatenate(&[boxes, objectness, classes], 3)?);
@@ -1150,6 +1243,27 @@ mod tests {
             );
         }
         model.prepare_stateful().unwrap();
+    }
+
+    #[test]
+    fn convolution_precision_policy_reaches_the_complete_yolo_graph() {
+        let config = YoloConfig::yolox_tiny(80).convolution_precision(Precision::Default);
+        let model = Model::new(|cx: Cx, image| yolo(cx, &image, &config))
+            .inputs(ModelInput::new([1, 64, 64, 3]))
+            .trace()
+            .unwrap();
+        let prepared = model.prepare_stateful().unwrap();
+        let stablehlo = std::str::from_utf8(prepared.lowered_program().code()).unwrap();
+        let convolutions = stablehlo.matches("stablehlo.convolution").count();
+        assert!(convolutions > 0);
+        assert_eq!(
+            stablehlo
+                .matches(
+                    "precision_config = [#stablehlo<precision DEFAULT>, #stablehlo<precision DEFAULT>]"
+                )
+                .count(),
+            convolutions
+        );
     }
 
     #[test]

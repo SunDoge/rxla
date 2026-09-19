@@ -1,4 +1,4 @@
-use rxla_core::{Client, Conv2dOptions, Tracer};
+use rxla_core::{Client, Conv2dOptions, Precision, Tracer};
 
 #[test]
 fn forward_convolutions_use_highest_precision_and_training_is_explicitly_scoped() {
@@ -22,6 +22,35 @@ fn forward_convolutions_use_highest_precision_and_training_is_explicitly_scoped(
             )
             .count()
             >= 3
+    );
+}
+
+#[test]
+fn convolution_precision_propagates_through_both_adjoint_operations() {
+    let graph = Tracer::default();
+    let x = graph.input([1, 3, 3, 2]).unwrap();
+    let w = graph.input([2, 2, 2, 3]).unwrap();
+    let y = x
+        .conv2d(
+            &w,
+            Conv2dOptions {
+                precision: Precision::Default,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let gradients = y.sum([0, 1, 2, 3], false).unwrap().grad(&[x, w]).unwrap();
+    let stablehlo = graph
+        .stablehlo_many(&[y, gradients[0].clone(), gradients[1].clone()])
+        .unwrap();
+    assert_eq!(stablehlo.matches("stablehlo.convolution").count(), 3);
+    assert_eq!(
+        stablehlo
+            .matches(
+                "precision_config = [#stablehlo<precision DEFAULT>, #stablehlo<precision DEFAULT>]"
+            )
+            .count(),
+        3
     );
 }
 
@@ -136,6 +165,7 @@ fn real_standard_grouped_depthwise_convolutions() {
                 strides: [2, 3],
                 dilation: [2, 1],
                 padding: [[1, 0], [2, 1]],
+                ..Default::default()
             },
         ),
         (

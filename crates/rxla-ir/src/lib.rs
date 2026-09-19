@@ -72,6 +72,17 @@ pub struct Conv2dOptions {
     pub padding: [[i64; 2]; 2],
     pub dilation: [i64; 2],
     pub groups: i64,
+    pub precision: Precision,
+}
+
+/// StableHLO operand precision contract for contractions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(i64)]
+pub enum Precision {
+    Default = 0,
+    High = 1,
+    #[default]
+    Highest = 2,
 }
 
 impl Default for Conv2dOptions {
@@ -81,6 +92,7 @@ impl Default for Conv2dOptions {
             padding: [[0, 0]; 2],
             dilation: [1, 1],
             groups: 1,
+            precision: Precision::Highest,
         }
     }
 }
@@ -96,6 +108,7 @@ pub struct ConvTranspose2dOptions {
     pub output_padding: [i64; 2],
     /// Number of independent feature groups.
     pub groups: i64,
+    pub precision: Precision,
 }
 
 impl Default for ConvTranspose2dOptions {
@@ -106,6 +119,7 @@ impl Default for ConvTranspose2dOptions {
             dilation: [1, 1],
             output_padding: [0, 0],
             groups: 1,
+            precision: Precision::Highest,
         }
     }
 }

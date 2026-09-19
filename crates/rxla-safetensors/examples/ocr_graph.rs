@@ -192,6 +192,7 @@ fn lower(node: &Node, input: &[Tensor]) -> Result<Tensor> {
                             dilation,
                             padding: pads,
                             groups,
+                            ..Default::default()
                         },
                     )?
                 } else {
@@ -206,6 +207,7 @@ fn lower(node: &Node, input: &[Tensor]) -> Result<Tensor> {
                             padding: pads,
                             output_padding: [0, 0],
                             groups: 1,
+                            ..Default::default()
                         },
                     )?
                 }

@@ -209,6 +209,7 @@ impl Importer<'_> {
                 padding,
                 dilation: cast2(conv.config.dilation),
                 groups: conv.config.groups as i64,
+                ..Default::default()
             }),
             &[ids[0], ids[1]],
             result,
@@ -255,6 +256,7 @@ impl Importer<'_> {
                 dilation: cast2(conv.config.dilation),
                 output_padding: cast2(conv.config.padding_out),
                 groups: 1,
+                ..Default::default()
             }),
             &[ids[0], weight],
             result,

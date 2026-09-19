@@ -37,6 +37,7 @@ fn real_convolution_both_gradients_match_independent_scalar_loops() {
                 padding: [[1, 0], [0, 2]],
                 dilation: [1, 2],
                 groups: 2,
+                ..Default::default()
             },
         ),
     ];

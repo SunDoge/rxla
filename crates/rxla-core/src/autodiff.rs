@@ -557,6 +557,7 @@ impl Tensor {
                             padding: options.padding,
                             dilation: options.dilation,
                             groups: options.groups,
+                            precision: Precision::Highest,
                         };
                         add(0, dy.conv2d(&forward_kernel, conv_options)?);
                         let forward_gradient = self.graph().node(
@@ -771,6 +772,7 @@ fn conv2d_input_gradient(
             dilation: options.dilation,
             output_padding,
             groups: options.groups,
+            precision: options.precision,
         },
     )
 }

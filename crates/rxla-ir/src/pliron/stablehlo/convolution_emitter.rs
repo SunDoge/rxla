@@ -8,6 +8,14 @@ fn pair(values: [i64; 2]) -> String {
     format!("{}, {}", values[0], values[1])
 }
 
+fn precision(value: Precision) -> &'static str {
+    match value {
+        Precision::Default => "DEFAULT",
+        Precision::High => "HIGH",
+        Precision::Highest => "HIGHEST",
+    }
+}
+
 pub(super) fn emit_convolution(emission: &mut OperationEmission<'_>) -> Result<bool> {
     let ctx = emission.ctx;
     let operation_ptr = emission.operation;
@@ -42,6 +50,7 @@ pub(super) fn emit_convolution(emission: &mut OperationEmission<'_>) -> Result<b
             .get_attr_stable_transpose_convolution_config(ctx)
             .unwrap()
             .options();
+        let precision = precision(options.precision);
         let extent = [
             (rhs.dims[0] - 1) * options.dilation[0],
             (rhs.dims[1] - 1) * options.dilation[1],
@@ -55,7 +64,7 @@ pub(super) fn emit_convolution(emission: &mut OperationEmission<'_>) -> Result<b
         );
         writeln!(
             emission.body,
-            "    {} = stablehlo.convolution({}, {}) dim_numbers = [b, 0, 1, f]x[0, 1, o, i]->[b, 0, 1, f], window = {{stride = [1, 1], pad = [{padding}], lhs_dilate = [{}], rhs_dilate = [{}], reverse = [true, true]}} {{batch_group_count = 1 : i64, feature_group_count = {} : i64, precision_config = [#stablehlo<precision HIGHEST>, #stablehlo<precision HIGHEST>]}} : ({lhs_type}, {rhs_type}) -> {}",
+            "    {} = stablehlo.convolution({}, {}) dim_numbers = [b, 0, 1, f]x[0, 1, o, i]->[b, 0, 1, f], window = {{stride = [1, 1], pad = [{padding}], lhs_dilate = [{}], rhs_dilate = [{}], reverse = [true, true]}} {{batch_group_count = 1 : i64, feature_group_count = {} : i64, precision_config = [#stablehlo<precision {precision}>, #stablehlo<precision {precision}>]}} : ({lhs_type}, {rhs_type}) -> {}",
             emission.name,
             emission.operands[0],
             emission.operands[1],
@@ -82,6 +91,7 @@ fn emit_kernel_gradient_convolution(
     let kernel = value_type(ctx, operation.get_result(0));
     let lhs_type = stablehlo_type(&input)?;
     let rhs_type = stablehlo_type(&output_gradient)?;
+    let precision = precision(options.precision);
     let mut padding = [[0_i64; 2]; 2];
     for (axis, axis_padding) in padding.iter_mut().enumerate() {
         let output_dilated = (output_gradient.dims[axis + 1] - 1) * options.strides[axis] + 1;
@@ -92,7 +102,7 @@ fn emit_kernel_gradient_convolution(
     }
     writeln!(
         emission.body,
-        "    {} = stablehlo.convolution({}, {}) dim_numbers = [f, 0, 1, b]x[i, 0, 1, o]->[0, 1, b, f], window = {{stride = [{}], pad = [[{}, {}], [{}, {}]], lhs_dilate = [1, 1], rhs_dilate = [{}], reverse = [false, false]}} {{batch_group_count = {} : i64, feature_group_count = 1 : i64, precision_config = [#stablehlo<precision HIGHEST>, #stablehlo<precision HIGHEST>]}} : ({lhs_type}, {rhs_type}) -> {}",
+        "    {} = stablehlo.convolution({}, {}) dim_numbers = [f, 0, 1, b]x[i, 0, 1, o]->[0, 1, b, f], window = {{stride = [{}], pad = [[{}, {}], [{}, {}]], lhs_dilate = [1, 1], rhs_dilate = [{}], reverse = [false, false]}} {{batch_group_count = {} : i64, feature_group_count = 1 : i64, precision_config = [#stablehlo<precision {precision}>, #stablehlo<precision {precision}>]}} : ({lhs_type}, {rhs_type}) -> {}",
         emission.name,
         emission.operands[0],
         emission.operands[1],
@@ -118,13 +128,14 @@ fn emit_forward_convolution(
     let operation = emission.operation.deref(ctx);
     let lhs_type = stablehlo_type(&value_type(ctx, operation.get_operand(0)))?;
     let rhs_type = stablehlo_type(&value_type(ctx, operation.get_operand(1)))?;
+    let precision = precision(options.precision);
     let padding = format!(
         "[{}, {}], [{}, {}]",
         options.padding[0][0], options.padding[0][1], options.padding[1][0], options.padding[1][1]
     );
     writeln!(
             emission.body,
-            "    {} = stablehlo.convolution({}, {}) dim_numbers = [b, 0, 1, f]x{kernel_dimensions}->[b, 0, 1, f], window = {{stride = [{}], pad = [{padding}], lhs_dilate = [1, 1], rhs_dilate = [{}], reverse = [false, false]}} {{batch_group_count = 1 : i64, feature_group_count = {} : i64, precision_config = [#stablehlo<precision HIGHEST>, #stablehlo<precision HIGHEST>]}} : ({lhs_type}, {rhs_type}) -> {}",
+            "    {} = stablehlo.convolution({}, {}) dim_numbers = [b, 0, 1, f]x{kernel_dimensions}->[b, 0, 1, f], window = {{stride = [{}], pad = [{padding}], lhs_dilate = [1, 1], rhs_dilate = [{}], reverse = [false, false]}} {{batch_group_count = 1 : i64, feature_group_count = {} : i64, precision_config = [#stablehlo<precision {precision}>, #stablehlo<precision {precision}>]}} : ({lhs_type}, {rhs_type}) -> {}",
             emission.name,
             emission.operands[0],
             emission.operands[1],

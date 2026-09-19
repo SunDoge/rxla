@@ -63,7 +63,7 @@ mod transposed_convolution;
 mod typed_state;
 pub use rxla_ir::IrError;
 use rxla_ir::{Binary, Op, Reduction, SliceAxis, TensorType, Unary};
-pub use rxla_ir::{Conv2dOptions, ConvTranspose2dOptions, Pool2dOptions};
+pub use rxla_ir::{Conv2dOptions, ConvTranspose2dOptions, Pool2dOptions, Precision};
 
 /// One tensor axis in a traced signature. Rank and upper bounds remain compile-
 /// time information while a bounded axis obtains its actual size at execution.

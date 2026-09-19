@@ -19,6 +19,7 @@ fn real_transposed_convolution_gradients_match_scalar_scatter() {
                 dilation: [2, 1],
                 output_padding: [1, 2],
                 groups: 1,
+                ..Default::default()
             },
         ),
         (

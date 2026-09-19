@@ -15,7 +15,7 @@ mod tests;
 mod verification;
 
 pub use crate::{Binary, Comparison, IntegerBinary, Op, Reduction, SliceAxis, TensorType, Unary};
-pub use crate::{Conv2dOptions, ConvTranspose2dOptions, Pool2dOptions};
+pub use crate::{Conv2dOptions, ConvTranspose2dOptions, Pool2dOptions, Precision};
 use attributes::{sharding_attr_key, supported_dtype};
 use dialect::*;
 

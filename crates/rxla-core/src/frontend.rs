@@ -1665,6 +1665,7 @@ mod tests {
                     padding: [[1, 0], [0, 1]],
                     dilation: [1, 2],
                     groups: 2,
+                    ..Default::default()
                 },
             )
             .unwrap();

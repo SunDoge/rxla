@@ -35,8 +35,8 @@ macro_rules! verify_multiple_bytes {
 verify_multiple_bytes!(ShapeAttr, 8, "shape");
 verify_multiple_bytes!(DynamicBoundsAttr, 8, "dynamic bounds");
 verify_exact_bytes!(ElementTypeAttr, 4, "element type");
-verify_exact_bytes!(Conv2dOptionsAttr, 72, "conv2d options");
-verify_exact_bytes!(ConvTranspose2dOptionsAttr, 88, "conv transpose options");
+verify_exact_bytes!(Conv2dOptionsAttr, 80, "conv2d options");
+verify_exact_bytes!(ConvTranspose2dOptionsAttr, 96, "conv transpose options");
 verify_exact_bytes!(Pool2dOptionsAttr, 64, "pool2d options");
 verify_multiple_bytes!(AxesAttr, 8, "axes");
 verify_exact_bytes!(AxisAttr, 8, "axis");
@@ -420,6 +420,7 @@ impl Conv2dOptionsAttr {
                     options.dilation[0],
                     options.dilation[1],
                     options.groups,
+                    options.precision as i64,
                 ]
                 .into_iter()
                 .flat_map(i64::to_le_bytes)
@@ -431,7 +432,7 @@ impl Conv2dOptionsAttr {
     pub(super) fn options(&self) -> Conv2dOptions {
         let (values, remainder) = self.bytes.as_ref().as_chunks::<8>();
         assert!(
-            remainder.is_empty() && values.len() == 9,
+            remainder.is_empty() && values.len() == 10,
             "malformed conv2d options"
         );
         let values = values
@@ -443,6 +444,12 @@ impl Conv2dOptionsAttr {
             padding: [[values[2], values[3]], [values[4], values[5]]],
             dilation: [values[6], values[7]],
             groups: values[8],
+            precision: match values[9] {
+                0 => Precision::Default,
+                1 => Precision::High,
+                2 => Precision::Highest,
+                value => panic!("malformed convolution precision {value}"),
+            },
         }
     }
 }
@@ -461,6 +468,7 @@ impl ConvTranspose2dOptionsAttr {
             options.output_padding[0],
             options.output_padding[1],
             options.groups,
+            options.precision as i64,
         ];
         Self {
             bytes: BytesAttr::new(values.into_iter().flat_map(i64::to_le_bytes).collect()),
@@ -470,7 +478,7 @@ impl ConvTranspose2dOptionsAttr {
     pub(super) fn options(&self) -> ConvTranspose2dOptions {
         let (values, remainder) = self.bytes.as_ref().as_chunks::<8>();
         assert!(
-            remainder.is_empty() && values.len() == 11,
+            remainder.is_empty() && values.len() == 12,
             "malformed conv_transpose2d options"
         );
         let value = |index| i64::from_le_bytes(values[index]);
@@ -480,6 +488,12 @@ impl ConvTranspose2dOptionsAttr {
             dilation: [value(6), value(7)],
             output_padding: [value(8), value(9)],
             groups: value(10),
+            precision: match value(11) {
+                0 => Precision::Default,
+                1 => Precision::High,
+                2 => Precision::Highest,
+                value => panic!("malformed transpose convolution precision {value}"),
+            },
         }
     }
 }

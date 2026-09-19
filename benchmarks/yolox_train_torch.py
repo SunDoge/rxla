@@ -83,6 +83,19 @@ def optimizer_for(model: torch.nn.Module, learning_rate: float) -> torch.optim.S
     return optimizer
 
 
+class U8InputModel(torch.nn.Module):
+    """Keep the deployment input boundary identical to RXLA's compiled graph."""
+
+    def __init__(self, model: torch.nn.Module) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(
+        self, images: torch.Tensor, targets: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        return self.model(images.float(), targets)
+
+
 def main() -> None:
     args = Args.parse_args()
     if (
@@ -99,8 +112,9 @@ def main() -> None:
         raise SystemExit("PyTorch CUDA is unavailable")
 
     torch.backends.cudnn.benchmark = True
-    model = load_model(args.yolox_source, args.checkpoint).train().cuda()
-    model.head.use_l1 = args.l1
+    inner_model = load_model(args.yolox_source, args.checkpoint).train().cuda()
+    inner_model.head.use_l1 = args.l1
+    model = U8InputModel(inner_model).cuda()
     optimizer = optimizer_for(model, args.learning_rate)
     if args.execution == "compile":
         # YOLOX caches head grids across calls. CUDA-graph mode overwrites these
@@ -115,7 +129,7 @@ def main() -> None:
     count = args.batch_size * args.size * args.size * 3
     images = (
         ((torch.arange(count, dtype=torch.int64) * 17 + 13) % 256)
-        .float()
+        .to(torch.uint8)
         .reshape(args.batch_size, args.size, args.size, 3)
         .permute(0, 3, 1, 2)
         .contiguous()

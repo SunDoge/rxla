@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use fory::{ForyRow, from_row};
 use image::{Rgb, RgbImage, imageops::FilterType};
 use rayon::prelude::*;
-use rxla_core::{CacheLimits, Client, Compiler, DType, Tensor};
+use rxla_core::{CacheLimits, Client, Compiler, DType, Precision, Tensor};
 use rxla_models::{
     YoloConfig, YoloLossConfig, YoloSimOtaConfig, YoloTargets, yolo, yolox_loss_with_l1_weight,
     yolox_simota,
@@ -70,6 +70,9 @@ struct Args {
     /// Internal CUDA arithmetic; model inputs, parameters, state, and outputs remain F32.
     #[arg(long, value_enum, default_value_t = ComputeDtype::F32)]
     compute_dtype: ComputeDtype,
+    /// StableHLO convolution precision; default permits accelerator-native TF32.
+    #[arg(long, value_enum, default_value_t = ConvolutionPrecision::Default)]
+    convolution_precision: ConvolutionPrecision,
     /// Override warmup duration (default: 5/300 of all steps).
     #[arg(long)]
     warmup_steps: Option<usize>,
@@ -94,6 +97,12 @@ struct Args {
 enum ComputeDtype {
     F32,
     Bf16,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ConvolutionPrecision {
+    Default,
+    Highest,
 }
 
 #[derive(Subcommand)]
@@ -287,7 +296,13 @@ fn main() -> Result<()> {
         ComputeDtype::F32 => DType::F32,
         ComputeDtype::Bf16 => DType::BF16,
     };
-    let training_config = YoloConfig::yolox_tiny(80).compute_dtype(compute_dtype);
+    let convolution_precision = match args.convolution_precision {
+        ConvolutionPrecision::Default => Precision::Default,
+        ConvolutionPrecision::Highest => Precision::Highest,
+    };
+    let training_config = YoloConfig::yolox_tiny(80)
+        .compute_dtype(compute_dtype)
+        .convolution_precision(convolution_precision);
     let training = Model::new(
         move |cx: Cx,
               image: Tensor,

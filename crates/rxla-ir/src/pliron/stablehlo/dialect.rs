@@ -24,6 +24,7 @@ impl ConvolutionConfigAttr {
             options.dilation[0],
             options.dilation[1],
             options.groups,
+            options.precision as i64,
         ];
         Self {
             bytes: BytesAttr::new(values.into_iter().flat_map(i64::to_le_bytes).collect()),
@@ -33,7 +34,7 @@ impl ConvolutionConfigAttr {
     pub(super) fn options(&self) -> Conv2dOptions {
         let (values, remainder) = self.bytes.as_ref().as_chunks::<8>();
         assert!(
-            remainder.is_empty() && values.len() == 9,
+            remainder.is_empty() && values.len() == 10,
             "malformed StableHLO convolution configuration"
         );
         let value = |index| i64::from_le_bytes(values[index]);
@@ -42,6 +43,12 @@ impl ConvolutionConfigAttr {
             padding: [[value(2), value(3)], [value(4), value(5)]],
             dilation: [value(6), value(7)],
             groups: value(8),
+            precision: match value(9) {
+                0 => Precision::Default,
+                1 => Precision::High,
+                2 => Precision::Highest,
+                value => panic!("malformed StableHLO convolution precision {value}"),
+            },
         }
     }
 }
