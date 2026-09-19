@@ -212,6 +212,15 @@ BatchNorm running statistics are initialized from their exact pre-forward
 values, share the packed EMA update, and are exported under canonical state
 paths; non-floating counters and RNG state are not averaged.
 
+Metric observation is decoupled from device execution: the real trainer only
+downloads and validates its six scalar metrics on the first, final, and
+`--log-every` steps. Intermediate PJRT submissions retain their device-side
+state dependencies without forcing a host synchronization. With
+`--log-every 100`, the same seeded BF16/EMA workload reached `503.1 images/s`
+instead of the preceding fully synchronized `490.8 images/s`. A matching
+no-EMA asynchronous run reached `502.2 images/s`, so packed parameter and
+BatchNorm EMA had no measurable throughput cost in this pair of short runs.
+
 Run the comparable RXLA side with:
 
 ```sh

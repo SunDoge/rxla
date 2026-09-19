@@ -95,7 +95,7 @@ struct Args {
     /// Write inference-ready trained parameters and BatchNorm state here.
     #[arg(long)]
     output: Option<PathBuf>,
-    /// Print one progress line every N completed steps.
+    /// Synchronize, validate, and print metrics every N completed steps.
     #[arg(long, default_value_t = 10)]
     log_every: usize,
     /// Bracket steady training with the CUDA profiler API (for nsys capture-range).
@@ -445,24 +445,30 @@ fn main() -> Result<()> {
             &learning_rate,
             &l1_weight,
         ])?;
-        let train_ms = train_started.elapsed().as_secs_f64() * 1e3;
-        let losses = outputs[0].to_vec::<f32>()?;
-        if losses.len() != 6 || losses.iter().any(|value| !value.is_finite()) {
-            return Err("training produced invalid losses".into());
-        }
-        let foreground = losses[5] as usize;
-        if foreground == 0 {
-            return Err(format!(
-                "SimOTA produced no foreground anchors for image {}",
-                sample_ids.join(",")
-            )
-            .into());
-        }
         completed += 1;
+        let observe = completed == 1 || completed % args.log_every == 0 || completed == args.steps;
+        let losses = if observe {
+            let losses = outputs[0].to_vec::<f32>()?;
+            if losses.len() != 6 || losses.iter().any(|value| !value.is_finite()) {
+                return Err("training produced invalid losses".into());
+            }
+            if losses[5] as usize == 0 {
+                return Err(format!(
+                    "SimOTA produced no foreground anchors for image {}",
+                    sample_ids.join(",")
+                )
+                .into());
+            }
+            Some(losses)
+        } else {
+            None
+        };
+        let train_ms = train_started.elapsed().as_secs_f64() * 1e3;
         if completed == 1 && args.cuda_profile {
             profiler = Some(CudaProfiler::start(&args.cuda_runtime)?);
         }
-        if completed == 1 || completed % args.log_every == 0 || completed == args.steps {
+        if let Some(losses) = losses {
+            let foreground = losses[5] as usize;
             println!(
                 "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} l1={:.6} lr={step_learning_rate:.8} wait_ms={wait_ms:.1} load_ms={load_ms:.1} train_ms={train_ms:.1}",
                 sample_ids.join(","),
