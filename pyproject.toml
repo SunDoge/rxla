@@ -23,7 +23,11 @@ dependencies = [
     "pyfory[format]>=1.7,<1.8",
     "tfrecord-slow[crc32c]>=0.6,<0.7",
     "pycocotools>=2.0.10,<3",
+    "rxla-log",
 ]
 
 [tool.uv]
 package = false
+
+[tool.uv.sources]
+rxla-log = { path = "python/rxla-log", editable = true }

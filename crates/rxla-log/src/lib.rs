@@ -80,9 +80,13 @@ pub struct RunLog {
 
 impl RunLog {
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
-        let file = File::create(path.as_ref()).context(OpenSnafu {
-            path: path.as_ref(),
-        })?;
+        let file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(path.as_ref())
+            .context(OpenSnafu {
+                path: path.as_ref(),
+            })?;
         let writer = mcap::WriteOptions::new()
             .library(concat!("rxla-log/", env!("CARGO_PKG_VERSION")))
             .create(BufWriter::new(file))

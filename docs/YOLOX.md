@@ -325,6 +325,45 @@ Long invocations can combine `--training-output state.safetensors` with
 multi-hour run loses at most `N` updates and never exposes a partially written
 checkpoint. Existing milestone files are rejected rather than overwritten.
 
+Training can additionally emit indexed Protobuf/MCAP events and the exact
+StableHLO for every multi-scale variant compiled by the run:
+
+```sh
+yolox_coco_train_step PLUGIN \
+  --epochs 300 --batch-size 8 --gradient-accumulation 8 \
+  --event-log train.mcap --run-id yolox-tiny-coco-v4 \
+  --stablehlo-dir stablehlo-training \
+  --training-output training-final.safetensors \
+  --output model-ema.safetensors \
+  tfrecord /data/datasets/coco2017-train2017.tfrecord
+```
+
+The event stream contains run lifecycle, typed loss/timing metrics, input size,
+foreground/target counts, and published checkpoints. Logs use the standalone
+`rxla-log` schema and can be read by both Rust and Python. StableHLO files are
+named by compiled input size and written with no-clobber semantics.
+
+For accuracy runs, the Python supervisor keeps one training process resident,
+pauses it at milestone checkpoints, evaluates the packed EMA on COCO val2017,
+then resumes it:
+
+```sh
+uv run --frozen python benchmarks/yolox_train_eval.py \
+  /path/to/cuda_pjrt_plugin.so \
+  /data/datasets/coco2017-train2017.tfrecord \
+  /data/datasets/coco2017 \
+  .cache/yolox/runs/yolox-tiny-v4 \
+  --epochs 300 --eval-every-epochs 10 --log-every 100
+```
+
+It produces separate `training.mcap` and `evaluation.mcap` logs, resumable
+milestone snapshots, the final EMA model, training StableHLO variants, and the
+exact inference StableHLO plus ABI fixture used by the first evaluation.
+Evaluation uses non-preallocating PJRT clients so the paused trainer and
+evaluator can coexist on one GPU without each reserving 75% of VRAM. Raw COCO
+detection JSON is deleted after metrics are recorded unless
+`--keep-detections` is supplied.
+
 Create that full accuracy dataset explicitly with:
 
 ```sh

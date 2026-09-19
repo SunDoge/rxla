@@ -6,7 +6,7 @@ use fast_image_resize::{
     images::{Image as FastImage, ImageRef},
 };
 use image::RgbImage;
-use rxla_core::{Buffer, CacheLimits, Client, Compiler};
+use rxla_core::{Buffer, CacheLimits, Client, ClientOptions, Compiler};
 use rxla_models::{YoloConfig, YoloDecodeConfig, yolo};
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
@@ -55,6 +55,12 @@ struct Args {
     iou_threshold: f32,
     #[arg(long, default_value_t = 100)]
     log_every: usize,
+    /// PJRT allocator reservation fraction; omit to use the plugin default.
+    #[arg(long)]
+    memory_fraction: Option<f32>,
+    /// Whether PJRT preallocates its allocator reservation.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    preallocate: bool,
 }
 
 #[derive(Deserialize)]
@@ -78,8 +84,12 @@ struct CocoDetection {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    if args.log_every == 0 {
-        return Err("log interval must be nonzero".into());
+    if args.log_every == 0
+        || args
+            .memory_fraction
+            .is_some_and(|fraction| !fraction.is_finite() || !(0.0..=1.0).contains(&fraction))
+    {
+        return Err("log interval and memory fraction must be valid".into());
     }
     let document: Coco = serde_json::from_reader(BufReader::new(File::open(&args.annotations)?))?;
     let image_count = args
@@ -87,7 +97,11 @@ fn main() -> Result<()> {
         .unwrap_or(document.images.len())
         .min(document.images.len());
 
-    let client = unsafe { Client::load(&args.plugin) }?;
+    let mut client_options = ClientOptions::new().set("preallocate", args.preallocate);
+    if let Some(memory_fraction) = args.memory_fraction {
+        client_options = client_options.set("memory_fraction", memory_fraction);
+    }
+    let client = unsafe { Client::load_with_options(&args.plugin, &client_options) }?;
     let definition = Model::new(|cx: Cx, image| yolo(cx, &image, &YoloConfig::yolox_tiny(80)))
         .inputs(ModelInput::new([1, i64::from(SIZE), i64::from(SIZE), 3]))
         .inference();

@@ -27,9 +27,9 @@ DecodedEvent: TypeAlias = tuple[str, int, Message]
 
 
 class RunLog:
-    def __init__(self, path: str | Path) -> None:
-        self._stream: BinaryIO = Path(path).open("wb")
-        self._writer = Writer(self._stream)
+    def __init__(self, path: str | Path, *, chunk_size: int = 1 << 20) -> None:
+        self._stream: BinaryIO = Path(path).open("xb")
+        self._writer = Writer(self._stream, chunk_size=chunk_size)
         self._writer.start(profile="rxla.log.v1", library="rxla-log-python/0.1.0a1")
         self._schema = files("rxla_log").joinpath("schema/events.desc").read_bytes()
         self._channels: dict[type[Message], int] = {}
@@ -87,6 +87,9 @@ class RunLog:
         self._writer.finish()
         self._stream.close()
         self._finished = True
+
+    def flush(self) -> None:
+        self._stream.flush()
 
     def __enter__(self) -> RunLog:
         return self

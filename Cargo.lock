@@ -2504,6 +2504,7 @@ dependencies = [
  "regex",
  "rustix 1.1.4",
  "rxla-core",
+ "rxla-log",
  "rxla-models",
  "rxla-nn",
  "rxla-pjrt",

@@ -89,6 +89,7 @@ rayon = { workspace = true }
 regex = "1.12.3"
 rxla-core = { path = "../rxla-core", version = "=0.1.0-alpha.1" }
 rxla-models = { path = "../rxla-models", version = "=0.1.0-alpha.1" }
+rxla-log = { path = "../rxla-log", version = "=0.1.0-alpha.1" }
 rxla-train = { path = "../rxla-train", version = "=0.1.0-alpha.1" }
 rxla-tfrecord = { path = "../rxla-tfrecord", version = "=0.1.0-alpha.1" }
 serde = { version = "1.0.229", features = ["derive"] }

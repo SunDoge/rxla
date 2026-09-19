@@ -10,7 +10,10 @@ use image::{Rgb, RgbImage};
 use rayon::prelude::*;
 #[cfg(feature = "disk-cache")]
 use rxla_core::DiskCache;
-use rxla_core::{CacheLimits, Client, Compiler, DType, Precision, StateProgram, Tensor};
+use rxla_core::{
+    CacheLimits, Client, ClientOptions, Compiler, DType, Precision, StateProgram, Tensor,
+};
+use rxla_log::{RunLog, proto as log_proto};
 use rxla_models::{
     YoloConfig, YoloLossConfig, YoloSimOtaConfig, YoloTargets, yolo, yolox_loss_with_l1_weight,
     yolox_simota,
@@ -26,8 +29,10 @@ use rxla_train::{
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    fs::{self, File},
+    io::Write,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -135,6 +140,12 @@ struct Args {
     /// Trusted directory for backend-native executable caching.
     #[arg(long)]
     compile_cache: Option<PathBuf>,
+    /// PJRT allocator reservation fraction; omit to use the plugin default.
+    #[arg(long)]
+    memory_fraction: Option<f32>,
+    /// Whether PJRT preallocates its allocator reservation.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    preallocate: bool,
     /// Disable the official YOLOX parameter EMA, primarily for profiling.
     #[arg(long)]
     disable_model_ema: bool,
@@ -159,6 +170,15 @@ struct Args {
     /// Atomically refresh --training-output every N completed optimizer steps.
     #[arg(long, requires = "training_output")]
     checkpoint_every: Option<usize>,
+    /// Write structured Protobuf events, indexes, and attachments to a new MCAP file.
+    #[arg(long)]
+    event_log: Option<PathBuf>,
+    /// Stable run identity recorded in the event log; generated when omitted.
+    #[arg(long, requires = "event_log")]
+    run_id: Option<String>,
+    /// Export every compiled multi-scale training variant as StableHLO into a new directory.
+    #[arg(long)]
+    stablehlo_dir: Option<PathBuf>,
     /// Synchronize, validate, and print metrics every N completed steps.
     #[arg(long, default_value_t = 10)]
     log_every: usize,
@@ -290,6 +310,12 @@ struct TrainingVariantConfig {
     model: YoloConfig,
     use_ema: bool,
     gradient_accumulation: usize,
+    export_stablehlo: bool,
+}
+
+struct BuiltTrainingVariant {
+    variant: TrainingVariant,
+    stablehlo: Option<Vec<u8>>,
 }
 
 struct CudaProfiler {
@@ -392,7 +418,7 @@ fn training_sizes(
 fn build_training_variant(
     compiler: &mut Compiler,
     config: TrainingVariantConfig,
-) -> Result<TrainingVariant> {
+) -> Result<BuiltTrainingVariant> {
     let TrainingVariantConfig {
         batch,
         augmentation_size,
@@ -401,6 +427,7 @@ fn build_training_variant(
         model: model_config,
         use_ema,
         gradient_accumulation,
+        export_stablehlo,
     } = config;
     let definition = Model::new(
         move |cx: Cx,
@@ -489,11 +516,16 @@ fn build_training_variant(
     } else {
         None
     };
-    let program = model.compile_stateful_tensors(compiler, &[metrics])?;
-    Ok(TrainingVariant {
-        model,
-        program,
-        ema,
+    let prepared = model.prepare_stateful_tensors(&[metrics])?;
+    let stablehlo = export_stablehlo.then(|| prepared.lowered_program().code().to_vec());
+    let program = prepared.compile(compiler)?;
+    Ok(BuiltTrainingVariant {
+        variant: TrainingVariant {
+            model,
+            program,
+            ema,
+        },
+        stablehlo,
     })
 }
 
@@ -551,6 +583,50 @@ fn periodic_checkpoint_path(path: &Path, completed_steps: usize) -> PathBuf {
     path.with_file_name(file_name)
 }
 
+fn unix_time_ns() -> Result<u64> {
+    Ok(u64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
+    )?)
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut output = File::options().write(true).create_new(true).open(path)?;
+    output.write_all(bytes)?;
+    output.flush()?;
+    Ok(())
+}
+
+fn run_started_event(
+    run_id: &str,
+    args: &Args,
+    total_steps: usize,
+    resumed_at: usize,
+    effective_batch_size: usize,
+) -> log_proto::RunStarted {
+    let metadata = [
+        log_proto::Metric::integer("total_steps", total_steps as i64),
+        log_proto::Metric::integer("resumed_at", resumed_at as i64),
+        log_proto::Metric::integer("batch_size", args.batch_size as i64),
+        log_proto::Metric::integer("gradient_accumulation", args.gradient_accumulation as i64),
+        log_proto::Metric::integer("effective_batch_size", effective_batch_size as i64),
+        log_proto::Metric::integer("seed", args.seed as i64),
+        log_proto::Metric::text("compute_dtype", format!("{:?}", args.compute_dtype)),
+        log_proto::Metric::text(
+            "convolution_precision",
+            format!("{:?}", args.convolution_precision),
+        ),
+        log_proto::Metric::text("source", format!("{:?}", args.source)),
+    ]
+    .into_iter()
+    .collect();
+    log_proto::RunStarted {
+        run_id: run_id.to_owned(),
+        model: "yolox-tiny".to_owned(),
+        producer: concat!("rxla/", env!("CARGO_PKG_VERSION")).to_owned(),
+        metadata,
+    }
+}
+
 fn resume_step(
     args: &Args,
     total_steps: usize,
@@ -605,6 +681,9 @@ fn main() -> Result<()> {
             .learning_rate
             .is_some_and(|learning_rate| !learning_rate.is_finite() || learning_rate < 0.0)
         || args.steps == 0
+        || args
+            .memory_fraction
+            .is_some_and(|fraction| !fraction.is_finite() || !(0.0..=1.0).contains(&fraction))
         || args.epochs == Some(0)
         || args.run_steps == Some(0)
         || args.checkpoint_every == Some(0)
@@ -632,10 +711,15 @@ fn main() -> Result<()> {
         .checked_mul(args.gradient_accumulation)
         .ok_or("effective batch size overflow")?;
     let source = TrainingSource::open(args.source.clone())?;
+    let source_sample_count = source.sample_count();
+    if source_sample_count == 0 {
+        return Err("training source is empty".into());
+    }
+    let steps_per_epoch = source_sample_count.div_ceil(effective_batch_size);
     let epoch_schedule = args
         .epochs
         .map(|epochs| {
-            official_epoch_schedule(source.sample_count(), effective_batch_size, epochs)
+            official_epoch_schedule(source_sample_count, effective_batch_size, epochs)
                 .ok_or("invalid or overflowing epoch-derived training schedule")
         })
         .transpose()?;
@@ -678,6 +762,25 @@ fn main() -> Result<()> {
         no_augmentation_steps,
         minimum_rate_steps,
     )?;
+    let event_log_started_ns = unix_time_ns()?;
+    let run_id = args
+        .run_id
+        .clone()
+        .unwrap_or_else(|| format!("yolox-{event_log_started_ns}"));
+    let mut event_log = args.event_log.as_ref().map(RunLog::create).transpose()?;
+    if let Some(log) = &mut event_log {
+        log.write(
+            &run_started_event(
+                &run_id,
+                &args,
+                total_steps,
+                resumed_at,
+                effective_batch_size,
+            ),
+            event_log_started_ns,
+        )?;
+        log.flush()?;
+    }
     let samples = ShufflePool::new(SourceSamples(source), args.shuffle_buffer, args.seed)?;
     let mut batches = PlannedBatches {
         samples,
@@ -719,7 +822,11 @@ fn main() -> Result<()> {
         move |batch| prepare_batch(batch.groups, augmentation_size, batch.size),
     )?;
     let batch = i64::try_from(args.batch_size)?;
-    let client = unsafe { Client::load(&args.plugin) }?;
+    let mut client_options = ClientOptions::new().set("preallocate", args.preallocate);
+    if let Some(memory_fraction) = args.memory_fraction {
+        client_options = client_options.set("memory_fraction", memory_fraction);
+    }
+    let client = unsafe { Client::load_with_options(&args.plugin, &client_options) }?;
     let compiler = Compiler::new(client.clone(), CacheLimits::default());
     #[cfg(feature = "disk-cache")]
     let compiler = if let Some(directory) = &args.compile_cache {
@@ -763,7 +870,7 @@ fn main() -> Result<()> {
         &step_sizes[total_micro_steps - 1..]
     };
     for size in active_sizes.iter().copied().collect::<BTreeSet<_>>() {
-        let variant = build_training_variant(
+        let built = build_training_variant(
             &mut compiler,
             TrainingVariantConfig {
                 batch,
@@ -773,9 +880,21 @@ fn main() -> Result<()> {
                 model: training_config,
                 use_ema: !args.disable_model_ema,
                 gradient_accumulation: args.gradient_accumulation,
+                export_stablehlo: args.stablehlo_dir.is_some(),
             },
         )?;
-        variants.insert(size, variant);
+        if let (Some(directory), Some(stablehlo)) = (&args.stablehlo_dir, built.stablehlo) {
+            fs::create_dir_all(directory)?;
+            write_new(&directory.join(format!("train-{size}.mlir")), &stablehlo)?;
+        }
+        variants.insert(size, built.variant);
+    }
+    if let Some(directory) = &args.stablehlo_dir {
+        let manifest = variants
+            .keys()
+            .map(|size| format!("{size}\ttrain-{size}.mlir\n"))
+            .collect::<String>();
+        write_new(&directory.join("variants.tsv"), manifest.as_bytes())?;
     }
     let train_compile_ms = train_compile_started.elapsed().as_secs_f64() * 1e3;
     let mut current_size = step_sizes[replay_micro_steps.min(total_micro_steps - 1)];
@@ -934,6 +1053,31 @@ fn main() -> Result<()> {
                 losses[3],
                 losses[4],
             );
+            if let Some(log) = &mut event_log {
+                let mut event = log_proto::TrainStep::new(completed as u64, f64::from(losses[0]))
+                    .learning_rate(f64::from(step_learning_rate));
+                event.epoch = u64::try_from(completed / steps_per_epoch)?;
+                event.samples_seen = u64::try_from(
+                    completed
+                        .checked_mul(effective_batch_size)
+                        .ok_or("sample count overflow")?,
+                )?;
+                event.elapsed_ns = u64::try_from(run_started.elapsed().as_nanos())?;
+                event.metrics = vec![
+                    log_proto::Metric::scalar("box_loss", f64::from(losses[1])),
+                    log_proto::Metric::scalar("objectness_loss", f64::from(losses[2])),
+                    log_proto::Metric::scalar("class_loss", f64::from(losses[3])),
+                    log_proto::Metric::scalar("l1_loss", f64::from(losses[4])),
+                    log_proto::Metric::integer("foreground", foreground as i64),
+                    log_proto::Metric::integer("targets", targets.len() as i64),
+                    log_proto::Metric::integer("input_size", i64::from(size)),
+                    log_proto::Metric::scalar("wait_ms", wait_ms),
+                    log_proto::Metric::scalar("load_ms", load_ms),
+                    log_proto::Metric::scalar("staging_ms", staging_ms),
+                    log_proto::Metric::scalar("train_ms", train_ms),
+                ];
+                log.write(&event, unix_time_ns()?)?;
+            }
         }
         if optimizer_step
             && completed != expected_completed
@@ -960,6 +1104,18 @@ fn main() -> Result<()> {
                 .expect("current training size was compiled");
             save_training_state_new(&output, &current.model, &training_session, Some(&metadata))?;
             println!("checkpoint_step={completed} output={}", output.display());
+            if let Some(log) = &mut event_log {
+                log.write(
+                    &log_proto::CheckpointPublished {
+                        step: completed as u64,
+                        uri: output.display().to_string(),
+                        digest: None,
+                        byte_length: output.metadata()?.len(),
+                    },
+                    unix_time_ns()?,
+                )?;
+                log.flush()?;
+            }
         }
     }
     drop(profiler);
@@ -1067,6 +1223,18 @@ fn main() -> Result<()> {
         cache.misses,
         cache.disk_hits,
     );
+    if let Some(mut log) = event_log {
+        log.write(
+            &log_proto::RunFinished {
+                run_id,
+                final_step: completed as u64,
+                succeeded: true,
+                message: None,
+            },
+            unix_time_ns()?,
+        )?;
+        log.finish()?;
+    }
     Ok(())
 }
 
