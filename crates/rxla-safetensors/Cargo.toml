@@ -37,6 +37,10 @@ name = "yolox_infer"
 required-features = ["model"]
 
 [[example]]
+name = "yolox_coco_eval"
+required-features = ["model"]
+
+[[example]]
 name = "yolox_coco_train_step"
 required-features = ["model"]
 

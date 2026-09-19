@@ -74,6 +74,33 @@ cargo run -p rxla-safetensors --release --features model \
 The example letterboxes to 416×416, executes the three YOLOX heads, performs
 decode and class-aware NMS, and writes an annotated image.
 
+Training quality is checked with the standard COCO evaluator rather than loss
+alone. Export predictions from an inference checkpoint, then compute the twelve
+official bbox metrics with `pycocotools`:
+
+```sh
+cargo run -p rxla-safetensors --release --features model \
+  --example yolox_coco_eval -- \
+  /path/to/xla_cuda_plugin.so yolox_tiny.safetensors \
+  /data/datasets/coco2017/annotations/instances_val2017.json \
+  /data/datasets/coco2017/val2017 detections.json
+
+uv run --no-sync python benchmarks/coco_eval.py \
+  /data/datasets/coco2017/annotations/instances_val2017.json detections.json
+```
+
+The evaluator defaults to YOLOX-tiny's official 416×416 test size, `0.01`
+confidence threshold, `0.65` class-aware NMS threshold, and at most 300 retained
+detections per image. `--max-images` provides a short pipeline smoke test, but
+only all 5,000 `val2017` images produce comparable COCO AP.
+
+As a baseline, the converted official `yolox_tiny.pth` produced 249,721
+post-NMS detections over all 5,000 images and reached `AP=0.328`, `AP50=0.504`,
+and `AP75=0.347`. The primary AP exactly matches the published YOLOX-tiny
+`32.8` result. This closes the inference-side accuracy loop; training changes
+must retain the one-step numerical oracle and are judged end to end by this
+same full-validation AP path.
+
 ## Training on COCO
 
 ```sh
