@@ -2,7 +2,7 @@
 
 RXLA implements the official YOLOX-tiny topology, checkpoint-compatible model
 paths, image preprocessing, decode/NMS, SimOTA matching, reverse-mode training,
-and resident Adam updates. CPU and CUDA use the same model and training code;
+and resident grouped momentum-SGD updates. CPU and CUDA use the same model and training code;
 only the PJRT plugin path changes.
 
 ## Prepare official weights
@@ -37,7 +37,7 @@ cargo run -p rxla-safetensors --release --features model \
   --example yolox_coco_train_step -- \
   /path/to/xla_cuda_plugin.so \
   yolox_tiny.safetensors \
-  --size 416 --steps 100 --learning-rate 1e-5 \
+  --size 416 --steps 100 --learning-rate 0.00015625 \
   --output yolox_tiny_trained.safetensors \
   coco \
   /data/datasets/coco2017/annotations/instances_train2017.json \
@@ -47,7 +47,7 @@ cargo run -p rxla-safetensors --release --features model \
 
 The model is compiled once. Each step runs the current weights through the
 inference graph, computes dynamic SimOTA assignments on the host, then executes
-the loss, backward pass, BatchNorm updates, and Adam update as one stateful XLA
+the loss, backward pass, BatchNorm updates, and SGD update as one stateful XLA
 program. Switching between the inference and training programs clones shared
 PJRT buffer handles rather than copying parameter payloads. The output excludes
 optimizer moments but includes parameters and model BatchNorm state, so it can

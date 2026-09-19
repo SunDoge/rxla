@@ -1,9 +1,10 @@
 //! Minimal functional SGD for effect-based models.
 
+use derive_setters::Setters;
 use rxla_core::{
     Buffer, Compiler, DType, Executable, LoweredProgram, PreparedStateGraph, StateProgram, Tensor,
 };
-use rxla_nn::{AppliedModel, ParameterId, ParameterSelection};
+use rxla_nn::{AppliedModel, ParameterId, ParameterSelection, ParameterSpec, TransformState};
 use snafu::{Snafu, ensure};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,6 +18,8 @@ pub enum ModelSgdError {
     InvalidLoss,
     #[snafu(display("model SGD learning rate must be finite and nonnegative"))]
     InvalidLearningRate,
+    #[snafu(display("invalid momentum SGD options"))]
+    InvalidOptions,
     #[snafu(display("model SGD can only update F32 parameter {path:?}, found {dtype:?}"))]
     UnsupportedParameterDType { path: String, dtype: DType },
     #[snafu(display(
@@ -37,6 +40,27 @@ pub enum ModelSgdError {
 }
 
 pub type ModelSgdResult<T, E = ModelSgdError> = std::result::Result<T, E>;
+
+/// Per-parameter SGD policy. A caller can assign different decay values while
+/// one reverse-mode pass still computes every selected gradient.
+#[derive(Clone, Copy, Debug, Setters)]
+pub struct SgdOptions {
+    pub momentum: f32,
+    pub dampening: f32,
+    pub weight_decay: f32,
+    pub nesterov: bool,
+}
+
+impl Default for SgdOptions {
+    fn default() -> Self {
+        Self {
+            momentum: 0.0,
+            dampening: 0.0,
+            weight_decay: 0.0,
+            nesterov: false,
+        }
+    }
+}
 
 /// One selected parameter and its functional SGD replacement value.
 pub struct ModelSgdUpdate {
@@ -274,6 +298,161 @@ pub fn apply_model_sgd(
     Ok(())
 }
 
+/// Add grouped momentum-SGD updates to resident model parameters.
+///
+/// `options_for` is evaluated once per selected schema entry while tracing.
+/// This supports optimizer groups such as decayed convolution weights and
+/// non-decayed normalization/bias parameters without repeating autodiff.
+pub fn apply_model_sgd_with_options(
+    model: &mut AppliedModel,
+    selection: &ParameterSelection,
+    loss: &Tensor,
+    learning_rate: f32,
+    mut options_for: impl FnMut(&ParameterSpec) -> SgdOptions,
+) -> ModelSgdResult<()> {
+    ensure!(
+        learning_rate.is_finite() && learning_rate >= 0.0,
+        InvalidLearningRateSnafu
+    );
+    apply_model_sgd_grouped(
+        model,
+        selection,
+        loss,
+        LearningRate::Scalar(learning_rate),
+        &mut options_for,
+    )
+}
+
+/// The grouped momentum-SGD transform with a runtime scalar learning rate.
+/// Schedulers can update the value every step without recompiling the model.
+pub fn apply_model_sgd_with_learning_rate(
+    model: &mut AppliedModel,
+    selection: &ParameterSelection,
+    loss: &Tensor,
+    learning_rate: &Tensor,
+    mut options_for: impl FnMut(&ParameterSpec) -> SgdOptions,
+) -> ModelSgdResult<()> {
+    ensure!(
+        learning_rate.shape().is_empty() && learning_rate.dtype() == DType::F32,
+        InvalidLearningRateSnafu
+    );
+    apply_model_sgd_grouped(
+        model,
+        selection,
+        loss,
+        LearningRate::Tensor(learning_rate),
+        &mut options_for,
+    )
+}
+
+enum LearningRate<'a> {
+    Scalar(f32),
+    Tensor(&'a Tensor),
+}
+
+fn apply_model_sgd_grouped(
+    model: &mut AppliedModel,
+    selection: &ParameterSelection,
+    loss: &Tensor,
+    learning_rate: LearningRate<'_>,
+    options_for: &mut impl FnMut(&ParameterSpec) -> SgdOptions,
+) -> ModelSgdResult<()> {
+    ensure!(!selection.is_empty(), EmptySelectionSnafu);
+    ensure!(
+        loss.shape().is_empty() && loss.dtype() == DType::F32,
+        InvalidLossSnafu
+    );
+    model.validate_resident_parameters(selection)?;
+    let options = selection
+        .parameters()
+        .map(|(_, spec)| {
+            ensure!(
+                spec.dtype() == DType::F32,
+                UnsupportedParameterDTypeSnafu {
+                    path: spec.path(),
+                    dtype: spec.dtype(),
+                }
+            );
+            let options = options_for(spec);
+            ensure!(valid_sgd_options(options), InvalidOptionsSnafu);
+            Ok(options)
+        })
+        .collect::<ModelSgdResult<Vec<_>>>()?;
+    let parameters = model.parameter_tensors(selection)?;
+    let gradients = loss.grad(&parameters)?;
+    let velocities = selection
+        .parameters()
+        .zip(&parameters)
+        .zip(&options)
+        .map(|(((_, spec), parameter), options)| {
+            if options.momentum == 0.0 {
+                Ok(None)
+            } else {
+                Ok(Some(model.transform_state(
+                    format!("__optimizer.sgd.{}.momentum", spec.path()),
+                    parameter.shape(),
+                    DType::F32,
+                )?))
+            }
+        })
+        .collect::<ModelSgdResult<Vec<Option<TransformState>>>>()?;
+
+    let mut next_parameters = Vec::with_capacity(parameters.len());
+    let mut next_velocities = Vec::new();
+    for (((parameter, gradient), options), velocity) in parameters
+        .iter()
+        .zip(gradients)
+        .zip(&options)
+        .zip(&velocities)
+    {
+        let gradient = if options.weight_decay == 0.0 {
+            gradient
+        } else {
+            gradient.add(&parameter.mul_scalar(options.weight_decay)?)?
+        };
+        let direction = if let Some(velocity) = velocity {
+            let next = velocity
+                .value()
+                .mul_scalar(options.momentum)?
+                .add(&gradient.mul_scalar(1.0 - options.dampening)?)?;
+            let direction = if options.nesterov {
+                gradient.add(&next.mul_scalar(options.momentum)?)?
+            } else {
+                next.clone()
+            };
+            next_velocities.push((velocity, next));
+            direction
+        } else {
+            gradient
+        };
+        let update = match learning_rate {
+            LearningRate::Scalar(value) => direction.mul_scalar(value)?,
+            LearningRate::Tensor(value) => {
+                direction.mul(&value.broadcast_to(parameter.shape())?)?
+            }
+        };
+        next_parameters.push(parameter.sub(&update)?);
+    }
+    model.write_transform_states(
+        &next_velocities
+            .iter()
+            .map(|(state, value)| (*state, value))
+            .collect::<Vec<_>>(),
+    )?;
+    model.write_resident_parameters(selection, &next_parameters)?;
+    Ok(())
+}
+
+fn valid_sgd_options(options: SgdOptions) -> bool {
+    options.momentum.is_finite()
+        && (0.0..1.0).contains(&options.momentum)
+        && options.dampening.is_finite()
+        && (0.0..=1.0).contains(&options.dampening)
+        && options.weight_decay.is_finite()
+        && options.weight_decay >= 0.0
+        && (!options.nesterov || (options.momentum > 0.0 && options.dampening == 0.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +554,43 @@ mod tests {
         assert!(prepared.output_spec(1).is_none());
         assert_eq!(prepared.input_indices(), [0]);
         assert_eq!(model.resident_parameters().count(), 1);
+    }
+
+    #[test]
+    fn grouped_momentum_sgd_builds_one_velocity_per_parameter() {
+        let definition = Model::new(linear_loss);
+        let (selection, mut model) = definition.trace_resident_under("linear").unwrap();
+        let loss = model.outputs()[0].clone();
+
+        apply_model_sgd_with_options(&mut model, &selection, &loss, 0.1, |_| {
+            SgdOptions::default()
+                .momentum(0.9)
+                .nesterov(true)
+                .weight_decay(5e-4)
+        })
+        .unwrap();
+
+        assert_eq!(
+            model.states().map(|(path, _)| path).collect::<Vec<_>>(),
+            ["__optimizer.sgd.linear.weight.momentum"]
+        );
+        let prepared = model.prepare_stateful().unwrap();
+        let stablehlo = std::str::from_utf8(prepared.lowered_program().code()).unwrap();
+        assert!(stablehlo.contains("stablehlo.multiply"));
+        assert!(stablehlo.contains("stablehlo.subtract"));
+    }
+
+    #[test]
+    fn grouped_momentum_sgd_rejects_invalid_nesterov_combination() {
+        let definition = Model::new(linear_loss);
+        let (selection, mut model) = definition.trace_resident_under("linear").unwrap();
+        let loss = model.outputs()[0].clone();
+        assert!(matches!(
+            apply_model_sgd_with_options(&mut model, &selection, &loss, 0.1, |_| {
+                SgdOptions::default().nesterov(true)
+            }),
+            Err(ModelSgdError::InvalidOptions)
+        ));
     }
 
     #[test]

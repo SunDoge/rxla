@@ -14,8 +14,9 @@ pub use model_adam::{
 };
 mod model_sgd;
 pub use model_sgd::{
-    ModelSgdError, ModelSgdOutputPlan, ModelSgdResult, ModelSgdStep, ModelSgdUpdate,
-    apply_model_sgd, prepare_model_sgd,
+    ModelSgdError, ModelSgdOutputPlan, ModelSgdResult, ModelSgdStep, ModelSgdUpdate, SgdOptions,
+    apply_model_sgd, apply_model_sgd_with_learning_rate, apply_model_sgd_with_options,
+    prepare_model_sgd,
 };
 mod pipeline;
 pub use pipeline::{BoundedPipeline, PipelineError, PipelineResult};
@@ -24,5 +25,5 @@ pub use rl::{RlError, RlResult, clipped_policy_gradient_loss, policy_gradient_lo
 mod yolo;
 pub use yolo::{
     DecodedYoloBatch, DetectionTarget, SimOtaAssignments, SimOtaConfig, SimOtaError, SimOtaInput,
-    SimOtaResult, YoloHead,
+    SimOtaResult, YoloHead, YoloLrSchedule,
 };

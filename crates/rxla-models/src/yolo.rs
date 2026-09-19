@@ -107,7 +107,10 @@ impl Layer for BaseConv {
                 .bias(false),
         )?;
         hidden
-            .through(path!(cx / "bn")?, BatchNorm::new())?
+            .through(
+                path!(cx / "bn")?,
+                BatchNorm::new().epsilon(1e-3).momentum(0.03),
+            )?
             .silu()
             .map_err(Into::into)
     }

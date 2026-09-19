@@ -1,4 +1,4 @@
-//! Train YOLOX on real COCO samples with host SimOTA and a resident Adam session.
+//! Train YOLOX on real COCO samples with host SimOTA and resident momentum SGD.
 
 use clap::{Parser, Subcommand};
 use fory::{ForyRow, from_row};
@@ -9,7 +9,8 @@ use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::{SafeTensors, save_model_new};
 use rxla_tfrecord::Reader as TfrecordReader;
 use rxla_train::{
-    AdamOptions, DecodedYoloBatch, DetectionTarget, SimOtaConfig, YoloHead, apply_model_adam,
+    DecodedYoloBatch, DetectionTarget, SgdOptions, SimOtaConfig, YoloHead, YoloLrSchedule,
+    apply_model_sgd_with_learning_rate,
 };
 use serde::Deserialize;
 use std::{
@@ -34,8 +35,14 @@ struct Args {
     steps: usize,
     #[arg(long, default_value_t = 64)]
     size: i64,
-    #[arg(long, default_value_t = 1e-5)]
+    #[arg(long, default_value_t = 0.00015625)]
     learning_rate: f32,
+    /// Override warmup duration (default: 5/300 of all steps).
+    #[arg(long)]
+    warmup_steps: Option<usize>,
+    /// Override the minimum-rate tail (default: 15/300 of all steps).
+    #[arg(long)]
+    no_augmentation_steps: Option<usize>,
     /// Write inference-ready trained parameters and BatchNorm state here.
     #[arg(long)]
     output: Option<PathBuf>,
@@ -151,7 +158,12 @@ fn main() -> Result<()> {
         .sum::<usize>() as i64;
     let training_config = YoloConfig::yolox_tiny(80);
     let training = Model::new(
-        move |cx: Cx, image: Tensor, boxes: Tensor, objectness: Tensor, classes: Tensor| {
+        move |cx: Cx,
+              image: Tensor,
+              boxes: Tensor,
+              objectness: Tensor,
+              classes: Tensor,
+              learning_rate: Tensor| {
             let outputs = yolo(cx, &image, &training_config)?;
             let loss = yolox_loss(
                 &outputs,
@@ -162,7 +174,13 @@ fn main() -> Result<()> {
                 },
                 YoloLossConfig::default(),
             )?;
-            Ok::<_, rxla_models::Error>((loss.total, loss.boxes, loss.objectness, loss.classes))
+            Ok::<_, rxla_models::Error>((
+                loss.total,
+                loss.boxes,
+                loss.objectness,
+                loss.classes,
+                learning_rate,
+            ))
         },
     )
     .inputs((
@@ -170,17 +188,27 @@ fn main() -> Result<()> {
         ModelInput::new([1, anchors, 4]),
         ModelInput::new([1, anchors, 1]),
         ModelInput::new([1, anchors, 80]),
+        ModelInput::new([]),
     ))
     .training();
     let (trainable, mut training) = training.trace_resident_all()?;
     let checkpoint_schema = training.schema().clone();
-    let metrics = Tensor::stack(training.outputs(), 0)?;
+    let metrics = Tensor::stack(&training.outputs()[..4], 0)?;
     let loss = training.outputs()[0].clone();
-    apply_model_adam(
+    let learning_rate = training.outputs()[4].clone();
+    apply_model_sgd_with_learning_rate(
         &mut training,
         &trainable,
         &loss,
-        AdamOptions::default().learning_rate(args.learning_rate),
+        &learning_rate,
+        |parameter| {
+            let decay =
+                parameter.path().ends_with(".weight") && !parameter.path().contains(".bn.weight");
+            SgdOptions::default()
+                .momentum(0.9)
+                .nesterov(true)
+                .weight_decay(if decay { 5e-4 } else { 0.0 })
+        },
     )?;
     let train_compile_started = Instant::now();
     let program = training.compile_stateful_tensors(&mut compiler, &[metrics])?;
@@ -191,6 +219,9 @@ fn main() -> Result<()> {
         .initialize_raw(training.session(&program))?
         .initializer_seed(7)
         .build()?;
+    let schedule = YoloLrSchedule::new(args.learning_rate, args.steps)
+        .warmup_steps(args.warmup_steps.unwrap_or(args.steps / 60))
+        .no_augmentation_steps(args.no_augmentation_steps.unwrap_or(args.steps / 20));
     let mut completed = 0;
     while let Some(sample) = source.next_sample()? {
         let (pixels, ratio) = letterbox(&sample.image, args.size as u32);
@@ -199,9 +230,11 @@ fn main() -> Result<()> {
             continue;
         }
         let input = client.buffer(&[1, args.size, args.size, 3], &pixels)?;
+        let step_learning_rate = schedule.at(completed)?;
+        let learning_rate = client.buffer(&[], &[step_learning_rate])?;
 
         // Buffer clones share their PJRT allocation. The inference detour sees
-        // the current weights while the original snapshot retains Adam state.
+        // the current weights while the original snapshot retains SGD state.
         let snapshot = training.take_session(training_session)?;
         let mut inference_session = snapshot
             .clone()
@@ -242,7 +275,8 @@ fn main() -> Result<()> {
         let objectness = client.buffer(&[1, anchors, 1], &assignments.objectness)?;
         let classes = client.buffer(&[1, anchors, 80], &assignments.classes)?;
         let train_started = Instant::now();
-        let outputs = training_session.run(&[&input, &boxes, &objectness, &classes])?;
+        let outputs =
+            training_session.run(&[&input, &boxes, &objectness, &classes, &learning_rate])?;
         let train_ms = train_started.elapsed().as_secs_f64() * 1e3;
         let losses = outputs[0].to_vec::<f32>()?;
         if losses.len() != 4 || losses.iter().any(|value| !value.is_finite()) {
@@ -251,7 +285,7 @@ fn main() -> Result<()> {
         completed += 1;
         if completed == 1 || completed % args.log_every == 0 || completed == args.steps {
             println!(
-                "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} infer_ms={infer_ms:.1} train_ms={train_ms:.1}",
+                "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} lr={step_learning_rate:.8} infer_ms={infer_ms:.1} train_ms={train_ms:.1}",
                 sample.id,
                 targets.len(),
                 assignments.foreground,

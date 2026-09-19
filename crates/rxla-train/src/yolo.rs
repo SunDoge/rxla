@@ -173,6 +173,69 @@ pub struct SimOtaConfig {
     outside_penalty: f32,
 }
 
+/// YOLOX's quadratic-warmup, cosine-decay, minimum-rate-tail schedule.
+#[derive(Clone, Copy, Debug, Setters)]
+#[setters(generate = false)]
+pub struct YoloLrSchedule {
+    base_learning_rate: f32,
+    total_steps: usize,
+    #[setters(generate)]
+    warmup_steps: usize,
+    #[setters(generate)]
+    no_augmentation_steps: usize,
+    #[setters(generate)]
+    warmup_learning_rate: f32,
+    #[setters(generate)]
+    minimum_ratio: f32,
+}
+
+impl YoloLrSchedule {
+    pub fn new(base_learning_rate: f32, total_steps: usize) -> Self {
+        Self {
+            base_learning_rate,
+            total_steps,
+            warmup_steps: 0,
+            no_augmentation_steps: 0,
+            warmup_learning_rate: 0.0,
+            minimum_ratio: 0.05,
+        }
+    }
+
+    pub fn at(self, step: usize) -> SimOtaResult<f32> {
+        ensure!(
+            self.base_learning_rate.is_finite()
+                && self.base_learning_rate >= 0.0
+                && self.total_steps > 0
+                && self.warmup_steps + self.no_augmentation_steps <= self.total_steps
+                && self.warmup_learning_rate.is_finite()
+                && self.warmup_learning_rate >= 0.0
+                && self.minimum_ratio.is_finite()
+                && (0.0..=1.0).contains(&self.minimum_ratio)
+                && step < self.total_steps,
+            ConfigurationSnafu
+        );
+        let minimum = self.base_learning_rate * self.minimum_ratio;
+        if self.warmup_steps > 0 && step < self.warmup_steps {
+            let progress = step as f32 / self.warmup_steps as f32;
+            return Ok(
+                (self.base_learning_rate - self.warmup_learning_rate) * progress * progress
+                    + self.warmup_learning_rate,
+            );
+        }
+        let cosine_steps = self
+            .total_steps
+            .saturating_sub(self.warmup_steps + self.no_augmentation_steps);
+        if cosine_steps == 0 || step >= self.total_steps - self.no_augmentation_steps {
+            return Ok(minimum);
+        }
+        let progress = (step - self.warmup_steps) as f32 / cosine_steps as f32;
+        Ok(minimum
+            + 0.5
+                * (self.base_learning_rate - minimum)
+                * (1.0 + (std::f32::consts::PI * progress).cos()))
+    }
+}
+
 impl Default for SimOtaConfig {
     fn default() -> Self {
         Self {
@@ -466,5 +529,20 @@ mod tests {
         assert_eq!(input.boxes[2], [-32.0, -64.0, 32.0, 32.0]);
         assert_eq!(input.anchor_centers, [[4.0, 4.0], [8.0, 8.0], [16.0, 16.0]]);
         assert_eq!(input.class_logits, [4.0, 6.0, 8.0]);
+    }
+
+    #[test]
+    fn yolox_schedule_has_warmup_cosine_and_minimum_tail() {
+        let schedule = YoloLrSchedule::new(1.0, 100)
+            .warmup_steps(10)
+            .no_augmentation_steps(10)
+            .minimum_ratio(0.05);
+        assert_eq!(schedule.at(0).unwrap(), 0.0);
+        assert!((schedule.at(5).unwrap() - 0.25).abs() < 1e-6);
+        assert!((schedule.at(10).unwrap() - 1.0).abs() < 1e-6);
+        assert!((schedule.at(50).unwrap() - 0.525).abs() < 1e-6);
+        assert_eq!(schedule.at(90).unwrap(), 0.05);
+        assert_eq!(schedule.at(99).unwrap(), 0.05);
+        assert!(schedule.at(100).is_err());
     }
 }
