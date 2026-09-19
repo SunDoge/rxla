@@ -4,6 +4,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use fory::{ForyRow, from_row};
 use image::{Rgb, RgbImage, imageops::FilterType};
 use rayon::prelude::*;
+#[cfg(feature = "disk-cache")]
+use rxla_core::DiskCache;
 use rxla_core::{CacheLimits, Client, Compiler, DType, Precision, StateProgram, Tensor};
 use rxla_models::{
     YoloConfig, YoloLossConfig, YoloSimOtaConfig, YoloTargets, yolo, yolox_loss_with_l1_weight,
@@ -90,6 +92,9 @@ struct Args {
     /// Disable XLA CUDA command buffers and launch kernels directly.
     #[arg(long)]
     direct_launches: bool,
+    /// Trusted directory for backend-native executable caching.
+    #[arg(long)]
+    compile_cache: Option<PathBuf>,
     /// Disable the official YOLOX parameter EMA, primarily for profiling.
     #[arg(long)]
     disable_model_ema: bool,
@@ -437,6 +442,24 @@ fn main() -> Result<()> {
     let batch = i64::try_from(args.batch_size)?;
     let client = unsafe { Client::load(&args.plugin) }?;
     let compiler = Compiler::new(client.clone(), CacheLimits::default());
+    #[cfg(feature = "disk-cache")]
+    let compiler = if let Some(directory) = &args.compile_cache {
+        // SAFETY: native cache entries are executable code. The CLI makes the
+        // trust boundary explicit and never enables a directory implicitly.
+        let cache = unsafe {
+            DiskCache::new_for_client(directory, "rxla-yolox-train-v1", &client, 512 * 1024 * 1024)?
+        };
+        compiler.with_disk_cache(cache)
+    } else {
+        compiler
+    };
+    #[cfg(not(feature = "disk-cache"))]
+    let compiler = {
+        if args.compile_cache.is_some() {
+            return Err("--compile-cache requires the disk-cache cargo feature".into());
+        }
+        compiler
+    };
     let mut compiler = if args.direct_launches {
         compiler.without_cuda_command_buffers()
     } else {
@@ -633,12 +656,15 @@ fn main() -> Result<()> {
             save_model_new(output, &current.model, &training_session, Some(&metadata))?;
         }
     }
+    let cache = compiler.stats();
     println!(
-        "completed={completed} images={} run_ms={:.1} images_per_second={:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={}",
+        "completed={completed} images={} run_ms={:.1} images_per_second={:.1} train_compile_ms={train_compile_ms:.1} compiled_sizes={} compile_misses={} disk_cache_hits={}",
         completed * args.batch_size,
         run_seconds * 1e3,
         completed as f64 * args.batch_size as f64 / run_seconds,
         variants.len(),
+        cache.misses,
+        cache.disk_hits,
     );
     Ok(())
 }

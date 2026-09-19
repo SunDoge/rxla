@@ -233,7 +233,14 @@ verified the official empty-match behavior: after augmentation removed every
 box, SimOTA produced zero foreground and the normalized objectness-only loss
 continued instead of treating the batch as an error. Multi-scale remains
 opt-in because compiling several static XLA programs is expensive; two tiny
-size variants took 43.4 seconds in this check.
+size variants took 43.4 seconds in this check. Building the example with
+`--features model,disk-cache` and passing a trusted `--compile-cache DIR`
+persists PJRT-native executables per exact StableHLO/shape. In a fresh-process
+two-size test, the first run compiled both programs in `43.762 s`; the second
+reported two disk hits, zero backend misses, and restored them in `0.664 s`.
+The two entries occupied 6.7 MiB. Deserialized CUDA executables still paid lazy
+first-execution setup, but compile-plus-run startup fell from roughly 43.9 s to
+1.1 s.
 
 Run the comparable RXLA side with:
 
