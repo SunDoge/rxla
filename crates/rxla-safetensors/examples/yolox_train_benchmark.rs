@@ -53,6 +53,9 @@ struct Args {
     convolution_precision: ConvolutionPrecision,
     #[arg(long)]
     l1: bool,
+    /// Disable XLA CUDA command buffers and launch kernels directly.
+    #[arg(long)]
+    direct_launches: bool,
     /// Bracket timed iterations with the CUDA profiler API.
     #[arg(long)]
     cuda_profile: bool,
@@ -167,7 +170,12 @@ fn main() -> Result<()> {
     )?;
 
     let client = unsafe { Client::load(&args.plugin) }?;
-    let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+    let compiler = Compiler::new(client.clone(), CacheLimits::default());
+    let mut compiler = if args.direct_launches {
+        compiler.without_cuda_command_buffers()
+    } else {
+        compiler
+    };
     let compile_started = Instant::now();
     let program = model.compile_stateful_tensors(&mut compiler, &[loss])?;
     let compile_ms = compile_started.elapsed().as_secs_f64() * 1e3;
@@ -194,7 +202,7 @@ fn main() -> Result<()> {
     drop(profiler);
     let total_ms = samples.iter().sum::<f64>();
     println!(
-        "rxla precision={} convolution_precision={} size={} batch={} iterations={} targets_per_image={} l1={} loss={loss:.6}",
+        "rxla precision={} convolution_precision={} direct_launches={} size={} batch={} iterations={} targets_per_image={} l1={} loss={loss:.6}",
         match args.compute_dtype {
             ComputeDtype::F32 => "f32",
             ComputeDtype::Bf16 => "bf16",
@@ -203,6 +211,7 @@ fn main() -> Result<()> {
             ConvolutionPrecision::Default => "default",
             ConvolutionPrecision::Highest => "highest",
         },
+        args.direct_launches,
         args.size,
         args.batch_size,
         args.iterations,

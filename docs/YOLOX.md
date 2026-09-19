@@ -181,6 +181,12 @@ images/s`) for `torch.compile`, and `24.189 ms` for eager PyTorch. The Python
 loss still has a graph break at its per-image `Tensor.item()` SimOTA loop, while
 RXLA compiles matching and optimization into the same program.
 
+The same sparse-target graph completed a seeded 100-step BF16 run over the
+Fory COCO stream at `502.1 images/s`. Consumer wait remained `0 ms`; late
+steady device observations were `10.8–12.4 ms`. This is within the observed
+run-to-run range of the earlier `513.6 images/s` host-pipeline result rather
+than evidence of a separate end-to-end gain.
+
 Run the comparable RXLA side with:
 
 ```sh
@@ -284,12 +290,15 @@ to level 4; the former cuDNN frontend switch is no longer present in this XLA
 version. The retained NHWC path is therefore the best measured general XLA
 lowering rather than an accidentally disabled autotuning setup.
 
-Disabling CUDA command buffers after the native max-pool change was also not a
-meaningful end-to-end improvement. It tightened many steady device observations
-to roughly 11.4–13.3 ms, but the reproducible 100-step run moved only from 305.6
-to 307.1 images/s because host augmentation was already the limiter. Command
-buffers therefore remain at the plugin default; deployments can still select
-direct launches with `Compiler::without_cuda_command_buffers()`.
+Disabling CUDA command buffers remains workload-dependent. On the sparse-target
+strict BF16 benchmark, 100 measured steps improved from `12.719 ms` (`629.0
+images/s`) to `12.459 ms` (`642.1 images/s`). Nsight showed about 173
+`cuGraphLaunch` calls per step, with graph launches and node-parameter updates
+accounting for roughly 3.3 ms of host CUDA API time. The seeded real COCO run,
+however, regressed from `502.1` to `489.9 images/s`. Command buffers therefore
+remain the default. Both training and synthetic benchmark examples expose
+`--direct-launches` for hardware- and workload-specific measurement; internally
+it uses `Compiler::without_cuda_command_buffers()`.
 
 For bounded Nsight captures, `--cuda-profile --cuda-runtime /path/to/libcudart.so`
 starts collection after the first training step. Use it with

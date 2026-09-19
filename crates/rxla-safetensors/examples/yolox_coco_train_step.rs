@@ -73,6 +73,9 @@ struct Args {
     /// StableHLO convolution precision; default permits accelerator-native TF32.
     #[arg(long, value_enum, default_value_t = ConvolutionPrecision::Default)]
     convolution_precision: ConvolutionPrecision,
+    /// Disable XLA CUDA command buffers and launch kernels directly.
+    #[arg(long)]
+    direct_launches: bool,
     /// Override warmup duration (default: 5/300 of all steps).
     #[arg(long)]
     warmup_steps: Option<usize>,
@@ -291,7 +294,12 @@ fn main() -> Result<()> {
     )?;
     let batch = i64::try_from(args.batch_size)?;
     let client = unsafe { Client::load(&args.plugin) }?;
-    let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+    let compiler = Compiler::new(client.clone(), CacheLimits::default());
+    let mut compiler = if args.direct_launches {
+        compiler.without_cuda_command_buffers()
+    } else {
+        compiler
+    };
     let compute_dtype = match args.compute_dtype {
         ComputeDtype::F32 => DType::F32,
         ComputeDtype::Bf16 => DType::BF16,
