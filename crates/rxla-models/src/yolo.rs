@@ -3,7 +3,7 @@
 use super::*;
 use derive_setters::Setters;
 use rxla_core::{Conv2dOptions, Pool2dOptions, Tensor, vision};
-use rxla_nn::{BatchNorm, Conv2d, Layer, TensorApply, path};
+use rxla_nn::{BatchNorm, Conv2d, Initializer, Layer, TensorApply, path};
 use snafu::{Snafu, ensure};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -397,6 +397,7 @@ fn pafpn(cx: Cx, [x2, x1, x0]: [Tensor; 3], config: YoloConfig) -> Result<[Tenso
 
 fn head(cx: Cx, features: [Tensor; 3], config: YoloConfig) -> Result<[Tensor; 3]> {
     let width = config.channels(256);
+    let prior_bias = -99.0_f32.ln();
     let mut outputs = Vec::with_capacity(3);
     for (index, feature) in features.into_iter().enumerate() {
         let stem = feature.through(path!(cx / "stems" / index)?, YoloConv::new(width, 1))?;
@@ -412,10 +413,14 @@ fn head(cx: Cx, features: [Tensor; 3], config: YoloConfig) -> Result<[Tensor; 3]
             )?;
         }
         let boxes = reg.through(path!(cx / "reg_preds" / index)?, Conv2d::new(4, [1, 1]))?;
-        let objectness = reg.through(path!(cx / "obj_preds" / index)?, Conv2d::new(1, [1, 1]))?;
+        let objectness = reg.through(
+            path!(cx / "obj_preds" / index)?,
+            Conv2d::new(1, [1, 1]).bias_initializer(Initializer::uniform(prior_bias, prior_bias)),
+        )?;
         let classes = cls.through(
             path!(cx / "cls_preds" / index)?,
-            Conv2d::new(config.classes, [1, 1]),
+            Conv2d::new(config.classes, [1, 1])
+                .bias_initializer(Initializer::uniform(prior_bias, prior_bias)),
         )?;
         outputs.push(Tensor::concatenate(&[boxes, objectness, classes], 3)?);
     }
@@ -1125,6 +1130,13 @@ mod tests {
             "head.cls_preds.2.weight",
         ] {
             assert!(model.schema().get(path).is_some(), "missing {path}");
+        }
+        let prior_bias = -99.0_f32.ln();
+        for path in ["head.obj_preds.0.bias", "head.cls_preds.2.bias"] {
+            assert_eq!(
+                model.schema().get(path).unwrap().initializer(),
+                Some(Initializer::uniform(prior_bias, prior_bias))
+            );
         }
         model.prepare_stateful().unwrap();
     }

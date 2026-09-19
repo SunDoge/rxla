@@ -318,6 +318,8 @@ pub struct Conv2d {
     bias: bool,
     #[setters(generate)]
     layout: ImageLayout,
+    weight_initializer: Initializer,
+    bias_initializer: Option<Initializer>,
 }
 
 impl Conv2d {
@@ -328,20 +330,24 @@ impl Conv2d {
             options: Conv2dOptions::default(),
             bias: true,
             layout: ImageLayout::Nhwc,
+            weight_initializer: Initializer::kaiming_uniform(),
+            bias_initializer: None,
         }
+    }
+
+    pub fn weight_initializer(mut self, initializer: Initializer) -> Self {
+        self.weight_initializer = initializer;
+        self
+    }
+
+    pub fn bias_initializer(mut self, initializer: Initializer) -> Self {
+        self.bias_initializer = Some(initializer);
+        self
     }
 
     pub fn apply(self, cx: Cx, name: &str, input: &Tensor) -> Result<Tensor> {
         let scope = cx.scope(name)?;
-        apply_conv2d(
-            &scope,
-            input,
-            self.out_channels,
-            self.kernel,
-            self.options,
-            self.bias,
-            self.layout,
-        )
+        apply_conv2d(&scope, input, &self)
     }
 }
 
@@ -517,15 +523,7 @@ impl Layer for Linear {
 
 impl Layer for Conv2d {
     fn apply_in(&self, cx: &Cx, input: &Tensor) -> Result<Tensor> {
-        apply_conv2d(
-            cx,
-            input,
-            self.out_channels,
-            self.kernel,
-            self.options,
-            self.bias,
-            self.layout,
-        )
+        apply_conv2d(cx, input, self)
     }
 }
 
@@ -669,15 +667,7 @@ impl ScopedLayer<Linear> {
 
 impl ScopedLayer<Conv2d> {
     pub fn apply(self, input: &Tensor) -> Result<Tensor> {
-        apply_conv2d(
-            &self.scope,
-            input,
-            self.layer.out_channels,
-            self.layer.kernel,
-            self.layer.options,
-            self.layer.bias,
-            self.layer.layout,
-        )
+        apply_conv2d(&self.scope, input, &self.layer)
     }
 }
 
@@ -873,15 +863,12 @@ fn apply_linear(cx: &Cx, input: &Tensor, out_features: i64, bias: bool) -> Resul
 
 /// Apply an NHWC convolution with checkpoint-native OIHW parameters at the
 /// current lexical scope. Input channels are inferred from `input`.
-fn apply_conv2d(
-    cx: &Cx,
-    input: &Tensor,
-    out_channels: i64,
-    kernel: [i64; 2],
-    options: Conv2dOptions,
-    bias: bool,
-    layout: ImageLayout,
-) -> Result<Tensor> {
+fn apply_conv2d(cx: &Cx, input: &Tensor, layer: &Conv2d) -> Result<Tensor> {
+    let out_channels = layer.out_channels;
+    let kernel = layer.kernel;
+    let options = layer.options;
+    let bias = layer.bias;
+    let layout = layer.layout;
     ensure!(
         input.dtype() == DType::F32 && input.shape().len() == 4,
         InvalidLayerInputSnafu {
@@ -912,7 +899,7 @@ fn apply_conv2d(
             kernel[0],
             kernel[1],
         ],
-        Initializer::kaiming_uniform(),
+        layer.weight_initializer,
     )?;
     let input = match layout {
         ImageLayout::Nchw => input.transpose([0, 2, 3, 1])?,
@@ -927,7 +914,13 @@ fn apply_conv2d(
     }
     let fan_in = (in_channels / options.groups) * kernel[0] * kernel[1];
     let bound = (1.0 / fan_in as f32).sqrt();
-    let bias = cx.param_initialized("bias", [out_channels], Initializer::uniform(-bound, bound))?;
+    let bias = cx.param_initialized(
+        "bias",
+        [out_channels],
+        layer
+            .bias_initializer
+            .unwrap_or_else(|| Initializer::uniform(-bound, bound)),
+    )?;
     let output = output.add(&bias.broadcast_to(output.shape())?)?;
     match layout {
         ImageLayout::Nchw => Ok(output.transpose([0, 3, 1, 2])?),

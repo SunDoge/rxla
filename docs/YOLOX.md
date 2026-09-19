@@ -71,6 +71,11 @@ Assignments are detached before entering the differentiable loss. The output
 checkpoint excludes optimizer moments but includes parameters and model
 BatchNorm state, so it can be passed directly to `yolox_infer`.
 
+Freshly initialized models use the official YOLOX policies: convolution weights
+use PyTorch-compatible Kaiming-uniform initialization, BatchNorm uses
+`epsilon=1e-3` and `momentum=0.03`, and objectness/classification predictor
+biases start at `logit(0.01)`.
+
 The example accepts a static `--batch-size`; variable numbers of targets are
 padded and masked before transfer. JPEG decode and augmentation run across the
 batch with Rayon. Dataset shuffling, augmentation, and prefetch remain in the
