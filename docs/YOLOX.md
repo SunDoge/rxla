@@ -187,6 +187,16 @@ An experimental nine-tap tensor decomposition was rejected: XLA recognized it
 as slower F32 convolutions and doubled profiled GPU work. Closing this gap needs
 a specialized depthwise CUDA kernel/lowering rather than more graph expansion.
 
+Three XLA configuration alternatives were also measured against the same real
+training path and rejected. Changing convolution precision from `HIGHEST` to
+`DEFAULT` slowed steady steps to 27.7--29.0 ms (250 images/s). Enabling
+`--xla_gpu_experimental_enable_conv_fusion=true` slowed them to 36--37 ms
+(196 images/s), and forcing NCHW with `--xla_gpu_force_conv_nchw=true` reached
+28.4--29.2 ms (235 images/s). The plugin already defaults convolution autotuning
+to level 4; the former cuDNN frontend switch is no longer present in this XLA
+version. The retained NHWC, `HIGHEST` path is therefore the best measured
+general XLA lowering, rather than an accidentally disabled autotuning setup.
+
 For bounded Nsight captures, `--cuda-profile --cuda-runtime /path/to/libcudart.so`
 starts collection after the first training step. Use it with
 `nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop`.
