@@ -1,7 +1,8 @@
 //! Serialization of predicates, selection, and metadata-only shape transforms.
 
 use super::emission_support::{
-    OperationEmission, stablehlo_element_type, stablehlo_predicate_type, stablehlo_type, value_type,
+    OperationEmission, floating_initializer, stablehlo_element_type, stablehlo_predicate_type,
+    stablehlo_type, value_type,
 };
 use super::{super::*, dialect::*};
 use std::fmt::Write;
@@ -50,12 +51,13 @@ pub(super) fn emit_predicate_or_shape(emission: &mut OperationEmission<'_>) -> R
         let mask_tensor_type = stablehlo_type(&mask_type)?;
         let predicate_type = stablehlo_predicate_type(&mask_type);
         let element_type = stablehlo_element_type(mask_type.dtype)?;
+        let zero_value = floating_initializer(mask_type.dtype, false)?;
         let zero = emission.auxiliary();
         let zeros = emission.auxiliary();
         let predicate = emission.auxiliary();
         writeln!(
             emission.body,
-            "    {zero} = stablehlo.constant dense<0x00000000> : tensor<{element_type}>"
+            "    {zero} = stablehlo.constant dense<{zero_value}> : tensor<{element_type}>"
         )
         .unwrap();
         writeln!(emission.body, "    {zeros} = stablehlo.broadcast_in_dim {zero}, dims = [] : (tensor<{element_type}>) -> {mask_tensor_type}").unwrap();

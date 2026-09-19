@@ -930,9 +930,9 @@ fn verify_conv2d(
     let input = value_type(operation.get_operand(0), ctx)?;
     let kernel = value_type(operation.get_operand(1), ctx)?;
     let result = value_type(operation.get_result(0), ctx)?;
-    if input.dtype != DType::F32
-        || kernel.dtype != DType::F32
-        || result.dtype != DType::F32
+    if !matches!(input.dtype, DType::F16 | DType::BF16 | DType::F32)
+        || kernel.dtype != input.dtype
+        || result.dtype != input.dtype
         || input.dims.len() != 4
         || kernel.dims.len() != 4
         || result.dims.len() != 4
@@ -940,7 +940,7 @@ fn verify_conv2d(
         || kernel.dims.iter().any(|&dimension| dimension <= 0)
     {
         return pliron::verify_err_noloc!(
-            "rxla convolution requires rank-4 F32 tensors with only a dynamic batch axis"
+            "rxla convolution requires same-dtype rank-4 floating tensors with only a dynamic batch axis"
         );
     }
     let (kh, kw, kernel_input, kernel_output) = if oihw {
@@ -1095,9 +1095,9 @@ impl Verify for ConvTranspose2dOp {
             );
         };
         let options = attribute.options();
-        if input.dtype != DType::F32
-            || kernel.dtype != DType::F32
-            || result.dtype != DType::F32
+        if !matches!(input.dtype, DType::F16 | DType::BF16 | DType::F32)
+            || kernel.dtype != input.dtype
+            || result.dtype != input.dtype
             || input.dims.len() != 4
             || kernel.dims.len() != 4
             || result.dims.len() != 4

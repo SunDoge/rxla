@@ -32,6 +32,16 @@ pub(crate) fn infer(op: &Op, types: &[DType]) -> Result<DType> {
             ),
             DType::F32,
         ),
+        Op::Conv2d(_)
+        | Op::Conv2dOihw(_)
+        | Op::Conv2dInputGradient(_)
+        | Op::Conv2dKernelGradient(_)
+        | Op::ConvTranspose2d(_) => (
+            types.len() == 2
+                && all(first)
+                && matches!(first, DType::F16 | DType::BF16 | DType::F32),
+            first,
+        ),
         Op::Reshape
         | Op::StopGradient
         | Op::OptimizationBarrier

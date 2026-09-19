@@ -118,6 +118,64 @@ fn low_precision_sum_accumulates_in_f32() {
 }
 
 #[test]
+fn low_precision_ordered_and_gather_regions_follow_operand_dtype() {
+    let mut program = ProgramIr::default();
+    let matrix = TensorType::static_shape(vec![2, 3], DType::F32);
+    let indices_type = TensorType::static_shape(vec![2, 3], DType::I32);
+    let gathered_type = TensorType::static_shape(vec![2, 4], DType::F32);
+    let reduced_type = vector_type(2, DType::I32);
+    let input = program.append(&Op::Parameter(0), &[], &matrix).unwrap();
+    let indices = program
+        .append(&Op::Parameter(1), &[], &indices_type)
+        .unwrap();
+    let cumsum = program
+        .append(&Op::Cumsum { axis: 1 }, &[input], &matrix)
+        .unwrap();
+    let argmax = program
+        .append(&Op::ArgMax { axis: 1 }, &[input], &reduced_type)
+        .unwrap();
+    let sorted = program
+        .append(
+            &Op::SortedIndices {
+                axis: 1,
+                descending: true,
+            },
+            &[input],
+            &indices_type,
+        )
+        .unwrap();
+    let gathered = program
+        .append(
+            &Op::GatherGradient {
+                axis: 1,
+                batched: true,
+            },
+            &[input, indices],
+            &gathered_type,
+        )
+        .unwrap();
+
+    let snapshot =
+        SemanticProgram::capture(&program, &[cumsum, argmax, sorted, gathered], true).unwrap();
+    let lowered = snapshot.lower(LoweringTarget::CudaBf16Compute).unwrap();
+    assert!(
+        lowered
+            .code
+            .contains("%arg_value_lhs: tensor<bf16>, %arg_value_rhs: tensor<bf16>")
+    );
+    assert!(
+        lowered
+            .code
+            .contains("%sort_lhs: tensor<bf16>, %sort_rhs: tensor<bf16>")
+    );
+    assert!(
+        lowered
+            .code
+            .contains("%scatter_lhs: tensor<bf16>, %scatter_rhs: tensor<bf16>")
+    );
+}
+
+#[test]
 fn cuda_attention_matches_jax_cudnn_logical_abi() {
     let mut program = ProgramIr::default();
     let ty = TensorType::static_shape(vec![1, 2, 512, 64], DType::F32);

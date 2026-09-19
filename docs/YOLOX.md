@@ -83,6 +83,12 @@ padded and masked before transfer. JPEG decode and augmentation run across the
 batch with Rayon. Dataset shuffling, augmentation, and prefetch remain in the
 data pipeline rather than the YOLO model definition.
 
+CUDA training can use convolution-only automatic mixed precision with
+`--compute-dtype bf16`. Convolution inputs and F32 master weights are cast for
+the cuDNN operation and its adjoints, then converted back at the layer boundary.
+BatchNorm, SimOTA, losses, model state, momentum, and parameter updates remain
+F32. This is deliberately narrower than whole-program dtype demotion.
+
 For sequential training, COCO can instead be stored as standard TFRecord
 framing with Apache Fory Standard Row payloads. The JPEG remains compressed;
 Fory provides typed, borrowed views of its bytes and the box/label arrays.
@@ -142,6 +148,14 @@ twenty-step run took 1.482 seconds for 160 output images (107.9 images/s),
 including first-step device warmup and two final no-augmentation/L1 steps.
 Augmentation prepared a typical batch in 63–66 ms, but a three-batch bounded
 prefetch kept measured consumer wait at 0.0 ms throughout the run.
+
+The convolution-only BF16 path reduced steady device training time from
+`36.4–37.2 ms` to `23.0–24.0 ms` on the same RTX 5080. A 20-step real-data run
+reached 214.9 images/s end to end; at that point the 37–51 ms CPU Mosaic producer
+became the limiter and occasional consumer waits reappeared. For context, an
+official-compatible PyTorch eager benchmark with 12 synthetic targets per image
+measured 23.87 ms in F32 and 26.61 ms under BF16 autocast. These are useful
+device baselines, not a strict data-pipeline comparison.
 
 The exported checkpoint was then loaded by the 416×416 inference example on
 both CPU and CUDA. CUDA inference measured 9.4 ms after compilation and produced

@@ -905,7 +905,15 @@ fn apply_conv2d(cx: &Cx, input: &Tensor, layer: &Conv2d) -> Result<Tensor> {
         ImageLayout::Nchw => input.transpose([0, 2, 3, 1])?,
         ImageLayout::Nhwc => input.clone(),
     };
-    let output = input.conv2d_oihw(&weight, options)?;
+    let compute_dtype = cx.layer_compute_dtype();
+    let output = if compute_dtype == DType::F32 {
+        input.conv2d_oihw(&weight, options)?
+    } else {
+        input
+            .cast(compute_dtype)?
+            .conv2d_oihw(&weight.cast(compute_dtype)?, options)?
+            .cast(DType::F32)?
+    };
     if !bias {
         return match layout {
             ImageLayout::Nchw => Ok(output.transpose([0, 3, 1, 2])?),

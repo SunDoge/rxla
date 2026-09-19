@@ -324,6 +324,7 @@ pub struct Cx {
     inner: Arc<Mutex<CxInner>>,
     path: ModelPath,
     parameter_storage_dtype: DType,
+    layer_compute_dtype: DType,
 }
 
 struct CxInner {
@@ -388,6 +389,7 @@ impl Cx {
         Self {
             path: ModelPath::root(),
             parameter_storage_dtype: DType::F32,
+            layer_compute_dtype: DType::F32,
             inner: Arc::new(Mutex::new(CxInner {
                 graph: StateGraph::default(),
                 schema: ModelSchema::default(),
@@ -440,6 +442,21 @@ impl Cx {
         );
         self.parameter_storage_dtype = dtype;
         Ok(self)
+    }
+
+    /// Select internal arithmetic for compute-heavy layers while preserving
+    /// F32 parameters, activations at layer boundaries, state, and losses.
+    pub fn with_layer_compute_dtype(mut self, dtype: DType) -> Result<Self> {
+        ensure!(
+            matches!(dtype, DType::F16 | DType::BF16 | DType::F32),
+            UnsupportedParameterDTypeSnafu { dtype }
+        );
+        self.layer_compute_dtype = dtype;
+        Ok(self)
+    }
+
+    pub(crate) fn layer_compute_dtype(&self) -> DType {
+        self.layer_compute_dtype
     }
 
     /// Retain a named intermediate tensor as an optional compilation root.
@@ -686,6 +703,7 @@ impl Cx {
             inner: self.inner.clone(),
             path,
             parameter_storage_dtype: self.parameter_storage_dtype,
+            layer_compute_dtype: self.layer_compute_dtype,
         })
     }
 
@@ -1869,6 +1887,29 @@ mod tests {
                 .unwrap()
                 .contains("stablehlo.convolution")
         );
+    }
+
+    #[test]
+    fn layer_compute_dtype_keeps_conv_boundaries_and_parameters_f32() {
+        let model = |cx: Cx| {
+            let cx = cx.with_layer_compute_dtype(DType::BF16)?;
+            let input = cx.input([1, 8, 8, 4])?;
+            input.apply(&cx.named_layer("conv", Conv2d::new(6, [3, 3]))?)
+        };
+        let (schema, output) = init(model).unwrap();
+        assert_eq!(output.dtype(), DType::F32);
+        assert!(
+            schema
+                .parameters()
+                .iter()
+                .all(|parameter| parameter.storage_dtype() == DType::F32)
+        );
+        let applied = apply(&schema, model).unwrap();
+        let lowered = applied.prepare().unwrap();
+        let stablehlo = std::str::from_utf8(lowered.code()).unwrap();
+        assert!(stablehlo.contains("stablehlo.convolution"));
+        assert!(stablehlo.contains("xbf16"));
+        assert!(stablehlo.contains("stablehlo.convert"));
     }
 
     #[test]

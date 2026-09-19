@@ -1,10 +1,10 @@
 //! Train YOLOX on real COCO samples with device SimOTA and resident momentum SGD.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use fory::{ForyRow, from_row};
 use image::{Rgb, RgbImage, imageops::FilterType};
 use rayon::prelude::*;
-use rxla_core::{CacheLimits, Client, Compiler, Tensor};
+use rxla_core::{CacheLimits, Client, Compiler, DType, Tensor};
 use rxla_models::{
     YoloConfig, YoloLossConfig, YoloSimOtaConfig, YoloTargets, yolo, yolox_loss_with_l1_weight,
     yolox_simota,
@@ -58,6 +58,9 @@ struct Args {
     mixup_probability: f32,
     #[arg(long, default_value_t = 0.00015625)]
     learning_rate: f32,
+    /// Internal CUDA arithmetic; model inputs, parameters, state, and outputs remain F32.
+    #[arg(long, value_enum, default_value_t = ComputeDtype::F32)]
+    compute_dtype: ComputeDtype,
     /// Override warmup duration (default: 5/300 of all steps).
     #[arg(long)]
     warmup_steps: Option<usize>,
@@ -70,6 +73,12 @@ struct Args {
     /// Print one progress line every N completed steps.
     #[arg(long, default_value_t = 10)]
     log_every: usize,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ComputeDtype {
+    F32,
+    Bf16,
 }
 
 #[derive(Subcommand)]
@@ -217,7 +226,11 @@ fn main() -> Result<()> {
     let batch = i64::try_from(args.batch_size)?;
     let client = unsafe { Client::load(&args.plugin) }?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    let training_config = YoloConfig::yolox_tiny(80);
+    let compute_dtype = match args.compute_dtype {
+        ComputeDtype::F32 => DType::F32,
+        ComputeDtype::Bf16 => DType::BF16,
+    };
+    let training_config = YoloConfig::yolox_tiny(80).compute_dtype(compute_dtype);
     let training = Model::new(
         move |cx: Cx,
               image: Tensor,

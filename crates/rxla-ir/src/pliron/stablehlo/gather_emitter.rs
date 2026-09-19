@@ -1,6 +1,8 @@
 //! Serialization of gather-style indexing and its scatter-add adjoint.
 
-use super::emission_support::{OperationEmission, stablehlo_type, value_type};
+use super::emission_support::{
+    OperationEmission, floating_initializer, stablehlo_element_type, stablehlo_type, value_type,
+};
 use super::{super::*, dialect::*};
 use std::fmt::Write;
 
@@ -61,6 +63,8 @@ fn emit_gather_gradient(
     let indices = value_type(ctx, operation.get_operand(1));
     let gradient_type = stablehlo_type(&gradient)?;
     let indices_type = stablehlo_type(&indices)?;
+    let element = stablehlo_element_type(emission.result_type.dtype)?;
+    let zero_value = floating_initializer(emission.result_type.dtype, false)?;
     let (axis, batched) = gather
         .get_attr_stable_gather_gradient(ctx)
         .unwrap()
@@ -99,12 +103,12 @@ fn emit_gather_gradient(
     .unwrap();
     writeln!(
         emission.body,
-        "    {scalar_base} = stablehlo.constant dense<0x00000000> : tensor<f32>"
+        "    {scalar_base} = stablehlo.constant dense<{zero_value}> : tensor<{element}>"
     )
     .unwrap();
     writeln!(
         emission.body,
-        "    {base} = stablehlo.broadcast_in_dim {scalar_base}, dims = [] : (tensor<f32>) -> {}",
+        "    {base} = stablehlo.broadcast_in_dim {scalar_base}, dims = [] : (tensor<{element}>) -> {}",
         emission.ty
     )
     .unwrap();
@@ -132,17 +136,17 @@ fn emit_gather_gradient(
     writeln!(emission.body, "    {} = \"stablehlo.scatter\"({base}, {bounded}, {}) <{{indices_are_sorted = false, scatter_dimension_numbers = #stablehlo.scatter<update_window_dims = [{update_window_dims}], inserted_window_dims = [{axis}], {batch_fields}scatter_dims_to_operand_dims = [{axis}], index_vector_dim = {}>, unique_indices = false}}> ({{", emission.name, emission.operands[0], indices.dims.len()).unwrap();
     writeln!(
         emission.body,
-        "    ^bb0(%scatter_lhs: tensor<f32>, %scatter_rhs: tensor<f32>):"
+        "    ^bb0(%scatter_lhs: tensor<{element}>, %scatter_rhs: tensor<{element}>):"
     )
     .unwrap();
     writeln!(
         emission.body,
-        "      %scatter_sum = stablehlo.add %scatter_lhs, %scatter_rhs : tensor<f32>"
+        "      %scatter_sum = stablehlo.add %scatter_lhs, %scatter_rhs : tensor<{element}>"
     )
     .unwrap();
     writeln!(
         emission.body,
-        "      stablehlo.return %scatter_sum : tensor<f32>"
+        "      stablehlo.return %scatter_sum : tensor<{element}>"
     )
     .unwrap();
     writeln!(

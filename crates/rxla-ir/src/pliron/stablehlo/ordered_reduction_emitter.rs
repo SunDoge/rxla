@@ -1,6 +1,8 @@
 //! Serialization of ordered and index-carrying reduction regions.
 
-use super::emission_support::{OperationEmission, stablehlo_type, value_type};
+use super::emission_support::{
+    OperationEmission, floating_initializer, stablehlo_element_type, stablehlo_type, value_type,
+};
 use super::{super::*, dialect::*};
 use std::fmt::Write;
 
@@ -21,7 +23,10 @@ pub(super) fn emit_ordered_reduction(emission: &mut OperationEmission<'_>) -> Re
 
 fn emit_cumsum(emission: &mut OperationEmission<'_>, cumsum: &StableCumsumOp) -> Result<()> {
     let operation = emission.operation.deref(emission.ctx);
-    let source_type = stablehlo_type(&value_type(emission.ctx, operation.get_operand(0)))?;
+    let source = value_type(emission.ctx, operation.get_operand(0));
+    let source_type = stablehlo_type(&source)?;
+    let element = stablehlo_element_type(source.dtype)?;
+    let zero = floating_initializer(source.dtype, false)?;
     let axis = cumsum
         .get_attr_stable_cumsum_axis(emission.ctx)
         .unwrap()
@@ -29,7 +34,7 @@ fn emit_cumsum(emission: &mut OperationEmission<'_>, cumsum: &StableCumsumOp) ->
     let initializer = emission.auxiliary();
     writeln!(
         emission.body,
-        "    {initializer} = stablehlo.constant dense<0x00000000> : tensor<f32>"
+        "    {initializer} = stablehlo.constant dense<{zero}> : tensor<{element}>"
     )
     .unwrap();
     let window = emission
@@ -61,22 +66,22 @@ fn emit_cumsum(emission: &mut OperationEmission<'_>, cumsum: &StableCumsumOp) ->
     writeln!(emission.body, "    {} = \"stablehlo.reduce_window\"({}, {initializer}) <{{base_dilations = array<i64: {ones}>, padding = dense<[{padding}]> : tensor<{}x2xi64>, window_dilations = array<i64: {ones}>, window_dimensions = array<i64: {window}>, window_strides = array<i64: {ones}>}}> ({{", emission.name, emission.operands[0], emission.result_type.dims.len()).unwrap();
     writeln!(
         emission.body,
-        "    ^bb0(%cumsum_lhs: tensor<f32>, %cumsum_rhs: tensor<f32>):"
+        "    ^bb0(%cumsum_lhs: tensor<{element}>, %cumsum_rhs: tensor<{element}>):"
     )
     .unwrap();
     writeln!(
         emission.body,
-        "      %cumsum_sum = stablehlo.add %cumsum_lhs, %cumsum_rhs : tensor<f32>"
+        "      %cumsum_sum = stablehlo.add %cumsum_lhs, %cumsum_rhs : tensor<{element}>"
     )
     .unwrap();
     writeln!(
         emission.body,
-        "      stablehlo.return %cumsum_sum : tensor<f32>"
+        "      stablehlo.return %cumsum_sum : tensor<{element}>"
     )
     .unwrap();
     writeln!(
         emission.body,
-        "    }}) : ({source_type}, tensor<f32>) -> {}",
+        "    }}) : ({source_type}, tensor<{element}>) -> {}",
         emission.ty
     )
     .unwrap();
@@ -87,6 +92,8 @@ fn emit_argmax(emission: &mut OperationEmission<'_>, argmax: &StableArgMaxOp) ->
     let operation = emission.operation.deref(emission.ctx);
     let input = value_type(emission.ctx, operation.get_operand(0));
     let input_type = stablehlo_type(&input)?;
+    let element = stablehlo_element_type(input.dtype)?;
+    let negative_infinity_value = floating_initializer(input.dtype, true)?;
     let index_type = stablehlo_type(&TensorType {
         dims: input.dims.clone(),
         dtype: DType::I32,
@@ -107,7 +114,7 @@ fn emit_argmax(emission: &mut OperationEmission<'_>, argmax: &StableArgMaxOp) ->
     .unwrap();
     writeln!(
         emission.body,
-        "    {negative_infinity} = stablehlo.constant dense<0xFF800000> : tensor<f32>"
+        "    {negative_infinity} = stablehlo.constant dense<{negative_infinity_value}> : tensor<{element}>"
     )
     .unwrap();
     writeln!(
@@ -117,19 +124,19 @@ fn emit_argmax(emission: &mut OperationEmission<'_>, argmax: &StableArgMaxOp) ->
     .unwrap();
     let reduced_float_type = stablehlo_type(&TensorType {
         dims: emission.result_type.dims.clone(),
-        dtype: DType::F32,
+        dtype: input.dtype,
         dynamic_bounds: emission.result_type.dynamic_bounds.clone(),
     })?;
-    writeln!(emission.body, "    {reduced}:2 = stablehlo.reduce({} init: {negative_infinity}), ({indices} init: {zero}) across dimensions = [{axis}] : ({input_type}, {index_type}, tensor<f32>, tensor<i32>) -> ({reduced_float_type}, {})", emission.operands[0], emission.ty).unwrap();
-    writeln!(emission.body, "     reducer(%arg_value_lhs: tensor<f32>, %arg_value_rhs: tensor<f32>) (%arg_index_lhs: tensor<i32>, %arg_index_rhs: tensor<i32>) {{").unwrap();
-    writeln!(emission.body, "      %arg_gt = stablehlo.compare GT, %arg_value_lhs, %arg_value_rhs, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>").unwrap();
-    writeln!(emission.body, "      %arg_nan = stablehlo.compare NE, %arg_value_lhs, %arg_value_lhs, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>").unwrap();
+    writeln!(emission.body, "    {reduced}:2 = stablehlo.reduce({} init: {negative_infinity}), ({indices} init: {zero}) across dimensions = [{axis}] : ({input_type}, {index_type}, tensor<{element}>, tensor<i32>) -> ({reduced_float_type}, {})", emission.operands[0], emission.ty).unwrap();
+    writeln!(emission.body, "     reducer(%arg_value_lhs: tensor<{element}>, %arg_value_rhs: tensor<{element}>) (%arg_index_lhs: tensor<i32>, %arg_index_rhs: tensor<i32>) {{").unwrap();
+    writeln!(emission.body, "      %arg_gt = stablehlo.compare GT, %arg_value_lhs, %arg_value_rhs, FLOAT : (tensor<{element}>, tensor<{element}>) -> tensor<i1>").unwrap();
+    writeln!(emission.body, "      %arg_nan = stablehlo.compare NE, %arg_value_lhs, %arg_value_lhs, FLOAT : (tensor<{element}>, tensor<{element}>) -> tensor<i1>").unwrap();
     writeln!(
         emission.body,
         "      %arg_value_wins = stablehlo.or %arg_gt, %arg_nan : tensor<i1>"
     )
     .unwrap();
-    writeln!(emission.body, "      %arg_eq = stablehlo.compare EQ, %arg_value_lhs, %arg_value_rhs, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>").unwrap();
+    writeln!(emission.body, "      %arg_eq = stablehlo.compare EQ, %arg_value_lhs, %arg_value_rhs, FLOAT : (tensor<{element}>, tensor<{element}>) -> tensor<i1>").unwrap();
     writeln!(emission.body, "      %arg_index_lt = stablehlo.compare LT, %arg_index_lhs, %arg_index_rhs, SIGNED : (tensor<i32>, tensor<i32>) -> tensor<i1>").unwrap();
     writeln!(
         emission.body,
@@ -141,11 +148,11 @@ fn emit_argmax(emission: &mut OperationEmission<'_>, argmax: &StableArgMaxOp) ->
         "      %arg_index_wins = stablehlo.or %arg_value_wins, %arg_tie_wins : tensor<i1>"
     )
     .unwrap();
-    writeln!(emission.body, "      %arg_value = stablehlo.select %arg_value_wins, %arg_value_lhs, %arg_value_rhs : tensor<i1>, tensor<f32>").unwrap();
+    writeln!(emission.body, "      %arg_value = stablehlo.select %arg_value_wins, %arg_value_lhs, %arg_value_rhs : tensor<i1>, tensor<{element}>").unwrap();
     writeln!(emission.body, "      %arg_index = stablehlo.select %arg_index_wins, %arg_index_lhs, %arg_index_rhs : tensor<i1>, tensor<i32>").unwrap();
     writeln!(
         emission.body,
-        "      stablehlo.return %arg_value, %arg_index : tensor<f32>, tensor<i32>"
+        "      stablehlo.return %arg_value, %arg_index : tensor<{element}>, tensor<i32>"
     )
     .unwrap();
     writeln!(emission.body, "    }}").unwrap();
@@ -162,6 +169,7 @@ fn emit_sort(emission: &mut OperationEmission<'_>, sort: &StableSortedIndicesOp)
     let operation = emission.operation.deref(emission.ctx);
     let input = value_type(emission.ctx, operation.get_operand(0));
     let input_type = stablehlo_type(&input)?;
+    let element = stablehlo_element_type(input.dtype)?;
     let (axis, descending) = sort.get_attr_stable_sort(emission.ctx).unwrap().values();
     let indices = emission.auxiliary();
     let sorted = emission.auxiliary();
@@ -173,10 +181,10 @@ fn emit_sort(emission: &mut OperationEmission<'_>, sort: &StableSortedIndicesOp)
     )
     .unwrap();
     writeln!(emission.body, "    {sorted}:2 = \"stablehlo.sort\"({}, {indices}) <{{dimension = {axis} : i64, is_stable = true}}> ({{", emission.operands[0]).unwrap();
-    writeln!(emission.body, "    ^bb0(%sort_lhs: tensor<f32>, %sort_rhs: tensor<f32>, %sort_lhs_index: tensor<i32>, %sort_rhs_index: tensor<i32>):").unwrap();
-    writeln!(emission.body, "      %sort_lhs_not_nan = stablehlo.compare EQ, %sort_lhs, %sort_lhs, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>").unwrap();
-    writeln!(emission.body, "      %sort_rhs_nan = stablehlo.compare NE, %sort_rhs, %sort_rhs, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>").unwrap();
-    writeln!(emission.body, "      %sort_ordered = stablehlo.compare {direction}, %sort_lhs, %sort_rhs, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>").unwrap();
+    writeln!(emission.body, "    ^bb0(%sort_lhs: tensor<{element}>, %sort_rhs: tensor<{element}>, %sort_lhs_index: tensor<i32>, %sort_rhs_index: tensor<i32>):").unwrap();
+    writeln!(emission.body, "      %sort_lhs_not_nan = stablehlo.compare EQ, %sort_lhs, %sort_lhs, FLOAT : (tensor<{element}>, tensor<{element}>) -> tensor<i1>").unwrap();
+    writeln!(emission.body, "      %sort_rhs_nan = stablehlo.compare NE, %sort_rhs, %sort_rhs, FLOAT : (tensor<{element}>, tensor<{element}>) -> tensor<i1>").unwrap();
+    writeln!(emission.body, "      %sort_ordered = stablehlo.compare {direction}, %sort_lhs, %sort_rhs, FLOAT : (tensor<{element}>, tensor<{element}>) -> tensor<i1>").unwrap();
     writeln!(
         emission.body,
         "      %sort_rhs_nan_or_ordered = stablehlo.or %sort_rhs_nan, %sort_ordered : tensor<i1>"

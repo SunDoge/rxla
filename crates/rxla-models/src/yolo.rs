@@ -2,7 +2,7 @@
 
 use super::*;
 use derive_setters::Setters;
-use rxla_core::{Conv2dOptions, Pool2dOptions, Tensor, vision};
+use rxla_core::{Conv2dOptions, DType, Pool2dOptions, Tensor, vision};
 use rxla_nn::{BatchNorm, Conv2d, Initializer, Layer, TensorApply, path};
 use snafu::{Snafu, ensure};
 
@@ -12,6 +12,7 @@ pub struct YoloConfig {
     depth: f32,
     width: f32,
     depthwise: bool,
+    compute_dtype: DType,
 }
 
 impl YoloConfig {
@@ -21,6 +22,7 @@ impl YoloConfig {
             depth: 0.33,
             width: 0.375,
             depthwise: false,
+            compute_dtype: DType::F32,
         }
     }
 
@@ -30,6 +32,7 @@ impl YoloConfig {
             depth: 0.33,
             width: 0.25,
             depthwise: true,
+            compute_dtype: DType::F32,
         }
     }
 
@@ -39,11 +42,17 @@ impl YoloConfig {
             depth: 0.33,
             width: 0.5,
             depthwise: false,
+            compute_dtype: DType::F32,
         }
     }
 
     pub fn classes(self) -> i64 {
         self.classes
+    }
+
+    pub fn compute_dtype(mut self, dtype: DType) -> Self {
+        self.compute_dtype = dtype;
+        self
     }
     fn channels(self, base: i64) -> i64 {
         (base as f32 * self.width) as i64
@@ -62,6 +71,7 @@ impl YoloConfig {
             || !self.width.is_finite()
             || self.width <= 0.
             || self.channels(64) <= 0
+            || !matches!(self.compute_dtype, DType::F16 | DType::BF16 | DType::F32)
         {
             return Err(Error::InvalidModel {
                 kind: ModelDefinitionError::InvalidYoloConfiguration,
@@ -438,6 +448,7 @@ pub struct YoloForward {
 /// Official YOLOX topology with intermediate PAFPN features exposed.
 pub fn yolo_forward(cx: Cx, images: &Tensor, config: &YoloConfig) -> Result<YoloForward> {
     config.validate()?;
+    let cx = cx.with_layer_compute_dtype(config.compute_dtype)?;
     let [_, height, width, channels] = images.shape() else {
         return Err(Error::InvalidModel {
             kind: ModelDefinitionError::InvalidYoloInput,
