@@ -358,6 +358,15 @@ pub(super) struct StableTransposeConvolutionOp;
 pub(super) struct StableReduceWindowMaximumOp;
 
 #[pliron_op(
+    name = "stablehlo.select_and_scatter_maximum",
+    format,
+    interfaces = [NOpdsInterface<2>, OneResultInterface],
+    attributes = (stable_max_gradient_window: ReduceWindowConfigAttr),
+    verifier = "succ"
+)]
+pub(super) struct StableSelectAndScatterMaximumOp;
+
+#[pliron_op(
     name = "stablehlo.reduce_window_sum",
     format,
     interfaces = [OneOpdInterface, OneResultInterface],

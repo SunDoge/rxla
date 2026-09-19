@@ -390,6 +390,16 @@ impl IrGraph {
                 required_attr!(value, get_attr_max_pool_options, "max pool options").options(),
             ));
         }
+        if let Some(value) = op.downcast_ref::<MaxPool2dGradientOp>() {
+            return Ok(Op::MaxPool2dGradient(
+                required_attr!(
+                    value,
+                    get_attr_max_pool_gradient_options,
+                    "max pool gradient options"
+                )
+                .options(),
+            ));
+        }
         if let Some(value) = op.downcast_ref::<SumPool2dOp>() {
             return Ok(Op::SumPool2d(
                 required_attr!(value, get_attr_sum_pool_options, "sum pool options").options(),

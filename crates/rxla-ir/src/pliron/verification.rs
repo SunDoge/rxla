@@ -1074,6 +1074,69 @@ impl Verify for MaxPool2dOp {
     }
 }
 
+impl Verify for MaxPool2dGradientOp {
+    fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
+        let Some(options) = self.get_attr_max_pool_gradient_options(ctx) else {
+            return pliron::verify_err_noloc!(
+                "rxla.max_pool2d_gradient requires pooling attributes"
+            );
+        };
+        let options = options.options();
+        let operation = self.get_operation().deref(ctx);
+        let input = value_type(operation.get_operand(0), ctx)?;
+        let output_gradient = value_type(operation.get_operand(1), ctx)?;
+        let result = value_type(operation.get_result(0), ctx)?;
+        if result != input {
+            return pliron::verify_err_noloc!(
+                "rxla.max_pool2d_gradient result type must equal its input type"
+            );
+        }
+        // Check the forward result shape expected of the output cotangent.
+        // Keeping this semantic op typed prevents an invalid select-and-scatter
+        // from reaching XLA's textual verifier.
+        if input.dtype != DType::F32
+            || output_gradient.dtype != DType::F32
+            || input.dims.len() != 4
+            || output_gradient.dims.len() != 4
+            || input.dims[1..].iter().any(|&dimension| dimension < 0)
+        {
+            return pliron::verify_err_noloc!(
+                "rxla max_pool2d gradient requires rank-4 F32 tensors with only a dynamic batch axis"
+            );
+        }
+        let mut expected = input.clone();
+        for axis in 0..2 {
+            let window = options.window[axis];
+            let stride = options.strides[axis];
+            let [low, high] = options.padding[axis];
+            if window <= 0 || stride <= 0 || low < 0 || high < 0 {
+                return pliron::verify_err_noloc!(
+                    "rxla max_pool2d gradient has invalid window attributes"
+                );
+            }
+            let Some(padded) = input.dims[axis + 1]
+                .checked_add(low)
+                .and_then(|value| value.checked_add(high))
+            else {
+                return pliron::verify_err_noloc!(
+                    "rxla max_pool2d gradient input extent overflows"
+                );
+            };
+            expected.dims[axis + 1] = if padded < window {
+                0
+            } else {
+                (padded - window) / stride + 1
+            };
+        }
+        if output_gradient != expected {
+            return pliron::verify_err_noloc!(
+                "rxla max_pool2d gradient operand type is inconsistent with its input"
+            );
+        }
+        Ok(())
+    }
+}
+
 impl Verify for SumPool2dOp {
     fn verify(&self, ctx: &Context) -> pliron::result::Result<()> {
         let Some(options) = self.get_attr_sum_pool_options(ctx) else {

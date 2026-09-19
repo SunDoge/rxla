@@ -497,5 +497,6 @@ pub enum Op {
     Conv2dInputGradient(Conv2dOptions),
     Conv2dKernelGradient(Conv2dOptions),
     MaxPool2d(Pool2dOptions),
+    MaxPool2dGradient(Pool2dOptions),
     SumPool2d(Pool2dOptions),
 }

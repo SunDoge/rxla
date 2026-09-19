@@ -11,7 +11,12 @@ pub(super) fn emit_aggregation(emission: &mut OperationEmission<'_>) -> Result<b
     let operation_ptr = emission.operation;
     let operation = operation_ptr.deref(ctx);
     let op = Operation::get_op_dyn(operation_ptr, ctx);
-    if op.as_ref().is::<StableReduceWindowMaximumOp>()
+    if let Some(gradient) = op
+        .as_ref()
+        .downcast_ref::<StableSelectAndScatterMaximumOp>()
+    {
+        emit_max_pool_gradient(emission, gradient)?;
+    } else if op.as_ref().is::<StableReduceWindowMaximumOp>()
         || op.as_ref().is::<StableReduceWindowSumOp>()
     {
         let maximum = op.as_ref().is::<StableReduceWindowMaximumOp>();
@@ -112,6 +117,94 @@ pub(super) fn emit_aggregation(emission: &mut OperationEmission<'_>) -> Result<b
         return Ok(false);
     }
     Ok(true)
+}
+
+fn emit_max_pool_gradient(
+    emission: &mut OperationEmission<'_>,
+    gradient: &StableSelectAndScatterMaximumOp,
+) -> Result<()> {
+    let options = gradient
+        .get_attr_stable_max_gradient_window(emission.ctx)
+        .unwrap()
+        .options();
+    let operation = emission.operation.deref(emission.ctx);
+    let input_type = value_type(emission.ctx, operation.get_operand(0));
+    let gradient_type = stablehlo_type(&value_type(emission.ctx, operation.get_operand(1)))?;
+    let element_type = stablehlo_element_type(input_type.dtype)?;
+    let negative_infinity = floating_initializer(input_type.dtype, true)?;
+    let zero = floating_initializer(input_type.dtype, false)?;
+    let padding = [[0, 0], options.padding[0], options.padding[1], [0, 0]];
+    let padded_type = TensorType {
+        dims: input_type
+            .dims
+            .iter()
+            .zip(padding)
+            .map(|(&dimension, [low, high])| {
+                if dimension < 0 {
+                    dimension
+                } else {
+                    dimension + low + high
+                }
+            })
+            .collect(),
+        ..input_type.clone()
+    };
+    let padded_type = stablehlo_type(&padded_type)?;
+    let pad_value = emission.auxiliary();
+    let padded = emission.auxiliary();
+    let scatter_init = emission.auxiliary();
+    let scattered = emission.auxiliary();
+    writeln!(
+        emission.body,
+        "    {pad_value} = stablehlo.constant dense<{negative_infinity}> : tensor<{element_type}>"
+    )
+    .unwrap();
+    writeln!(emission.body, "    {padded} = stablehlo.pad {}, {pad_value}, low = [{}, {}, {}, {}], high = [{}, {}, {}, {}], interior = [0, 0, 0, 0] : ({}, tensor<{element_type}>) -> {padded_type}", emission.operands[0], padding[0][0], padding[1][0], padding[2][0], padding[3][0], padding[0][1], padding[1][1], padding[2][1], padding[3][1], stablehlo_type(&input_type)?).unwrap();
+    writeln!(
+        emission.body,
+        "    {scatter_init} = stablehlo.constant dense<{zero}> : tensor<{element_type}>"
+    )
+    .unwrap();
+    let window = format!("1, {}, {}, 1", options.window[0], options.window[1]);
+    let strides = format!("1, {}, {}, 1", options.strides[0], options.strides[1]);
+    writeln!(emission.body, "    {scattered} = \"stablehlo.select_and_scatter\"({padded}, {}, {scatter_init}) <{{padding = dense<0> : tensor<4x2xi64>, window_dimensions = array<i64: {window}>, window_strides = array<i64: {strides}>}}> ({{", emission.operands[1]).unwrap();
+    writeln!(
+        emission.body,
+        "    ^bb0(%select_lhs: tensor<{element_type}>, %select_rhs: tensor<{element_type}>):"
+    )
+    .unwrap();
+    writeln!(emission.body, "      %selected = stablehlo.compare GE, %select_lhs, %select_rhs, FLOAT : (tensor<{element_type}>, tensor<{element_type}>) -> tensor<i1>").unwrap();
+    writeln!(
+        emission.body,
+        "      stablehlo.return %selected : tensor<i1>"
+    )
+    .unwrap();
+    writeln!(emission.body, "    }}, {{").unwrap();
+    writeln!(
+        emission.body,
+        "    ^bb0(%scatter_lhs: tensor<{element_type}>, %scatter_rhs: tensor<{element_type}>):"
+    )
+    .unwrap();
+    writeln!(
+        emission.body,
+        "      %summed = stablehlo.add %scatter_lhs, %scatter_rhs : tensor<{element_type}>"
+    )
+    .unwrap();
+    writeln!(
+        emission.body,
+        "      stablehlo.return %summed : tensor<{element_type}>"
+    )
+    .unwrap();
+    writeln!(
+        emission.body,
+        "    }}) : ({padded_type}, {gradient_type}, tensor<{element_type}>) -> {padded_type}"
+    )
+    .unwrap();
+
+    // Negative edge padding crops the temporary back to the unpadded input
+    // shape and remains valid when only the leading batch dimension is dynamic.
+    writeln!(emission.body, "    {} = stablehlo.pad {scattered}, {scatter_init}, low = [{}, {}, {}, {}], high = [{}, {}, {}, {}], interior = [0, 0, 0, 0] : ({padded_type}, tensor<{element_type}>) -> {}", emission.name, -padding[0][0], -padding[1][0], -padding[2][0], -padding[3][0], -padding[0][1], -padding[1][1], -padding[2][1], -padding[3][1], emission.ty).unwrap();
+    Ok(())
 }
 
 fn emit_f32_accumulating_sum(emission: &mut OperationEmission<'_>, axes: &[usize]) -> Result<()> {

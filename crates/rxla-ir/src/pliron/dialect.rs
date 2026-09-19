@@ -413,6 +413,14 @@ pub(super) struct ConvTranspose2dOp;
 pub(super) struct MaxPool2dOp;
 
 #[pliron_op(
+    name = "rxla.max_pool2d_gradient",
+    format = "$0 `, ` $1 ` ` attr($max_pool_gradient_options, $Pool2dOptionsAttr) ` : ` type($0) `, ` type($1) ` -> ` type($2)",
+    interfaces = [NOpdsInterface<2>, OneResultInterface],
+    attributes = (max_pool_gradient_options: Pool2dOptionsAttr)
+)]
+pub(super) struct MaxPool2dGradientOp;
+
+#[pliron_op(
     name = "rxla.sum_pool2d",
     format = "$0 ` ` attr($sum_pool_options, $Pool2dOptionsAttr) ` : ` type($0) ` -> ` type($1)",
     interfaces = [OneOpdInterface, OneResultInterface],

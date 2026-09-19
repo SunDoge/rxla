@@ -551,6 +551,18 @@ impl DialectConversion for RxlaToStableHlo {
                 )
             );
         }
+        if let Some(value) = source.as_ref().downcast_ref::<MaxPool2dGradientOp>() {
+            replace_attr!(
+                StableSelectAndScatterMaximumOp,
+                set_attr_stable_max_gradient_window,
+                ReduceWindowConfigAttr::new(
+                    value
+                        .get_attr_max_pool_gradient_options(ctx)
+                        .unwrap()
+                        .options()
+                )
+            );
+        }
         if let Some(value) = source.as_ref().downcast_ref::<SumPool2dOp>() {
             replace_attr!(
                 StableReduceWindowSumOp,
@@ -755,6 +767,7 @@ pub(super) fn supports_source_operation(op: &dyn PlironOp) -> bool {
         || op.is::<Conv2dKernelGradientOp>()
         || op.is::<ConvTranspose2dOp>()
         || op.is::<MaxPool2dOp>()
+        || op.is::<MaxPool2dGradientOp>()
         || op.is::<SumPool2dOp>()
         || op.is::<ReduceSumOp>()
         || op.is::<ReduceMaximumOp>()

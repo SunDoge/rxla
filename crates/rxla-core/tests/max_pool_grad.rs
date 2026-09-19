@@ -134,7 +134,7 @@ fn real_max_pool_ties_choose_one_winner_and_empty_gradients() {
 }
 
 #[test]
-fn max_pool_first_order_lowers_through_offset_scatters() {
+fn max_pool_first_order_lowers_to_select_and_scatter() {
     let g = Tracer::default();
     let x = g.input([1, 3, 3, 1]).unwrap();
     let loss = x
@@ -144,5 +144,6 @@ fn max_pool_first_order_lowers_through_offset_scatters() {
         .unwrap();
     let gradient = loss.grad(std::slice::from_ref(&x)).unwrap().remove(0);
     let stablehlo = g.stablehlo(&gradient).unwrap();
-    assert!(stablehlo.contains("stablehlo.convolution"));
+    assert!(stablehlo.contains("stablehlo.select_and_scatter"));
+    assert!(!stablehlo.contains("stablehlo.convolution"));
 }

@@ -175,6 +175,20 @@ impl IrGraph {
                 let [input] = operands else { return None };
                 self.pool2d_typed(*input, result, *options, true)
             }
+            Op::MaxPool2dGradient(options) => {
+                let [input, output_gradient] = operands else {
+                    return None;
+                };
+                let ty = self.tensor_type_for(result);
+                let op = construct_op!(
+                    MaxPool2dGradientOp,
+                    &mut self.ctx,
+                    vec![ty],
+                    vec![*input, *output_gradient]
+                );
+                op.set_attr_max_pool_gradient_options(&self.ctx, Pool2dOptionsAttr::new(*options));
+                self.push(op)
+            }
             Op::SumPool2d(options) => {
                 let [input] = operands else { return None };
                 self.pool2d_typed(*input, result, *options, false)

@@ -150,10 +150,8 @@ including first-step device warmup and two final no-augmentation/L1 steps.
 Augmentation prepared a typical batch in 63–66 ms, but a three-batch bounded
 prefetch kept measured consumer wait at 0.0 ms throughout the run.
 
-The convolution-only BF16 path reduced steady device training time from
-`36.4–37.2 ms` to `23.0–24.0 ms` on the same RTX 5080. A 20-step real-data run
-reached 214.9 images/s end to end; at that point the 37–51 ms CPU Mosaic producer
-became the limiter and occasional consumer waits reappeared. For context, an
+The convolution-only BF16 path initially reduced steady device training time
+from `36.4–37.2 ms` to `23.0–24.0 ms` on the same RTX 5080. For context, an
 official-compatible PyTorch eager benchmark with 12 synthetic targets per image
 measured 23.87 ms in F32 and 26.61 ms under BF16 autocast. These are useful
 device baselines, not a strict data-pipeline comparison.
@@ -161,32 +159,45 @@ device baselines, not a strict data-pipeline comparison.
 Compiling the same PyTorch model with Inductor's default `torch.compile` mode
 measured 18.48 ms (433.0 images/s). The official-compatible Python loss has a
 graph break at its per-image `Tensor.item()` SimOTA loop, but Inductor still
-compiles the convolutional regions. RXLA currently remains slower than this
-stronger device baseline.
+compiles the convolutional regions.
 
-The input boundary now preserves decoded images as U8 through host batching and
+The input boundary preserves decoded images as U8 through host batching and
 PCIe transfer, then performs the exact U8-to-F32 conversion in the compiled
 graph. Mosaic also exposes its four independent JPEG decode/resize jobs to the
 same Rayon pool as the batch, rather than serializing them inside each output
-image. On this 24-core host a 100-step real-data run sustained 295.6 images/s
-(2.707 seconds for 800 images), 37.9% above the U8-only result. Steady device
-steps were 22.6–24.8 ms, observed Mosaic preparation was 22.6–28.3 ms, and
-consumer wait remained 0.0 ms. Host preparation is therefore hidden behind the
-unified CUDA training graph at this batch size.
+image. Before the native max-pool adjoint, this let a 100-step real-data run
+sustain 295.6 images/s (2.707 seconds for 800 images), 37.9% above the U8-only
+result. Steady device steps were then 22.6–24.8 ms, observed Mosaic preparation
+was 22.6–28.3 ms, and consumer wait remained 0.0 ms.
 
-Nsight profiling explains the remaining CUDA gap. RXLA launched about 1,154
-kernels per steady step with 15.21 ms aggregate GPU kernel time, versus about
-2,132 kernels and 7.70 ms for the profiled PyTorch/Inductor step. Despite the
-lower launch count, 61.2% of RXLA kernel time was cuDNN grouped-direct work:
-roughly 239 invocations per step. The kernel name is potentially misleading:
-YOLOX-tiny has `depthwise=false`, and these are ordinary convolutions rather
-than per-channel depthwise work. The PyTorch trace instead spends most
-convolution time in cuDNN/CUTLASS tensor-core implicit-GEMM kernels. BF16 XLA
-autotune logs confirm that forward and weight-gradient convolutions remain
-BF16, while input gradients are represented as reversed/dilated forward
-convolutions and ultimately autotuned as `__cudnn$convForward`; PyTorch uses
-dedicated dgrad kernels. Rewriting the reversal to JAX's explicit
-`stablehlo.reverse` form was mathematically correct but slowed steady training
+The first Nsight profile appeared to expose a convolution problem: RXLA launched
+about 1,154 kernels per steady step with 15.21 ms aggregate GPU kernel time,
+versus about 2,132 kernels and 7.70 ms for the profiled PyTorch/Inductor step.
+About 239 `conv2d_grouped_direct` launches consumed 61.2% of RXLA kernel time.
+The name was misleading. YOLOX-tiny has `depthwise=false`; the launches came
+from RXLA's old max-pool adjoint, which expanded each spatial window position
+into a transpose-convolution scatter. The 5x5, 9x9, and 13x13 SPP windows alone
+created 275 such operations per training graph.
+
+Max-pool reverse mode now remains a first-class RXLA IR operation and lowers to
+one StableHLO `select_and_scatter` per pool. It also follows PyTorch/JAX-style
+single-winner tie semantics instead of dividing a cotangent among equal maxima.
+On the same real-data BF16 run, steady training steps fell to 12.2–16.3 ms. A
+100-step run processed 800 output images in 2.618 seconds (305.6 images/s end to
+end); JPEG/Mosaic preparation and producer waits, rather than the device graph,
+now set that throughput. This device time is below the measured 18.48 ms
+`torch.compile` baseline, although the workloads are not a strict end-to-end
+comparison. An 11-step Nsight capture measured 4.07 ms aggregate GPU kernel time
+and about 402 kernel launches per step. Only one grouped-direct launch remained
+per step, consuming less than 0.01 ms. The native lowering therefore removed
+the actual bottleneck instead of tuning unrelated convolutions.
+
+BF16 XLA autotune logs also confirm that forward and weight-gradient
+convolutions remain BF16, while input gradients are represented as
+reversed/dilated forward convolutions and ultimately autotuned as
+`__cudnn$convForward`; PyTorch uses dedicated dgrad kernels. Rewriting the
+reversal to JAX's explicit `stablehlo.reverse` form was mathematically correct
+but slowed steady training
 to 32.6--37.1 ms, so it was rejected. Autotune inspection showed that 12 BF16
 shapes then became `__cudnn$convBackwardInput`, but an Nsight capture exposed
 the regression: nine profiled steps spent 38.85 ms in 954
