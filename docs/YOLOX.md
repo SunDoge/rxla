@@ -231,6 +231,13 @@ to level 4; the former cuDNN frontend switch is no longer present in this XLA
 version. The retained NHWC, `HIGHEST` path is therefore the best measured
 general XLA lowering, rather than an accidentally disabled autotuning setup.
 
+Disabling CUDA command buffers after the native max-pool change was also not a
+meaningful end-to-end improvement. It tightened many steady device observations
+to roughly 11.4–13.3 ms, but the reproducible 100-step run moved only from 305.6
+to 307.1 images/s because host augmentation was already the limiter. Command
+buffers therefore remain at the plugin default; deployments can still select
+direct launches with `Compiler::without_cuda_command_buffers()`.
+
 For bounded Nsight captures, `--cuda-profile --cuda-runtime /path/to/libcudart.so`
 starts collection after the first training step. Use it with
 `nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop`.
