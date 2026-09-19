@@ -37,10 +37,12 @@ cargo run -p rxla-safetensors --release --features model \
   --example yolox_coco_train_step -- \
   /path/to/xla_cuda_plugin.so \
   yolox_tiny.safetensors \
+  --size 416 --steps 100 --learning-rate 1e-5 \
+  --output yolox_tiny_trained.safetensors \
+  coco \
   /data/datasets/coco2017/annotations/instances_train2017.json \
   /data/datasets/coco2017/train2017 \
-  9 --size 64 --steps 100 --learning-rate 1e-5 \
-  --output yolox_tiny_trained.safetensors
+  391895
 ```
 
 The model is compiled once. Each step runs the current weights through the
@@ -54,6 +56,27 @@ be passed directly to `yolox_infer`.
 The current example is deliberately a correctness-oriented batch-size-one
 trainer. Dataset shuffling, batched variable-length targets, augmentation, and
 prefetch belong in the data pipeline rather than the YOLO model definition.
+
+For sequential training, COCO can instead be stored as standard TFRecord
+framing with Apache Fory Standard Row payloads. The JPEG remains compressed;
+Fory provides typed, borrowed views of its bytes and the box/label arrays.
+
+```sh
+uv run --no-sync python benchmarks/fory_tfrecord.py \
+  /data/datasets/coco2017 \
+  /data/datasets/coco2017-fory-4096.tfrecord \
+  --samples 4096
+
+cargo run -p rxla-safetensors --release --features model \
+  --example yolox_coco_train_step -- \
+  /path/to/xla_cuda_plugin.so yolox_tiny.safetensors \
+  --size 416 --steps 100 \
+  tfrecord /data/datasets/coco2017-fory-4096.tfrecord
+```
+
+The training reader requires the adjacent `.tfrecord.json` manifest and checks
+the container, Fory version, and schema hash before reading any records. Each
+TFRecord length and payload CRC32C is then verified while streaming.
 
 ## Verified baseline
 

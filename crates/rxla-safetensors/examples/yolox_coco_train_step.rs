@@ -1,16 +1,22 @@
 //! Train YOLOX on real COCO samples with host SimOTA and a resident Adam session.
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use fory::{ForyRow, from_row};
 use image::{RgbImage, imageops::FilterType};
 use rxla_core::{Buffer, CacheLimits, Client, Compiler, Tensor};
 use rxla_models::{YoloAssignments, YoloConfig, YoloLossConfig, yolo, yolox_loss};
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::{SafeTensors, save_model_new};
+use rxla_tfrecord::Reader as TfrecordReader;
 use rxla_train::{
     AdamOptions, DecodedYoloBatch, DetectionTarget, SimOtaConfig, YoloHead, apply_model_adam,
 };
 use serde::Deserialize;
-use std::{collections::BTreeMap, path::PathBuf, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    time::Instant,
+};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -21,12 +27,8 @@ struct Args {
     plugin: PathBuf,
     /// Checkpoint produced by benchmarks/convert_yolox.py.
     weights: PathBuf,
-    /// COCO instances JSON.
-    annotations: PathBuf,
-    /// Image directory referenced by the instances JSON.
-    images: PathBuf,
-    /// COCO image ID at which to start iterating.
-    image_id: u64,
+    #[command(subcommand)]
+    source: DataSource,
     /// Number of consecutive annotated images to train on.
     #[arg(long, default_value_t = 1)]
     steps: usize,
@@ -37,6 +39,22 @@ struct Args {
     /// Write inference-ready trained parameters and BatchNorm state here.
     #[arg(long)]
     output: Option<PathBuf>,
+    /// Print one progress line every N completed steps.
+    #[arg(long, default_value_t = 10)]
+    log_every: usize,
+}
+
+#[derive(Subcommand)]
+enum DataSource {
+    /// Read individual JPEG files and COCO instances JSON.
+    Coco {
+        annotations: PathBuf,
+        images: PathBuf,
+        /// COCO image ID at which to start iterating.
+        image_id: u64,
+    },
+    /// Stream TFRecord-framed Apache Fory Standard Rows.
+    Tfrecord { input: PathBuf },
 }
 
 #[derive(Deserialize)]
@@ -66,33 +84,59 @@ struct CocoCategory {
     id: u64,
 }
 
+#[derive(Deserialize)]
+struct ForyManifest {
+    codec: String,
+    container: String,
+    schema_sha256: String,
+}
+
+#[derive(ForyRow)]
+struct DetectionRecord {
+    // PyFory Standard Row canonicalizes dataclass fields lexically.
+    boxes: Vec<f32>,
+    height: i32,
+    image: Vec<u8>,
+    labels: Vec<i32>,
+    sample_id: String,
+    width: i32,
+}
+
+struct DetectionSample {
+    id: String,
+    image: RgbImage,
+    boxes: Vec<[f32; 4]>,
+    classes: Vec<usize>,
+}
+
+enum TrainingSource {
+    Coco {
+        document: Coco,
+        images: PathBuf,
+        position: usize,
+        annotations: HashMap<u64, Vec<usize>>,
+        categories: BTreeMap<u64, usize>,
+    },
+    Tfrecord {
+        reader: TfrecordReader<std::io::BufReader<std::fs::File>>,
+        categories: BTreeMap<u64, usize>,
+    },
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
-    if args.size <= 0 || args.size % 32 != 0 || !args.learning_rate.is_finite() || args.steps == 0 {
+    if args.size <= 0
+        || args.size % 32 != 0
+        || !args.learning_rate.is_finite()
+        || args.steps == 0
+        || args.log_every == 0
+    {
         return Err(
-            "size must be a positive multiple of 32, learning rate finite, and steps non-zero"
+            "size must be a positive multiple of 32; learning rate must be finite; steps and log-every must be non-zero"
                 .into(),
         );
     }
-    let coco: Coco = serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(
-        &args.annotations,
-    )?))?;
-    let start = coco
-        .images
-        .iter()
-        .position(|image| image.id == args.image_id)
-        .ok_or("image ID is absent from annotations")?;
-    let mut category_ids = coco
-        .categories
-        .iter()
-        .map(|category| category.id)
-        .collect::<Vec<_>>();
-    category_ids.sort_unstable();
-    let categories = category_ids
-        .into_iter()
-        .enumerate()
-        .map(|(index, id)| (id, index))
-        .collect::<BTreeMap<_, _>>();
+    let mut source = TrainingSource::open(args.source)?;
     let client = unsafe { Client::load(&args.plugin) }?;
     let config = YoloConfig::yolox_tiny(80);
     let inference = Model::new(move |cx: Cx, image| yolo(cx, &image, &config))
@@ -148,10 +192,9 @@ fn main() -> Result<()> {
         .initializer_seed(7)
         .build()?;
     let mut completed = 0;
-    for image in &coco.images[start..] {
-        let original = image::open(args.images.join(&image.file_name))?.into_rgb8();
-        let (pixels, ratio) = letterbox(&original, args.size as u32);
-        let targets = targets_for_image(&coco, &categories, image.id, ratio)?;
+    while let Some(sample) = source.next_sample()? {
+        let (pixels, ratio) = letterbox(&sample.image, args.size as u32);
+        let targets = sample.targets(ratio);
         if targets.is_empty() {
             continue;
         }
@@ -191,7 +234,7 @@ fn main() -> Result<()> {
         if assignments.foreground == 0 {
             return Err(format!(
                 "SimOTA produced no foreground anchors for image {}",
-                image.id
+                sample.id
             )
             .into());
         }
@@ -206,16 +249,18 @@ fn main() -> Result<()> {
             return Err("training produced invalid losses".into());
         }
         completed += 1;
-        println!(
-            "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} infer_ms={infer_ms:.1} train_ms={train_ms:.1}",
-            image.id,
-            targets.len(),
-            assignments.foreground,
-            losses[0],
-            losses[1],
-            losses[2],
-            losses[3],
-        );
+        if completed == 1 || completed % args.log_every == 0 || completed == args.steps {
+            println!(
+                "step={completed} image_id={} targets={} foreground={} total={:.6} box={:.6} objectness={:.6} classes={:.6} infer_ms={infer_ms:.1} train_ms={train_ms:.1}",
+                sample.id,
+                targets.len(),
+                assignments.foreground,
+                losses[0],
+                losses[1],
+                losses[2],
+                losses[3],
+            );
+        }
         if completed == args.steps {
             break;
         }
@@ -240,32 +285,180 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn targets_for_image(
-    coco: &Coco,
-    categories: &BTreeMap<u64, usize>,
-    image_id: u64,
-    ratio: f32,
-) -> Result<Vec<DetectionTarget>> {
-    coco.annotations
-        .iter()
-        .filter(|annotation| annotation.image_id == image_id && annotation.iscrowd == 0)
-        .map(|annotation| {
-            let [x, y, width, height] = annotation.bbox;
-            Ok(DetectionTarget {
+impl DetectionSample {
+    fn targets(&self, ratio: f32) -> Vec<DetectionTarget> {
+        self.boxes
+            .iter()
+            .zip(&self.classes)
+            .map(|([x0, y0, x1, y1], &class)| DetectionTarget {
                 batch: 0,
-                class: *categories
-                    .get(&annotation.category_id)
-                    .ok_or("annotation references an unknown category")?,
+                class,
                 cxcywh: [
-                    (x + width * 0.5) * ratio,
-                    (y + height * 0.5) * ratio,
-                    width * ratio,
-                    height * ratio,
+                    (x0 + x1) * 0.5 * ratio,
+                    (y0 + y1) * 0.5 * ratio,
+                    (x1 - x0) * ratio,
+                    (y1 - y0) * ratio,
                 ],
             })
-        })
+            .collect()
+    }
+}
+
+impl TrainingSource {
+    fn open(source: DataSource) -> Result<Self> {
+        match source {
+            DataSource::Coco {
+                annotations,
+                images,
+                image_id,
+            } => {
+                let document: Coco = serde_json::from_reader(std::io::BufReader::new(
+                    std::fs::File::open(annotations)?,
+                ))?;
+                let position = document
+                    .images
+                    .iter()
+                    .position(|image| image.id == image_id)
+                    .ok_or("image ID is absent from annotations")?;
+                let categories = category_map(document.categories.iter().map(|value| value.id));
+                let mut annotations = HashMap::<u64, Vec<usize>>::new();
+                for (index, annotation) in document.annotations.iter().enumerate() {
+                    if annotation.iscrowd == 0 {
+                        annotations
+                            .entry(annotation.image_id)
+                            .or_default()
+                            .push(index);
+                    }
+                }
+                Ok(Self::Coco {
+                    document,
+                    images,
+                    position,
+                    annotations,
+                    categories,
+                })
+            }
+            DataSource::Tfrecord { input } => {
+                let manifest_path = PathBuf::from(format!("{}.json", input.display()));
+                let manifest: ForyManifest = serde_json::from_reader(std::io::BufReader::new(
+                    std::fs::File::open(&manifest_path)?,
+                ))?;
+                if manifest.codec != "apache-fory-standard-row-1.7"
+                    || manifest.container != "tfrecord"
+                    || manifest.schema_sha256 != DETECTION_SCHEMA_SHA256
+                {
+                    return Err(format!(
+                        "incompatible TFRecord/Fory manifest {}",
+                        manifest_path.display()
+                    )
+                    .into());
+                }
+                Ok(Self::Tfrecord {
+                    reader: TfrecordReader::open(input)?,
+                    categories: category_map(COCO_CATEGORY_IDS),
+                })
+            }
+        }
+    }
+
+    fn next_sample(&mut self) -> Result<Option<DetectionSample>> {
+        match self {
+            Self::Coco {
+                document,
+                images,
+                position,
+                annotations,
+                categories,
+            } => {
+                let Some(image) = document.images.get(*position) else {
+                    return Ok(None);
+                };
+                *position += 1;
+                let mut boxes = Vec::new();
+                let mut classes = Vec::new();
+                for &index in annotations.get(&image.id).into_iter().flatten() {
+                    let annotation = &document.annotations[index];
+                    let [x, y, width, height] = annotation.bbox;
+                    boxes.push([x, y, x + width, y + height]);
+                    classes.push(
+                        *categories
+                            .get(&annotation.category_id)
+                            .ok_or("annotation references an unknown category")?,
+                    );
+                }
+                Ok(Some(DetectionSample {
+                    id: image.id.to_string(),
+                    image: image::open(images.join(&image.file_name))?.into_rgb8(),
+                    boxes,
+                    classes,
+                }))
+            }
+            Self::Tfrecord { reader, categories } => {
+                let Some(payload) = reader.read_record()? else {
+                    return Ok(None);
+                };
+                let row = from_row::<DetectionRecord>(payload)?;
+                let boxes = row.boxes()?;
+                let labels = row.labels()?;
+                if boxes.len() != labels.len() * 4 {
+                    return Err("Fory detection row has inconsistent boxes and labels".into());
+                }
+                let image = image::load_from_memory(row.image()?)?.into_rgb8();
+                if image.width() != u32::try_from(row.width()?)?
+                    || image.height() != u32::try_from(row.height()?)?
+                {
+                    return Err("Fory detection row image dimensions do not match metadata".into());
+                }
+                let boxes = (0..labels.len())
+                    .map(|index| {
+                        Ok([
+                            boxes.get(index * 4)?,
+                            boxes.get(index * 4 + 1)?,
+                            boxes.get(index * 4 + 2)?,
+                            boxes.get(index * 4 + 3)?,
+                        ])
+                    })
+                    .collect::<std::result::Result<Vec<_>, fory::Error>>()?;
+                let classes = labels
+                    .iter()
+                    .map(|label| {
+                        let label = u64::try_from(label.map_err(|error| error.to_string())?)
+                            .map_err(|error| error.to_string())?;
+                        categories
+                            .get(&label)
+                            .copied()
+                            .ok_or_else(|| format!("unknown COCO category {label}"))
+                    })
+                    .collect::<std::result::Result<Vec<_>, String>>()?;
+                Ok(Some(DetectionSample {
+                    id: row.sample_id()?.to_owned(),
+                    image,
+                    boxes,
+                    classes,
+                }))
+            }
+        }
+    }
+}
+
+fn category_map(ids: impl IntoIterator<Item = u64>) -> BTreeMap<u64, usize> {
+    let mut ids = ids.into_iter().collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.into_iter()
+        .enumerate()
+        .map(|(index, id)| (id, index))
         .collect()
 }
+
+const COCO_CATEGORY_IDS: [u64; 80] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28,
+    31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
+    56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 67, 70, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84,
+    85, 86, 87, 88, 89, 90,
+];
+
+const DETECTION_SCHEMA_SHA256: &str =
+    "237f2fa5b001dbed66bc326f618b90fdeba67d2d284357a38274612d007d455f";
 
 fn head_shapes(size: i64, channels: usize) -> [[usize; 4]; 3] {
     [8, 16, 32].map(|stride| {
