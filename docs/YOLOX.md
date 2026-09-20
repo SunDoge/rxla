@@ -436,19 +436,24 @@ gain and nonzero localization metrics establish genuine early convergence.
 They do not yet satisfy or replace the final 300-epoch AP gate.
 
 The supervised v4 accuracy run exercises the production checkpoint/evaluation
-loop every ten epochs. At update 18,490 (epoch 10), its EMA reached
-`AP=0.1061`, `AP50=0.2169`, `AP75=0.0932`, and `AR@100=0.2720` on all 5,000
-val2017 images. Evaluation took 58.5 seconds on the same RTX 5080 while the
-trainer remained paused with its CUDA context resident. The milestone produced
-an immutable resumable snapshot, a finalized evaluation MCAP, and the exact
-inference StableHLO/ABI fixture; the trainer then resumed the unchanged
-300-epoch run. At update 36,980 (epoch 20), the next periodic evaluation
-reached `AP=0.1654`, `AP50=0.3056`, `AP75=0.1682`, and `AR@100=0.3355` in
-58.0 seconds. The second immutable snapshot and finalized MCAP were published,
-and the paused trainer resumed again. At update 55,470 (epoch 30), EMA reached
-`AP=0.1972`, `AP50=0.3501`, `AP75=0.2017`, and `AR@100=0.3678`; evaluation
-took 56.9 seconds and the trainer resumed at update 55,500. These are
-intermediate convergence points, not the final AP claim.
+loop every ten epochs. Each row below is EMA evaluated on all 5,000 val2017
+images with the same pycocotools path:
+
+| Epoch | Update | AP | AP50 | AP75 | AR@100 | Eval seconds |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 18,490 | 0.1061 | 0.2169 | 0.0932 | 0.2720 | 58.5 |
+| 20 | 36,980 | 0.1654 | 0.3056 | 0.1682 | 0.3355 | 58.0 |
+| 30 | 55,470 | 0.1972 | 0.3501 | 0.2017 | 0.3678 | 56.9 |
+| 40 | 73,960 | 0.2128 | 0.3721 | 0.2214 | 0.3840 | 56.9 |
+| 50 | 92,450 | 0.2221 | 0.3854 | 0.2308 | 0.3906 | 56.0 |
+| 60 | 110,940 | 0.2304 | 0.3965 | 0.2416 | 0.3996 | 55.1 |
+| 70 | 129,430 | 0.2371 | 0.4049 | 0.2478 | 0.4050 | 56.9 |
+
+During evaluation the trainer remains paused with its CUDA context resident.
+Every milestone has a matching immutable resumable snapshot and finalized
+evaluation MCAP; the first evaluation also exported the exact inference
+StableHLO/ABI fixture. The trainer resumed successfully after every evaluation.
+These are intermediate convergence points, not the final AP claim.
 
 The remaining intentional data-order difference is accepted by the training
 quality contract. Official YOLOX permutes one primary sample per output and
