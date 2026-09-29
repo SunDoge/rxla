@@ -43,6 +43,12 @@ pub struct BoundModel {
     parameters: Vec<Option<Buffer>>,
 }
 
+/// A compiled parameter-free tensor program operating directly on PJRT
+/// buffers. Use this for device-resident format bridges between model stages.
+pub struct BufferProgram {
+    model: BoundModel,
+}
+
 /// A compiled stateful model retaining its input, parameter, state and output ABI.
 pub struct CompiledStatefulModel {
     model: AppliedModel,
@@ -162,6 +168,14 @@ impl CompiledModel {
         })
     }
 
+    /// Bind a program that declares no parameters. Parameterized models are
+    /// rejected through the same schema validation as ordinary bindings.
+    pub fn bind_buffer_program(&self) -> Result<BufferProgram> {
+        Ok(BufferProgram {
+            model: self.bind_parameters(std::iter::empty::<(&str, &Buffer)>())?,
+        })
+    }
+
     /// Validate inputs and parameters, execute, and reconstruct the requested output structure.
     pub fn run<'a, I, O>(
         &self,
@@ -175,6 +189,20 @@ impl CompiledModel {
         let arguments = self.model.bind(inputs, parameters)?;
         let outputs = self.executable.execute(arguments.as_slice())?;
         self.model.decode_outputs(outputs)
+    }
+}
+
+impl BufferProgram {
+    pub fn run<'inputs, I, O>(&self, inputs: I) -> Result<O>
+    where
+        I: ModelInputValues<'inputs>,
+        O: ModelOutputValues,
+    {
+        self.model.run(inputs)
+    }
+
+    pub fn executable(&self) -> &Executable {
+        self.model.executable()
     }
 }
 

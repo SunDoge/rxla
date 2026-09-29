@@ -10,7 +10,7 @@ use rxla_models::qwen_image_2_1::{
     QwenImage21Config, QwenImage21FlowScheduler, qwen_image_2_1_denoise, qwen_image_2_1_euler_step,
     qwen_image_2_1_vae_decoder, qwen_image_2_1_vae_decoder_raw,
 };
-use rxla_nn::{BoundModel, Cx, Model, ModelInput};
+use rxla_nn::{BoundModel, BufferProgram, Cx, MicroBatchPlan, Model, ModelInput};
 use rxla_safetensors::{ResidentBoundModel, SafeTensors, WeightResidencyPool};
 use serde::Deserialize;
 use std::{
@@ -328,38 +328,16 @@ fn prepare_vae_bridge(
     mean: &[f32],
     std: &[f32],
     options: &DecodeOptions<'_>,
-) -> Result<(BoundModel, Vec<usize>)> {
+) -> Result<(BufferProgram, Vec<usize>)> {
     let image_tokens = options.latent_height * options.latent_width;
-    let decode_batch_size = options.batch_size.min(options.max_batch_size);
-    let decode_batch_i64 = i64::try_from(decode_batch_size)?;
-    let image_tokens_usize = usize::try_from(image_tokens)?;
-    let chunks = (0..options.batch_size)
-        .step_by(decode_batch_size)
-        .map(|start| {
-            let actual = decode_batch_size.min(options.batch_size - start);
-            Ok((i64::try_from(start)?, i64::try_from(actual)?, actual))
-        })
-        .collect::<std::result::Result<Vec<_>, std::num::TryFromIntError>>()?;
+    let plan = MicroBatchPlan::new(options.batch_size, options.max_batch_size)?;
     let model = Model::new(|cx: Cx, latent: Tensor| -> rxla_nn::Result<Vec<Tensor>> {
         let mean = cx
             .constant([1, 1, 64], mean)?
             .broadcast_to(latent.shape())?;
         let std = cx.constant([1, 1, 64], std)?.broadcast_to(latent.shape())?;
         let normalized = latent.mul(&std)?.add(&mean)?;
-        let mut batches = Vec::new();
-        for &(start, actual_i64, actual) in &chunks {
-            let chunk = normalized.narrow(0, start, actual_i64)?;
-            if actual == decode_batch_size {
-                batches.push(chunk);
-            } else {
-                let padding = cx.constant(
-                    [decode_batch_i64 - actual_i64, image_tokens, 64],
-                    vec![0.0; (decode_batch_size - actual) * image_tokens_usize * 64],
-                )?;
-                batches.push(Tensor::concatenate(&[chunk, padding], 0)?);
-            }
-        }
-        Ok(batches)
+        plan.split_zero_padded(&normalized, 0)
     })
     .inputs(ModelInput::new([
         i64::try_from(options.batch_size)?,
@@ -372,16 +350,13 @@ fn prepare_vae_bridge(
         options.cache_dir,
         "qwen-image-2.1-vae-input-v1",
     )?)?;
-    let runner = compiled.bind_parameters(std::iter::empty::<(&str, &Buffer)>())?;
-    let actual_batches = (0..options.batch_size)
-        .step_by(decode_batch_size)
-        .map(|start| decode_batch_size.min(options.batch_size - start))
-        .collect();
+    let runner = compiled.bind_buffer_program()?;
+    let actual_batches = plan.chunks().iter().map(|chunk| chunk.length()).collect();
     Ok((runner, actual_batches))
 }
 
 struct VaeDecoder {
-    bridge: BoundModel,
+    bridge: BufferProgram,
     decoder: BoundModel,
     actual_batches: Vec<usize>,
     values_per_image: usize,

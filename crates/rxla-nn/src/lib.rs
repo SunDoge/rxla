@@ -11,8 +11,9 @@ use std::sync::{Arc, Mutex};
 
 mod applied;
 pub use applied::{
-    AppliedModel, BoundModel, CompiledModel, CompiledModelSessionBuilder, CompiledStatefulModel,
-    ModelArguments, ModelSession, ModelSessionBuffers, ModelSessionBuilder, TransformState,
+    AppliedModel, BoundModel, BufferProgram, CompiledModel, CompiledModelSessionBuilder,
+    CompiledStatefulModel, ModelArguments, ModelSession, ModelSessionBuffers, ModelSessionBuilder,
+    TransformState,
 };
 mod inputs;
 pub use inputs::{ModelHandler, ModelInput, ModelInputValues, ModelInputs};
@@ -25,6 +26,8 @@ pub use layers::{
 };
 mod model_path;
 pub use model_path::{ModelPath, ModelPathSegment};
+mod micro_batch;
+pub use micro_batch::{MicroBatchChunk, MicroBatchPlan};
 
 /// Build a validated model-tree cursor by pushing each path segment in order.
 #[macro_export]
@@ -183,6 +186,23 @@ pub enum Error {
     MissingInitializer { path: String },
     #[snafu(display("invalid initializer for {path:?}: {message}"))]
     InvalidInitializer { path: String, message: String },
+    #[snafu(display(
+        "invalid micro-batch sizes: batch {batch_size}, maximum micro-batch {max_batch_size}"
+    ))]
+    InvalidMicroBatchSize {
+        batch_size: usize,
+        max_batch_size: usize,
+    },
+    #[snafu(display("micro-batch axis {axis} is outside tensor rank {rank}"))]
+    MicroBatchAxis { axis: usize, rank: usize },
+    #[snafu(display(
+        "micro-batch axis {axis} has dimension {actual}, expected plan batch {expected}"
+    ))]
+    MicroBatchDimension {
+        axis: usize,
+        actual: i64,
+        expected: usize,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
