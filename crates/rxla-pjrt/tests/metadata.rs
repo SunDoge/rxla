@@ -58,3 +58,21 @@ fn buffer_round_trips_through_pinned_host_memory() {
     assert_eq!(restored.memory_info().unwrap().id, device_id);
     assert_eq!(restored.to_vec::<f32>().unwrap(), [1.0, -2.0, 3.5, 0.0]);
 }
+
+#[test]
+#[ignore = "requires trusted PJRT_PLUGIN_PATH with pinned-host memory"]
+fn host_tensor_uploads_directly_to_pinned_memory() {
+    let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
+    let pinned = client
+        .memories()
+        .unwrap()
+        .into_iter()
+        .find(|memory| memory.info().unwrap().kind.contains("pinned_host"))
+        .expect("CUDA PJRT exposes pinned_host memory");
+    let buffer = client
+        .buffer_in_memory(&pinned, &[3], &[1.0_f32, 2.0, 3.0])
+        .unwrap();
+
+    assert!(buffer.memory_info().unwrap().kind.contains("pinned_host"));
+    assert_eq!(buffer.to_vec::<f32>().unwrap(), [1.0, 2.0, 3.0]);
+}

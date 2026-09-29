@@ -927,6 +927,61 @@ impl Client {
         self.buffer_on_device(device_index, dims, data)
     }
 
+    /// Upload a host tensor directly into an explicit PJRT memory space.
+    ///
+    /// This avoids staging a checkpoint in device memory before moving it to
+    /// pinned-host offload storage. Whether a particular memory kind accepts
+    /// host uploads is defined by the backend.
+    pub fn buffer_in_memory<T: Element>(
+        &self,
+        memory: &Memory,
+        dims: &[i64],
+        data: &[T],
+    ) -> Result<Buffer> {
+        ensure!(
+            Arc::ptr_eq(&self.0, &memory.client),
+            InvalidArgumentSnafu {
+                message: "memory belongs to a different PJRT client",
+            }
+        );
+        let count = dims
+            .iter()
+            .try_fold(1usize, |count, &dimension| {
+                usize::try_from(dimension)
+                    .ok()
+                    .and_then(|dimension| count.checked_mul(dimension))
+            })
+            .context(InvalidArgumentSnafu {
+                message: "invalid or overflowing shape",
+            })?;
+        ensure!(
+            count == data.len(),
+            InvalidArgumentSnafu {
+                message: "shape/data length mismatch",
+            }
+        );
+        let mut args = args!(
+            PJRT_Client_BufferFromHostBuffer_Args,
+            PJRT_Client_BufferFromHostBuffer_Args_STRUCT_SIZE
+        );
+        args.client = self.0.raw;
+        args.memory = memory.raw.as_ptr();
+        args.data = data.as_ptr().cast();
+        args.type_ = T::DTYPE.as_raw();
+        args.dims = dims.as_ptr();
+        args.num_dims = dims.len();
+        args.host_buffer_semantics =
+            PJRT_HostBufferSemantics_PJRT_HostBufferSemantics_kImmutableOnlyDuringCall;
+        self.0.plugin.check(unsafe {
+            function!(self.0.plugin.api(), PJRT_Client_BufferFromHostBuffer)(&mut args)
+        })?;
+        let buffer = Buffer {
+            inner: Arc::new(BufferInner::new(self.0.clone(), args.buffer)?),
+        };
+        self.0.plugin.wait(args.done_with_host_buffer)?;
+        Ok(buffer)
+    }
+
     /// Create a PJRT view over an externally owned device allocation.
     ///
     /// PJRT receives `owner` and drops it through the on-delete callback only
