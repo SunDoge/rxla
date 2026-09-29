@@ -13,6 +13,7 @@ from typing import Annotated
 
 import torch
 import diffusers.utils.peft_utils as peft_utils
+from safetensors import safe_open
 from safetensors.torch import save_file
 from typed_args import Arg, TypedArgs
 
@@ -21,6 +22,8 @@ class Args(TypedArgs):
     source: Annotated[Path, Arg(help="official transformer_qwenimage21.py")]
     transformer: Annotated[Path, Arg(help="downloaded official transformer directory")]
     output: Annotated[Path, Arg(help="oracle safetensors output")]
+    w8: Annotated[Path | None, Arg("--w8", help="optional RXLA grouped-W8 checkpoint")] = None
+    f32: Annotated[bool, Arg("--f32", help="run the numerical diagnostic in float32")] = False
 
 
 def load_official_class(source: Path):
@@ -61,10 +64,25 @@ def main() -> None:
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
     ).eval()
+    if args.f32:
+        model.float()
+    if args.w8 is not None:
+        with safe_open(args.w8, framework="pt", device="cpu") as checkpoint:
+            with torch.no_grad():
+                for name, parameter in model.named_parameters():
+                    value = checkpoint.get_tensor(name)
+                    if value.ndim == 2:
+                        scale_name = name.removesuffix(".weight") + ".scale"
+                        scale = checkpoint.get_tensor(scale_name)
+                        value = (value.float() - 128).reshape(*scale.shape, 64)
+                        value = value * scale.unsqueeze(-1)
+                        value = value.reshape(parameter.shape)
+                    parameter.copy_(value)
     generator = torch.Generator().manual_seed(20260929)
-    image = torch.randn(1, 4, 64, generator=generator, dtype=torch.bfloat16)
-    context = torch.randn(1, 8, 4096, generator=generator, dtype=torch.bfloat16)
-    timestep = torch.tensor([0.75], dtype=torch.bfloat16)
+    dtype = torch.float32 if args.f32 else torch.bfloat16
+    image = torch.randn(1, 4, 64, generator=generator, dtype=dtype)
+    context = torch.randn(1, 8, 4096, generator=generator, dtype=dtype)
+    timestep = torch.tensor([0.75], dtype=dtype)
     # Eight text positions followed by one VLM image slot; the transformer
     # expands that final slot to the target's 2x2 latent tokens.
     image_mask = torch.zeros(1, 9, dtype=torch.bool)
