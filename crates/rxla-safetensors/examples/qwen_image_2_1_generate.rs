@@ -5,15 +5,15 @@ use image::{ImageBuffer, Rgba};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
-use rxla_core::{Buffer, CacheLimits, Client, Compiler};
+use rxla_core::{Buffer, CacheLimits, Client, ClientOptions, Compiler};
 use rxla_models::qwen_image_2_1::{
-    QwenImage21Config, QwenImage21FlowScheduler, qwen_image_2_1_euler_step,
+    QwenImage21Config, QwenImage21FlowScheduler, qwen_image_2_1_denoise, qwen_image_2_1_euler_step,
     qwen_image_2_1_vae_decoder, qwen_image_2_1_vae_decoder_raw,
 };
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
 use serde::Deserialize;
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, time::Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -46,6 +46,16 @@ struct Args {
     /// VAE tile overlap in output pixels.
     #[arg(long, default_value_t = 128)]
     vae_overlap: u32,
+    /// PJRT allocator fraction; lower this when sharing the GPU.
+    #[arg(long)]
+    memory_fraction: Option<f32>,
+    /// Reserve the complete allocator pool at client creation.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    preallocate: bool,
+    /// Put all denoising steps in one StableHLO while loop. The asynchronous
+    /// host enqueue path remains faster on the currently tested CUDA plugin.
+    #[arg(long)]
+    device_loop: bool,
 }
 
 #[derive(Deserialize)]
@@ -62,6 +72,7 @@ fn denoise(
     latent_width: i64,
     steps: usize,
     seed: u64,
+    device_loop: bool,
 ) -> Result<Vec<f32>> {
     let mut conditioning = SafeTensors::open(conditioning_path)?;
     let prompt = conditioning.read_f32("prompt_embeds")?;
@@ -71,42 +82,73 @@ fn denoise(
     let context_tokens = prompt.shape[1];
     let image_tokens = latent_height * latent_width;
     let config = QwenImage21Config::official_w8(latent_height, latent_width);
-    let model = Model::new(|cx: Cx, sample, timestep, step_size, context| {
-        qwen_image_2_1_euler_step(cx, &sample, &timestep, &step_size, &context, &config)
-    })
-    .inputs((
-        ModelInput::new([1, image_tokens, 64]),
-        ModelInput::new([1]),
-        ModelInput::new([1]),
-        ModelInput::new([1, context_tokens, 4096]),
-    ))
-    .trace()?;
+    let schedule = QwenImage21FlowScheduler::new(steps, image_tokens as usize)?;
+    let trace_start = Instant::now();
+    let model = if device_loop {
+        Model::new(|cx: Cx, sample, context| {
+            qwen_image_2_1_denoise(cx, &sample, &context, &schedule, &config)
+        })
+        .inputs((
+            ModelInput::new([1, image_tokens, 64]),
+            ModelInput::new([1, context_tokens, 4096]),
+        ))
+        .trace()?
+    } else {
+        Model::new(|cx: Cx, sample, timestep, step_size, context| {
+            qwen_image_2_1_euler_step(cx, &sample, &timestep, &step_size, &context, &config)
+        })
+        .inputs((
+            ModelInput::new([1, image_tokens, 64]),
+            ModelInput::new([1]),
+            ModelInput::new([1]),
+            ModelInput::new([1, context_tokens, 4096]),
+        ))
+        .trace()?
+    };
+    let trace_time = trace_start.elapsed();
+    let load_start = Instant::now();
     let mut checkpoint = SafeTensors::open(checkpoint_path)?;
     checkpoint.require_metadata(&[
         ("format", "rxla-qwen-image-2.1-w8-v1"),
         ("group_size", "64"),
     ])?;
     let parameters = checkpoint.load_parameter_schema(client, model.schema())?;
-    let compiled = model.compile(
-        &mut Compiler::new(client.clone(), CacheLimits::default())
-            .with_compute_dtype(rxla_core::DType::BF16)
-            .with_cudnn_attention(true),
-    )?;
+    let load_time = load_start.elapsed();
+    let compile_start = Instant::now();
+    let mut compiler =
+        Compiler::new(client.clone(), CacheLimits::default()).with_cudnn_attention(true);
+    if !device_loop {
+        compiler = compiler.with_compute_dtype(rxla_core::DType::BF16);
+    }
+    let compiled = model.compile(&mut compiler)?;
     let runner = compiled.bind_parameters(parameters.bindings())?;
+    let compile_time = compile_start.elapsed();
     let context = client.buffer(&prompt.shape, &prompt.values)?;
     let mut random = ChaCha8Rng::seed_from_u64(seed);
     let initial = (0..image_tokens * 64)
         .map(|_| StandardNormal.sample(&mut random))
         .collect::<Vec<f32>>();
     let mut sample = client.buffer(&[1, image_tokens, 64], &initial)?;
-    let schedule = QwenImage21FlowScheduler::new(steps, image_tokens as usize)?;
-    for index in 0..schedule.len() {
-        let step = schedule.step(index)?;
-        let timestep = client.buffer(&[1], &[step.timestep])?;
-        let step_size = client.buffer(&[1], &[step.step_size])?;
-        sample = runner.run((&sample, &timestep, &step_size, &context))?;
-        eprintln!("step={}/{} sigma={:.6}", index + 1, steps, step.timestep);
+    let execute_start = Instant::now();
+    if device_loop {
+        sample = runner.run((&sample, &context))?;
+    } else {
+        for index in 0..schedule.len() {
+            let step = schedule.step(index)?;
+            let timestep = client.buffer(&[1], &[step.timestep])?;
+            let step_size = client.buffer(&[1], &[step.step_size])?;
+            sample = runner.run((&sample, &timestep, &step_size, &context))?;
+        }
     }
+    let execute_time = execute_start.elapsed();
+    eprintln!(
+        "denoise mode={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} execute={execute_time:.3?} steps={steps}",
+        if device_loop {
+            "device-loop"
+        } else {
+            "host-enqueue"
+        },
+    );
     Ok(sample.to_vec::<f32>()?)
 }
 
@@ -272,7 +314,17 @@ fn run(args: Args) -> Result<()> {
     {
         return Err("VAE tile and overlap must be multiples of 16, with tile > overlap".into());
     }
-    let client = unsafe { Client::load(&args.plugin) }?;
+    if args
+        .memory_fraction
+        .is_some_and(|fraction| !fraction.is_finite() || !(0.0..=1.0).contains(&fraction))
+    {
+        return Err("memory fraction must be finite and between zero and one".into());
+    }
+    let mut client_options = ClientOptions::new().set("preallocate", args.preallocate);
+    if let Some(memory_fraction) = args.memory_fraction {
+        client_options = client_options.set("memory_fraction", memory_fraction);
+    }
+    let client = unsafe { Client::load_with_options(&args.plugin, &client_options) }?;
     let latent_height = i64::from(args.height / 16);
     let latent_width = i64::from(args.width / 16);
     let mut latent = denoise(
@@ -283,6 +335,7 @@ fn run(args: Args) -> Result<()> {
         latent_width,
         args.steps,
         args.seed,
+        args.device_loop,
     )?;
     let vae_config: VaeConfig = serde_json::from_slice(&fs::read(&args.vae_config)?)?;
     if vae_config.latents_mean.len() != 64 || vae_config.latents_std.len() != 64 {

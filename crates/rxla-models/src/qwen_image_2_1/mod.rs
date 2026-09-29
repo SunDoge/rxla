@@ -515,6 +515,54 @@ pub fn qwen_image_2_1_euler_step(
     Ok(sample.add(&prediction.mul(&coefficient)?)?)
 }
 
+/// Execute the complete FlowMatch schedule as one structured IR loop.
+///
+/// The transformer body occurs once inside `stablehlo.while`; it is not
+/// unrolled `schedule.len()` times. Parameters and prompt conditioning remain
+/// loop invariants, while only the counter and latent sample are carried.
+pub fn qwen_image_2_1_denoise(
+    cx: Cx,
+    sample: &Tensor,
+    context: &Tensor,
+    schedule: &QwenImage21FlowScheduler,
+    config: &QwenImage21Config,
+) -> Result<Tensor> {
+    let steps = schedule.len();
+    let steps_i32 = i32::try_from(steps).map_err(|_| Error::InvalidModel {
+        kind: ModelDefinitionError::InvalidQwenImage21Schedule,
+    })?;
+    let timesteps = cx.constant([steps as i64], &schedule.sigmas()[..steps])?;
+    let step_sizes = schedule
+        .sigmas()
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .collect::<Vec<_>>();
+    let step_sizes = cx.constant([steps as i64], step_sizes)?;
+    let counter = sample.scalar_i32(0)?;
+    let carry = Tensor::while_loop_with_error(
+        [counter, sample.clone()],
+        |carry| -> Result<Tensor> {
+            Ok(carry[0]
+                .lt_mask(&carry[0].scalar_i32(steps_i32)?)?
+                .cast(DType::I32)?)
+        },
+        |carry| -> Result<[Tensor; 2]> {
+            let timestep = timesteps.take(&carry[0], 0)?.reshape([1])?;
+            let step_size = step_sizes.take(&carry[0], 0)?.reshape([1])?;
+            let sample = qwen_image_2_1_euler_step(
+                cx.clone(),
+                &carry[1],
+                &timestep,
+                &step_size,
+                context,
+                config,
+            )?;
+            Ok([carry[0].wrapping_add_scalar(1)?, sample])
+        },
+    )?;
+    Ok(carry[1].clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +596,23 @@ mod tests {
             assert!(model.schema().get(path).is_some(), "missing {path}");
         }
         model.prepare().unwrap();
+    }
+
+    #[test]
+    fn denoise_schedule_is_one_structured_loop_and_one_parameter_tree() {
+        let config = QwenImage21Config::tiny(2, 3);
+        let schedule = QwenImage21FlowScheduler::new(4, 6).unwrap();
+        let model = Model::new(|cx: Cx, image, context| {
+            qwen_image_2_1_denoise(cx, &image, &context, &schedule, &config)
+        })
+        .inputs((ModelInput::new([1, 6, 8]), ModelInput::new([1, 5, 24])))
+        .trace()
+        .unwrap();
+        assert_eq!(model.schema().parameters().len(), 27);
+        let lowered = model.prepare().unwrap();
+        let stablehlo = std::str::from_utf8(lowered.code()).unwrap();
+        assert_eq!(stablehlo.matches("stablehlo.while").count(), 1);
+        assert_eq!(stablehlo.matches("stablehlo.dot_general").count(), 30);
     }
 
     #[test]
