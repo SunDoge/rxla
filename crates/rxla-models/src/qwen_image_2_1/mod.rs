@@ -11,6 +11,8 @@ use rxla_nn::{Cx, Linear, TensorApply};
 
 mod scheduler;
 pub use scheduler::{QwenImage21FlowScheduler, QwenImage21FlowStep};
+mod vae;
+pub use vae::qwen_image_2_1_vae_decoder;
 
 /// Static topology and latent grid for a Qwen-Image-2.1 transformer trace.
 #[derive(Clone, Debug)]

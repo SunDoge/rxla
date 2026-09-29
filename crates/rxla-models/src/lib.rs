@@ -106,6 +106,8 @@ pub enum ModelDefinitionError {
     InvalidQwenImage21Schedule,
     #[snafu(display("Qwen-Image-2.1 scheduler step is out of range"))]
     QwenImage21StepOutOfRange,
+    #[snafu(display("Qwen-Image-2.1 VAE expects a nonempty 64-channel latent grid"))]
+    InvalidQwenImage21VaeLatent,
     #[snafu(display("invalid Gaussian splatting input or camera configuration"))]
     InvalidGaussianSplattingInput,
 }
