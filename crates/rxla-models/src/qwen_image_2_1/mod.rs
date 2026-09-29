@@ -518,7 +518,8 @@ pub fn qwen_image_2_1_euler_step(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rxla_nn::Model;
+    use rxla_core::{CacheLimits, Client, Compiler};
+    use rxla_nn::{Model, ModelInput};
 
     #[test]
     fn tiny_transformer_traces_with_official_parameter_paths() {
@@ -652,5 +653,25 @@ mod tests {
         assert_eq!(model.outputs()[0].shape(), [1, 6, 8]);
         assert_eq!(model.schema().parameters().len(), 49);
         model.prepare().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a trusted PJRT_CUDA_PLUGIN_PATH and compiles the complete 32-layer transformer"]
+    fn official_w8_step_compiles_on_cuda() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let plugin = std::env::var("PJRT_CUDA_PLUGIN_PATH")?;
+        let client = unsafe { Client::load(plugin) }?;
+        let config = QwenImage21Config::official_w8(32, 32);
+        let model = Model::new(|cx: Cx, sample, timestep, step_size, context| {
+            qwen_image_2_1_euler_step(cx, &sample, &timestep, &step_size, &context, &config)
+        })
+        .inputs((
+            ModelInput::new([1, 1024, 64]),
+            ModelInput::new([1]),
+            ModelInput::new([1]),
+            ModelInput::new([1, 32, 4096]),
+        ))
+        .trace()?;
+        model.compile(&mut Compiler::new(client, CacheLimits::default()))?;
+        Ok(())
     }
 }
