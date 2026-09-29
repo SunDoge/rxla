@@ -1,6 +1,7 @@
 //! Weight-only device residency budgeting for serving pipelines.
 
 use crate::{Error, OffloadedSchemaBuffers, PrefetchedSchemaBuffers, Result, SchemaBuffers};
+use rxla_nn::{BoundModel, CompiledModel, ModelInputValues, ModelOutputValues};
 use rxla_pjrt::{Buffer, Memory};
 use std::sync::{
     Arc,
@@ -105,7 +106,7 @@ pub struct ResidentSchemaBuffers<'pool, 'offload> {
     _pool: std::marker::PhantomData<&'pool WeightResidencyPool>,
 }
 
-impl ResidentSchemaBuffers<'_, '_> {
+impl<'pool, 'offload> ResidentSchemaBuffers<'pool, 'offload> {
     pub fn buffers(&self) -> &SchemaBuffers {
         self.buffers.buffers()
     }
@@ -124,6 +125,38 @@ impl ResidentSchemaBuffers<'_, '_> {
 
     pub fn block_until_ready(&self) -> Result<()> {
         self.buffers.block_until_ready()
+    }
+
+    /// Bind weights while transferring the residency lease into the runner.
+    ///
+    /// `BoundModel` clones PJRT buffer handles. Keeping this wrapper alongside
+    /// it prevents the pool from reporting the weight bytes as free while the
+    /// runner still owns those cloned handles.
+    pub fn bind(
+        self,
+        compiled: &CompiledModel,
+    ) -> std::result::Result<ResidentBoundModel<'pool, 'offload>, rxla_nn::Error> {
+        let model = compiled.bind_parameters(self.bindings())?;
+        Ok(ResidentBoundModel {
+            model,
+            _weights: self,
+        })
+    }
+}
+
+/// A bound runner that keeps its weight-budget reservation alive.
+pub struct ResidentBoundModel<'pool, 'offload> {
+    model: BoundModel,
+    _weights: ResidentSchemaBuffers<'pool, 'offload>,
+}
+
+impl ResidentBoundModel<'_, '_> {
+    pub fn run<'inputs, I, O>(&self, inputs: I) -> std::result::Result<O, rxla_nn::Error>
+    where
+        I: ModelInputValues<'inputs>,
+        O: ModelOutputValues,
+    {
+        self.model.run(inputs)
     }
 }
 

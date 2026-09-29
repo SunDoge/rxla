@@ -198,12 +198,11 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
         prefetched.block_until_ready()?;
     }
     let prefetch_wait_time = prefetch_wait_start.elapsed();
-    let bindings = match (&prefetched, &resident) {
-        (Some(prefetched), None) => prefetched.bindings(),
-        (None, Some(resident)) => resident.bindings(),
+    let (offloaded_runner, device_runner) = match (prefetched, resident) {
+        (Some(prefetched), None) => (Some(prefetched.bind(&compiled)?), None),
+        (None, Some(resident)) => (None, Some(compiled.bind_parameters(resident.bindings())?)),
         _ => return Err("invalid transformer residency state".into()),
     };
-    let runner = compiled.bind_parameters(bindings)?;
     let context = client.buffer(&prompt.shape, &prompt.values)?;
     let mut random = ChaCha8Rng::seed_from_u64(options.seed);
     let initial = (0..image_tokens * 64)
@@ -212,13 +211,21 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
     let mut sample = client.buffer(&[1, image_tokens, 64], &initial)?;
     let execute_start = Instant::now();
     if options.device_loop {
-        sample = runner.run((&sample, &context))?;
+        sample = match (&offloaded_runner, &device_runner) {
+            (Some(runner), None) => runner.run((&sample, &context))?,
+            (None, Some(runner)) => runner.run((&sample, &context))?,
+            _ => return Err("invalid transformer runner state".into()),
+        };
     } else {
         for index in 0..schedule.len() {
             let step = schedule.step(index)?;
             let timestep = client.buffer(&[1], &[step.timestep])?;
             let step_size = client.buffer(&[1], &[step.step_size])?;
-            sample = runner.run((&sample, &timestep, &step_size, &context))?;
+            sample = match (&offloaded_runner, &device_runner) {
+                (Some(runner), None) => runner.run((&sample, &timestep, &step_size, &context))?,
+                (None, Some(runner)) => runner.run((&sample, &timestep, &step_size, &context))?,
+                _ => return Err("invalid transformer runner state".into()),
+            };
         }
     }
     let execute_time = execute_start.elapsed();

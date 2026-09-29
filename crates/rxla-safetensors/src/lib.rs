@@ -17,7 +17,7 @@ pub use model::{OffloadedSchemaBuffers, PrefetchedSchemaBuffers, SchemaBuffers};
 #[cfg(all(feature = "model", feature = "export"))]
 pub use model::{save_model_new, save_parameter_selection_new, save_training_state_new};
 #[cfg(feature = "model")]
-pub use residency::{ResidentSchemaBuffers, WeightResidencyPool};
+pub use residency::{ResidentBoundModel, ResidentSchemaBuffers, WeightResidencyPool};
 #[cfg(feature = "model")]
 use rxla_pjrt::DType;
 use rxla_pjrt::{Buffer, BufferDestination, Client};
