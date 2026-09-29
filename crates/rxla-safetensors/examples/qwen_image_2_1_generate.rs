@@ -5,7 +5,7 @@ use image::{ImageBuffer, Rgba};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
-use rxla_core::{Buffer, CacheLimits, Client, ClientOptions, Compiler};
+use rxla_core::{Buffer, CacheLimits, Client, ClientOptions, Compiler, Memory};
 use rxla_models::qwen_image_2_1::{
     QwenImage21Config, QwenImage21FlowScheduler, qwen_image_2_1_denoise, qwen_image_2_1_euler_step,
     qwen_image_2_1_vae_decoder, qwen_image_2_1_vae_decoder_raw,
@@ -59,6 +59,11 @@ struct Args {
     /// Persistent serialized PJRT executable cache.
     #[arg(long)]
     cache_dir: Option<PathBuf>,
+    /// Retain transformer weights in PJRT pinned-host memory and prefetch them
+    /// only for denoising. Intended for multi-component serving under a GPU
+    /// memory budget.
+    #[arg(long)]
+    offload_transformer: bool,
 }
 
 #[derive(Deserialize)]
@@ -99,6 +104,26 @@ struct DenoiseOptions<'a> {
     seed: u64,
     device_loop: bool,
     cache_dir: Option<&'a PathBuf>,
+    offload_transformer: bool,
+}
+
+fn cuda_offload_memories(client: &Client) -> Result<(Memory, Memory)> {
+    let memories = client.memories()?;
+    let host = memories
+        .iter()
+        .find(|memory| {
+            memory
+                .info()
+                .is_ok_and(|info| info.kind.contains("pinned_host"))
+        })
+        .cloned()
+        .ok_or("PJRT client does not expose pinned-host memory")?;
+    let device = memories
+        .iter()
+        .find(|memory| memory.info().is_ok_and(|info| info.kind == "device"))
+        .cloned()
+        .ok_or("PJRT client does not expose device memory")?;
+    Ok((host, device))
 }
 
 fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
@@ -140,8 +165,27 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
         ("format", "rxla-qwen-image-2.1-w8-v1"),
         ("group_size", "64"),
     ])?;
-    let parameters = checkpoint.load_parameter_schema(client, model.schema())?;
+    let (offloaded, resident) = if options.offload_transformer {
+        let (host, _) = cuda_offload_memories(client)?;
+        let buffers = checkpoint.load_parameter_schema(&host, model.schema())?;
+        (Some(buffers.offload_to(&host)?), None)
+    } else {
+        (
+            None,
+            Some(checkpoint.load_parameter_schema(client, model.schema())?),
+        )
+    };
     let load_time = load_start.elapsed();
+    let prefetch_start = Instant::now();
+    let prefetched;
+    let parameters = if let Some(offloaded) = &offloaded {
+        let (_, device) = cuda_offload_memories(client)?;
+        prefetched = offloaded.prefetch_to(&device)?;
+        &prefetched
+    } else {
+        resident.as_ref().expect("resident branch initialized")
+    };
+    let prefetch_time = prefetch_start.elapsed();
     let compile_start = Instant::now();
     let mut compiler =
         compiler(client, options.cache_dir, "qwen-image-2.1-dit-v1")?.with_cudnn_attention(true);
@@ -149,8 +193,8 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
         compiler = compiler.with_compute_dtype(rxla_core::DType::BF16);
     }
     let compiled = model.compile(&mut compiler)?;
-    let runner = compiled.bind_parameters(parameters.bindings())?;
     let compile_time = compile_start.elapsed();
+    let runner = compiled.bind_parameters(parameters.bindings())?;
     let context = client.buffer(&prompt.shape, &prompt.values)?;
     let mut random = ChaCha8Rng::seed_from_u64(options.seed);
     let initial = (0..image_tokens * 64)
@@ -170,11 +214,16 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
     }
     let execute_time = execute_start.elapsed();
     eprintln!(
-        "denoise mode={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} execute={execute_time:.3?} steps={}",
+        "denoise mode={} residency={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} prefetch={prefetch_time:.3?} execute={execute_time:.3?} steps={}",
         if options.device_loop {
             "device-loop"
         } else {
             "host-enqueue"
+        },
+        if options.offload_transformer {
+            "pinned-host"
+        } else {
+            "device"
         },
         options.steps,
     );
@@ -373,6 +422,7 @@ fn run(args: Args) -> Result<()> {
             seed: args.seed,
             device_loop: args.device_loop,
             cache_dir: args.cache_dir.as_ref(),
+            offload_transformer: args.offload_transformer,
         },
     )?;
     let vae_config: VaeConfig = serde_json::from_slice(&fs::read(&args.vae_config)?)?;
