@@ -10,8 +10,8 @@ use rxla_models::qwen_image_2_1::{
     QwenImage21Config, QwenImage21FlowScheduler, qwen_image_2_1_denoise, qwen_image_2_1_euler_step,
     qwen_image_2_1_vae_decoder, qwen_image_2_1_vae_decoder_raw,
 };
-use rxla_nn::{Cx, Model, ModelInput};
-use rxla_safetensors::{SafeTensors, WeightResidencyPool};
+use rxla_nn::{BoundModel, Cx, Model, ModelInput};
+use rxla_safetensors::{ResidentBoundModel, SafeTensors, WeightResidencyPool};
 use serde::Deserialize;
 use std::{
     fs,
@@ -44,6 +44,10 @@ struct Args {
     steps: usize,
     #[arg(long, default_value_t = 42)]
     seed: u64,
+    /// Number of requests executed in the same initialized process. Only the
+    /// final request is encoded; earlier requests measure steady-state serving.
+    #[arg(long, default_value_t = 1)]
+    requests: usize,
     /// Number of images generated together by the transformer and VAE.
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
@@ -117,7 +121,6 @@ struct DenoiseOptions<'a> {
     latent_height: i64,
     latent_width: i64,
     steps: usize,
-    seed: u64,
     batch_size: usize,
     device_loop: bool,
     cache_dir: Option<&'a PathBuf>,
@@ -140,7 +143,61 @@ fn cuda_offload_memories(client: &Client) -> Result<(Memory, Memory)> {
     Ok((host, device))
 }
 
-fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Buffer> {
+enum DenoiseRunner {
+    Device(BoundModel),
+    Offloaded(ResidentBoundModel),
+}
+
+struct Denoiser {
+    client: Client,
+    runner: DenoiseRunner,
+    context: Buffer,
+    schedule: QwenImage21FlowScheduler,
+    batch: i64,
+    batch_size: usize,
+    image_tokens: i64,
+    device_loop: bool,
+}
+
+impl Denoiser {
+    fn run(&self, seed: u64) -> Result<(Buffer, std::time::Duration)> {
+        let mut random = ChaCha8Rng::seed_from_u64(seed);
+        let initial = (0..self.batch * self.image_tokens * 64)
+            .map(|_| StandardNormal.sample(&mut random))
+            .collect::<Vec<f32>>();
+        let mut sample = self
+            .client
+            .buffer(&[self.batch, self.image_tokens, 64], &initial)?;
+        let execute_start = Instant::now();
+        if self.device_loop {
+            sample = match &self.runner {
+                DenoiseRunner::Device(runner) => runner.run((&sample, &self.context))?,
+                DenoiseRunner::Offloaded(runner) => runner.run((&sample, &self.context))?,
+            };
+        } else {
+            for index in 0..self.schedule.len() {
+                let step = self.schedule.step(index)?;
+                let timestep = self
+                    .client
+                    .buffer(&[self.batch], &vec![step.timestep; self.batch_size])?;
+                let step_size = self
+                    .client
+                    .buffer(&[self.batch], &vec![step.step_size; self.batch_size])?;
+                sample = match &self.runner {
+                    DenoiseRunner::Device(runner) => {
+                        runner.run((&sample, &timestep, &step_size, &self.context))?
+                    }
+                    DenoiseRunner::Offloaded(runner) => {
+                        runner.run((&sample, &timestep, &step_size, &self.context))?
+                    }
+                };
+            }
+        }
+        Ok((sample, execute_start.elapsed()))
+    }
+}
+
+fn prepare_denoiser(client: &Client, options: &DenoiseOptions<'_>) -> Result<Denoiser> {
     let mut conditioning = SafeTensors::open(options.conditioning_path)?;
     let prompt = conditioning.read_f32("prompt_embeds")?;
     if prompt.shape.len() != 3 || prompt.shape[0] != 1 || prompt.shape[2] != 4096 {
@@ -221,40 +278,17 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Buffer> {
         prefetched.block_until_ready()?;
     }
     let prefetch_wait_time = prefetch_wait_start.elapsed();
-    let (offloaded_runner, device_runner) = match (prefetched, resident) {
-        (Some(prefetched), None) => (Some(prefetched.bind(&compiled)?), None),
-        (None, Some(resident)) => (None, Some(compiled.bind_parameters(resident.bindings())?)),
+    let runner = match (prefetched, resident) {
+        (Some(prefetched), None) => DenoiseRunner::Offloaded(prefetched.bind(&compiled)?),
+        (None, Some(resident)) => {
+            DenoiseRunner::Device(compiled.bind_parameters(resident.bindings())?)
+        }
         _ => return Err("invalid transformer residency state".into()),
     };
     let context_values = prompt.values.repeat(options.batch_size);
     let context = client.buffer(&[batch, context_tokens, 4096], &context_values)?;
-    let mut random = ChaCha8Rng::seed_from_u64(options.seed);
-    let initial = (0..batch * image_tokens * 64)
-        .map(|_| StandardNormal.sample(&mut random))
-        .collect::<Vec<f32>>();
-    let mut sample = client.buffer(&[batch, image_tokens, 64], &initial)?;
-    let execute_start = Instant::now();
-    if options.device_loop {
-        sample = match (&offloaded_runner, &device_runner) {
-            (Some(runner), None) => runner.run((&sample, &context))?,
-            (None, Some(runner)) => runner.run((&sample, &context))?,
-            _ => return Err("invalid transformer runner state".into()),
-        };
-    } else {
-        for index in 0..schedule.len() {
-            let step = schedule.step(index)?;
-            let timestep = client.buffer(&[batch], &vec![step.timestep; options.batch_size])?;
-            let step_size = client.buffer(&[batch], &vec![step.step_size; options.batch_size])?;
-            sample = match (&offloaded_runner, &device_runner) {
-                (Some(runner), None) => runner.run((&sample, &timestep, &step_size, &context))?,
-                (None, Some(runner)) => runner.run((&sample, &timestep, &step_size, &context))?,
-                _ => return Err("invalid transformer runner state".into()),
-            };
-        }
-    }
-    let execute_time = execute_start.elapsed();
     eprintln!(
-        "denoise mode={} residency={} batch={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} prefetch-launch={prefetch_launch_time:.3?} prefetch-tail={prefetch_wait_time:.3?} execute={execute_time:.3?} steps={}",
+        "denoiser-init mode={} residency={} batch={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} prefetch-launch={prefetch_launch_time:.3?} prefetch-tail={prefetch_wait_time:.3?} steps={}",
         if options.device_loop {
             "device-loop"
         } else {
@@ -268,7 +302,16 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Buffer> {
         options.batch_size,
         options.steps,
     );
-    Ok(sample)
+    Ok(Denoiser {
+        client: client.clone(),
+        runner,
+        context,
+        schedule,
+        batch,
+        batch_size: options.batch_size,
+        image_tokens,
+        device_loop: options.device_loop,
+    })
 }
 
 struct DecodeOptions<'a> {
@@ -280,13 +323,12 @@ struct DecodeOptions<'a> {
     cache_dir: Option<&'a PathBuf>,
 }
 
-fn prepare_vae_batches(
+fn prepare_vae_bridge(
     client: &Client,
-    latent: &Buffer,
     mean: &[f32],
     std: &[f32],
     options: &DecodeOptions<'_>,
-) -> Result<Vec<(Buffer, usize)>> {
+) -> Result<(BoundModel, Vec<usize>)> {
     let image_tokens = options.latent_height * options.latent_width;
     let decode_batch_size = options.batch_size.min(options.max_batch_size);
     let decode_batch_i64 = i64::try_from(decode_batch_size)?;
@@ -330,22 +372,42 @@ fn prepare_vae_batches(
         options.cache_dir,
         "qwen-image-2.1-vae-input-v1",
     )?)?;
-    let batches: Vec<Buffer> = compiled.run(latent, std::iter::empty::<(&str, &Buffer)>())?;
-    Ok(batches
-        .into_iter()
-        .enumerate()
-        .map(|(index, buffer)| {
-            let start = index * decode_batch_size;
-            (buffer, decode_batch_size.min(options.batch_size - start))
-        })
-        .collect())
+    let runner = compiled.bind_parameters(std::iter::empty::<(&str, &Buffer)>())?;
+    let actual_batches = (0..options.batch_size)
+        .step_by(decode_batch_size)
+        .map(|start| decode_batch_size.min(options.batch_size - start))
+        .collect();
+    Ok((runner, actual_batches))
 }
 
-fn decode(
+struct VaeDecoder {
+    bridge: BoundModel,
+    decoder: BoundModel,
+    actual_batches: Vec<usize>,
+    values_per_image: usize,
+    batch_size: usize,
+}
+
+impl VaeDecoder {
+    fn run(&self, latent: &Buffer) -> Result<Vec<f32>> {
+        let latent_batches: Vec<Buffer> = self.bridge.run(latent)?;
+        let mut images = Vec::with_capacity(self.values_per_image * self.batch_size);
+        for (latent, &actual_batch) in latent_batches.iter().zip(&self.actual_batches) {
+            let image: Buffer = self.decoder.run(latent)?;
+            let values = image.to_vec::<f32>()?;
+            images.extend_from_slice(&values[..self.values_per_image * actual_batch]);
+        }
+        Ok(images)
+    }
+}
+
+fn prepare_vae_decoder(
     client: &Client,
-    latent_batches: &[(Buffer, usize)],
+    mean: &[f32],
+    std: &[f32],
     options: &DecodeOptions<'_>,
-) -> Result<Vec<f32>> {
+) -> Result<VaeDecoder> {
+    let (bridge, actual_batches) = prepare_vae_bridge(client, mean, std, options)?;
     let image_tokens = options.latent_height * options.latent_width;
     let decode_batch_size = options.batch_size.min(options.max_batch_size);
     let model = Model::new(|cx: Cx, latent| {
@@ -364,16 +426,16 @@ fn decode(
         options.cache_dir,
         "qwen-image-2.1-vae-v1",
     )?)?;
-    let runner = compiled.bind_parameters(parameters.bindings())?;
+    let decoder = compiled.bind_parameters(parameters.bindings())?;
     let values_per_image =
         usize::try_from(options.latent_height * 16 * options.latent_width * 16 * 4)?;
-    let mut images = Vec::with_capacity(values_per_image * options.batch_size);
-    for (latent, actual_batch) in latent_batches {
-        let image: Buffer = runner.run(latent)?;
-        let values = image.to_vec::<f32>()?;
-        images.extend_from_slice(&values[..values_per_image * *actual_batch]);
-    }
-    Ok(images)
+    Ok(VaeDecoder {
+        bridge,
+        decoder,
+        actual_batches,
+        values_per_image,
+        batch_size: options.batch_size,
+    })
 }
 
 fn tile_starts(length: usize, tile: usize, stride: usize) -> Vec<usize> {
@@ -507,8 +569,8 @@ fn decode_tiled(
 }
 
 fn run(args: Args) -> Result<()> {
-    if args.batch_size == 0 || args.vae_batch_size == 0 {
-        return Err("batch sizes must be positive".into());
+    if args.batch_size == 0 || args.vae_batch_size == 0 || args.requests == 0 {
+        return Err("batch sizes and requests must be positive".into());
     }
     if args.width == 0
         || args.height == 0
@@ -535,10 +597,10 @@ fn run(args: Args) -> Result<()> {
         client_options = client_options.set("memory_fraction", memory_fraction);
     }
     let client = unsafe { Client::load_with_options(&args.plugin, &client_options) }?;
-    let generation_start = Instant::now();
+    let initialization_start = Instant::now();
     let latent_height = i64::from(args.height / 16);
     let latent_width = i64::from(args.width / 16);
-    let latent = denoise(
+    let denoiser = prepare_denoiser(
         &client,
         &DenoiseOptions {
             checkpoint_path: &args.transformer,
@@ -546,7 +608,6 @@ fn run(args: Args) -> Result<()> {
             latent_height,
             latent_width,
             steps: args.steps,
-            seed: args.seed,
             batch_size: args.batch_size,
             device_loop: args.device_loop,
             cache_dir: args.cache_dir.as_ref(),
@@ -569,47 +630,76 @@ fn run(args: Args) -> Result<()> {
         max_batch_size: args.vae_batch_size,
         cache_dir: args.cache_dir.as_ref(),
     };
-    let vae_start = Instant::now();
-    let values = if args.width <= args.vae_tile && args.height <= args.vae_tile {
-        let latent_batches = prepare_vae_batches(
+    let tiled = args.width > args.vae_tile || args.height > args.vae_tile;
+    if tiled && args.requests != 1 {
+        return Err(
+            "multiple persistent requests are not yet supported with tiled VAE decode".into(),
+        );
+    }
+    let vae_decoder = if tiled {
+        None
+    } else {
+        Some(prepare_vae_decoder(
             &client,
-            &latent,
             &vae_config.latents_mean,
             &vae_config.latents_std,
             &decode_options,
-        )?;
-        decode(&client, &latent_batches, &decode_options)?
-    } else {
-        let mut latent = latent.to_vec::<f32>()?;
-        for token in latent.as_chunks_mut::<64>().0 {
-            for (channel, value) in token.iter_mut().enumerate() {
-                *value =
-                    *value * vae_config.latents_std[channel] + vae_config.latents_mean[channel];
-            }
-        }
-        let tile_height = usize::try_from((args.vae_tile / 16).min(args.height / 16))?;
-        let tile_width = usize::try_from((args.vae_tile / 16).min(args.width / 16))?;
-        let stride = usize::try_from((args.vae_tile - args.vae_overlap) / 16)?;
-        let values_per_latent = usize::try_from(latent_height * latent_width * 64)?;
-        let mut decoded = Vec::new();
-        for sample in latent.chunks_exact(values_per_latent) {
-            decoded.extend(decode_tiled(
-                &client,
-                &args.vae,
-                sample,
-                usize::try_from(latent_height)?,
-                usize::try_from(latent_width)?,
-                tile_height,
-                tile_width,
-                stride.min(tile_height),
-                stride.min(tile_width),
-                args.cache_dir.as_ref(),
-            )?);
-        }
-        decoded
+        )?)
     };
-    let vae_time = vae_start.elapsed();
-    let pixels = values
+    let initialization_time = initialization_start.elapsed();
+    eprintln!("pipeline-init={initialization_time:.3?}");
+    let mut final_values = None;
+    let mut request_times = Vec::with_capacity(args.requests);
+    for request in 0..args.requests {
+        let request_start = Instant::now();
+        let seed = args
+            .seed
+            .checked_add(u64::try_from(request)?)
+            .ok_or("request seed overflow")?;
+        let (latent, denoise_time) = denoiser.run(seed)?;
+        let vae_start = Instant::now();
+        let values = if let Some(decoder) = &vae_decoder {
+            decoder.run(&latent)?
+        } else {
+            let mut latent = latent.to_vec::<f32>()?;
+            for token in latent.as_chunks_mut::<64>().0 {
+                for (channel, value) in token.iter_mut().enumerate() {
+                    *value =
+                        *value * vae_config.latents_std[channel] + vae_config.latents_mean[channel];
+                }
+            }
+            let tile_height = usize::try_from((args.vae_tile / 16).min(args.height / 16))?;
+            let tile_width = usize::try_from((args.vae_tile / 16).min(args.width / 16))?;
+            let stride = usize::try_from((args.vae_tile - args.vae_overlap) / 16)?;
+            let values_per_latent = usize::try_from(latent_height * latent_width * 64)?;
+            let mut decoded = Vec::new();
+            for sample in latent.chunks_exact(values_per_latent) {
+                decoded.extend(decode_tiled(
+                    &client,
+                    &args.vae,
+                    sample,
+                    usize::try_from(latent_height)?,
+                    usize::try_from(latent_width)?,
+                    tile_height,
+                    tile_width,
+                    stride.min(tile_height),
+                    stride.min(tile_width),
+                    args.cache_dir.as_ref(),
+                )?);
+            }
+            decoded
+        };
+        let vae_time = vae_start.elapsed();
+        let request_time = request_start.elapsed();
+        eprintln!(
+            "request={request} denoise={denoise_time:.3?} vae={vae_time:.3?} total={request_time:.3?} images_per_second={:.3}",
+            args.batch_size as f64 / request_time.as_secs_f64(),
+        );
+        request_times.push(request_time);
+        final_values = Some(values);
+    }
+    let pixels = final_values
+        .ok_or("no generation request executed")?
         .into_iter()
         .map(|value| ((value + 1.0) * 127.5).round().clamp(0.0, 255.0) as u8)
         .collect::<Vec<_>>();
@@ -624,10 +714,11 @@ fn run(args: Args) -> Result<()> {
         image.save(output)?;
     }
     println!(
-        "batch={} vae={vae_time:.3?} generation={:.3?} images_per_second={:.3} saved {}",
+        "batch={} requests={} pipeline_init={initialization_time:.3?} median_request={:.3?} steady_images_per_second={:.3} saved {}",
         args.batch_size,
-        generation_start.elapsed(),
-        args.batch_size as f64 / generation_start.elapsed().as_secs_f64(),
+        args.requests,
+        median_duration(&request_times),
+        args.batch_size as f64 / median_duration(&request_times).as_secs_f64(),
         outputs
             .iter()
             .map(|path| path.display().to_string())
@@ -635,6 +726,12 @@ fn run(args: Args) -> Result<()> {
             .join(", ")
     );
     Ok(())
+}
+
+fn median_duration(values: &[std::time::Duration]) -> std::time::Duration {
+    let mut values = values.to_vec();
+    values.sort_unstable();
+    values[values.len() / 2]
 }
 
 fn output_paths(output: &Path, batch_size: usize) -> Vec<PathBuf> {

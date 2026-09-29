@@ -102,6 +102,24 @@ with the important caveat that RXLA uses W8 weights while the official model is
 BF16. For latency-sensitive traffic, batch 1 remains appropriate; a serving
 scheduler should choose batch 4 or 8 when throughput is the priority.
 
+### Persistent pipeline
+
+The generation example can retain its compiled DiT, prompt context, DiT and VAE
+weights, VAE bridge, and VAE decoder across requests with `--requests`. On the
+same card, three batch-8 requests produced:
+
+| Phase | Request 0 | Request 1 | Request 2 |
+|---|---:|---:|---:|
+| DiT | 4.760 s | 4.696 s | 4.705 s |
+| VAE | 1.855 s | 1.715 s | 1.714 s |
+| Complete request | 6.616 s | 6.412 s | 6.421 s |
+
+Pipeline initialization took 2.356 s once. Steady-state median throughput is
+**1.246 img/s**, 40.8% above the fresh-process batch-8 result of 0.885 img/s.
+This is **4.33×** the measured throughput of the official BF16 batch-4 model
+offload path. A seed-42 persistent request produced byte-identical images to
+the earlier one-shot device-bridge path.
+
 ## Reproduction
 
 Official complete-image path:
@@ -142,7 +160,7 @@ target/release/examples/qwen_image_2_1_generate \
   .cache/qwen-image-2.1/conditioning_chair.safetensors \
   .cache/qwen-image-2.1/output.png \
   --width 512 --height 512 --steps 4 \
-  --batch-size 8 --vae-batch-size 4 \
+  --batch-size 8 --vae-batch-size 4 --requests 3 \
   --memory-fraction 0.9 --preallocate false \
   --cache-dir .cache/qwen-image-2.1/compile-cache
 ```
