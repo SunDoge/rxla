@@ -21,8 +21,6 @@ impl QwenImage21FlowScheduler {
     const BASE_SHIFT: f32 = 0.5;
     const MAX_SHIFT: f32 = 0.9;
     const TERMINAL_SIGMA: f32 = 0.02;
-    const TRAINING_SIGMA_MIN: f32 = 0.001;
-
     /// Build the default Diffusers schedule for a target latent sequence.
     pub fn new(steps: usize, image_tokens: usize) -> Result<Self> {
         if steps == 0 || image_tokens == 0 {
@@ -37,17 +35,15 @@ impl QwenImage21FlowScheduler {
         let mu = slope * image_tokens + intercept;
         let exponential = mu.exp();
 
-        let denominator = steps.saturating_sub(1).max(1) as f32;
+        // Qwen-Image-2.1 supplies custom sigmas `linspace(1, 1/steps,
+        // steps)` rather than using the scheduler's training-time 0.001 tail.
+        let denominator = steps as f32;
         let mut sigmas = (0..steps)
             .map(|index| {
-                let fraction = index as f32 / denominator;
-                let sigma = 1.0 - fraction * (1.0 - Self::TRAINING_SIGMA_MIN);
+                let sigma = 1.0 - index as f32 / denominator;
                 exponential / (exponential + (1.0 / sigma - 1.0))
             })
             .collect::<Vec<_>>();
-        if steps == 1 {
-            sigmas[0] = 1.0;
-        }
 
         // Match FlowMatchEulerDiscreteScheduler::stretch_shift_to_terminal.
         let scale = (1.0 - sigmas[sigmas.len() - 1]) / (1.0 - Self::TERMINAL_SIGMA);
@@ -101,10 +97,10 @@ mod tests {
         assert_eq!(scheduler.sigmas().len(), 41);
         for (actual, expected) in scheduler.sigmas()[..5].iter().zip([
             1.0,
-            0.993_091_8,
-            0.985_914_95,
-            0.978_453_3,
-            0.970_689_54,
+            0.992_645_98,
+            0.985_012_95,
+            0.977_084_8,
+            0.968_844_1,
         ]) {
             assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
         }
