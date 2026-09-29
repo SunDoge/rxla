@@ -16,7 +16,7 @@ pub use model::{OffloadedSchemaBuffers, SchemaBuffers};
 pub use model::{save_model_new, save_parameter_selection_new, save_training_state_new};
 #[cfg(feature = "model")]
 use rxla_pjrt::DType;
-use rxla_pjrt::{Buffer, Client};
+use rxla_pjrt::{Buffer, BufferDestination, Client};
 use safetensors::tensor::Metadata;
 pub use safetensors::tensor::{Dtype, TensorInfo};
 use snafu::Snafu;
@@ -486,11 +486,15 @@ impl<R: Read + Seek> SafeTensors<R> {
 
     /// Upload BF16 without expanding to F32; uploaded byte statistics count two
     /// bytes per element. Does not mutate sessions or infer model key mappings.
-    pub fn upload_bf16(&mut self, client: &Client, name: &str) -> Result<Buffer> {
+    pub fn upload_bf16(
+        &mut self,
+        destination: &impl BufferDestination,
+        name: &str,
+    ) -> Result<Buffer> {
         if let Some((shape, values)) = self.mapped_bf16(name)? {
             let payload_bytes = values.len().saturating_mul(std::mem::size_of::<bf16>());
             let upload_start = Instant::now();
-            let buffer = client
+            let buffer = destination
                 .buffer(&shape, values)
                 .map_err(|source| Error::Runtime { source })?;
             let upload_time = upload_start.elapsed();
@@ -509,7 +513,7 @@ impl<R: Read + Seek> SafeTensors<R> {
         }
         let tensor = self.read_bf16(name)?;
         let upload_start = Instant::now();
-        let buffer = client
+        let buffer = destination
             .buffer(&tensor.shape, &tensor.values)
             .map_err(|source| Error::Runtime { source })?;
         self.stats.uploads = self.stats.uploads.saturating_add(1);
@@ -525,7 +529,11 @@ impl<R: Read + Seek> SafeTensors<R> {
     }
 
     /// Decode F32/F16/BF16 and upload BF16, quantizing once during loading.
-    pub fn upload_bf16_converted(&mut self, client: &Client, name: &str) -> Result<Buffer> {
+    pub fn upload_bf16_converted(
+        &mut self,
+        destination: &impl BufferDestination,
+        name: &str,
+    ) -> Result<Buffer> {
         let tensor = self.read_f32(name)?;
         let values = tensor
             .values
@@ -533,7 +541,7 @@ impl<R: Read + Seek> SafeTensors<R> {
             .map(bf16::from_f32)
             .collect::<Vec<_>>();
         let upload_start = Instant::now();
-        let buffer = client
+        let buffer = destination
             .buffer(&tensor.shape, &values)
             .map_err(|source| Error::Runtime { source })?;
         self.stats.uploads = self.stats.uploads.saturating_add(1);
@@ -551,7 +559,11 @@ impl<R: Read + Seek> SafeTensors<R> {
     /// Decode a floating-point tensor and upload it as native F16 storage.
     /// Conversion happens once while loading, keeping parameter casts out of
     /// the compiled model's execution path.
-    pub fn upload_f16(&mut self, client: &Client, name: &str) -> Result<Buffer> {
+    pub fn upload_f16(
+        &mut self,
+        destination: &impl BufferDestination,
+        name: &str,
+    ) -> Result<Buffer> {
         if self
             .metadata
             .info(name)
@@ -559,7 +571,7 @@ impl<R: Read + Seek> SafeTensors<R> {
         {
             let tensor = self.read_f16(name)?;
             let upload_start = Instant::now();
-            let buffer = client
+            let buffer = destination
                 .buffer(&tensor.shape, &tensor.values)
                 .map_err(|source| Error::Runtime { source })?;
             self.stats.uploads = self.stats.uploads.saturating_add(1);
@@ -580,7 +592,7 @@ impl<R: Read + Seek> SafeTensors<R> {
             .map(f16::from_f32)
             .collect::<Vec<_>>();
         let upload_start = Instant::now();
-        let buffer = client
+        let buffer = destination
             .buffer(&tensor.shape, &values)
             .map_err(|source| Error::Runtime { source })?;
         self.stats.uploads = self.stats.uploads.saturating_add(1);
@@ -596,10 +608,14 @@ impl<R: Read + Seek> SafeTensors<R> {
     }
 
     /// Upload exact U8 quantized storage without host-side dequantization.
-    pub fn upload_u8(&mut self, client: &Client, name: &str) -> Result<Buffer> {
+    pub fn upload_u8(
+        &mut self,
+        destination: &impl BufferDestination,
+        name: &str,
+    ) -> Result<Buffer> {
         let tensor = self.read_u8(name)?;
         let upload_start = Instant::now();
-        let buffer = client
+        let buffer = destination
             .buffer(&tensor.shape, &tensor.values)
             .map_err(|source| Error::Runtime { source })?;
         self.stats.uploads = self.stats.uploads.saturating_add(1);
@@ -616,10 +632,14 @@ impl<R: Read + Seek> SafeTensors<R> {
 
     /// Upload an exact I32 tensor to PJRT without mutating any session. This does
     /// not auto-discover state names or establish checkpoint/graph compatibility.
-    pub fn upload_i32(&mut self, client: &Client, name: &str) -> Result<Buffer> {
+    pub fn upload_i32(
+        &mut self,
+        destination: &impl BufferDestination,
+        name: &str,
+    ) -> Result<Buffer> {
         let tensor = self.read_i32(name)?;
         let upload_start = Instant::now();
-        let buffer = client
+        let buffer = destination
             .buffer(&tensor.shape, &tensor.values)
             .map_err(|source| Error::Runtime { source })?;
         self.stats.uploads = self.stats.uploads.saturating_add(1);
@@ -634,10 +654,14 @@ impl<R: Read + Seek> SafeTensors<R> {
         Ok(buffer)
     }
 
-    pub fn upload_f32(&mut self, client: &Client, name: &str) -> Result<Buffer> {
+    pub fn upload_f32(
+        &mut self,
+        destination: &impl BufferDestination,
+        name: &str,
+    ) -> Result<Buffer> {
         let tensor = self.read_f32(name)?;
         let upload_start = Instant::now();
-        let buffer = client
+        let buffer = destination
             .buffer(&tensor.shape, &tensor.values)
             .map_err(|source| Error::Runtime { source })?;
         self.stats.uploads = self.stats.uploads.saturating_add(1);

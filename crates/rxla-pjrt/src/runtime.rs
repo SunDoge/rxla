@@ -1460,6 +1460,28 @@ pub struct Memory {
 unsafe impl Send for Memory {}
 unsafe impl Sync for Memory {}
 
+/// A destination for typed host tensor uploads.
+///
+/// Implemented by [`Client`] for its selected device and by [`Memory`] for an
+/// explicit backend memory space. Generic loaders can therefore support
+/// accelerator-resident and offloaded checkpoints without duplicating their
+/// decoding logic.
+pub trait BufferDestination {
+    fn buffer<T: Element>(&self, dims: &[i64], data: &[T]) -> Result<Buffer>;
+}
+
+impl BufferDestination for Client {
+    fn buffer<T: Element>(&self, dims: &[i64], data: &[T]) -> Result<Buffer> {
+        Client::buffer(self, dims, data)
+    }
+}
+
+impl BufferDestination for Memory {
+    fn buffer<T: Element>(&self, dims: &[i64], data: &[T]) -> Result<Buffer> {
+        Client(self.client.clone()).buffer_in_memory(self, dims, data)
+    }
+}
+
 /// Pins a PJRT buffer allocation for external pointer access.
 ///
 /// The native external-reference count prevents the backend from deleting or

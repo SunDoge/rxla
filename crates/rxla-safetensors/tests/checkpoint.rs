@@ -108,6 +108,34 @@ fn real_i32_upload_preserves_counter_and_index_values() {
 }
 
 #[test]
+#[ignore = "requires trusted PJRT_PLUGIN_PATH with pinned-host memory"]
+fn checkpoint_upload_targets_pinned_host_memory_directly() {
+    let client =
+        unsafe { rxla_pjrt::Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
+    let pinned = client
+        .memories()
+        .unwrap()
+        .into_iter()
+        .find(|memory| memory.info().unwrap().kind.contains("pinned_host"))
+        .expect("CUDA PJRT exposes pinned_host memory");
+    let values = [1.0_f32, -2.0, 3.5];
+    let bytes = fixture(&[(
+        "weight",
+        Dtype::F32,
+        vec![3],
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect(),
+    )]);
+    let mut checkpoint = SafeTensors::new(Cursor::new(bytes)).unwrap();
+    let buffer = checkpoint.upload_f32(&pinned, "weight").unwrap();
+
+    assert!(buffer.memory_info().unwrap().kind.contains("pinned_host"));
+    assert_eq!(buffer.to_vec::<f32>().unwrap(), values);
+}
+
+#[test]
 fn float_formats_scalars_and_empty_tensors() {
     let values = [-2., 0., 1.5, f32::INFINITY, f32::NAN];
     let bytes = fixture(&[

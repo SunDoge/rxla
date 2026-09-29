@@ -9,9 +9,9 @@ pub use kv_cache::{KvCache, KvCacheUpdate};
 pub use nn::BatchNormTraining;
 use prost::Message;
 pub use rxla_pjrt::{
-    Buffer, BufferMemoryLayout, Client, ClientInfo, ClientOptionValue, ClientOptions, DType,
-    DeviceInfo, Element, Error as PjrtError, Memory, MemoryInfo, PendingExecution,
-    PendingHostUpload, PjrtErrorCode, Plugin, PluginRegistry,
+    Buffer, BufferDestination, BufferMemoryLayout, Client, ClientInfo, ClientOptionValue,
+    ClientOptions, DType, DeviceInfo, Element, Error as PjrtError, Memory, MemoryInfo,
+    PendingExecution, PendingHostUpload, PjrtErrorCode, Plugin, PluginRegistry,
 };
 use rxla_xla_proto::xla::{
     CompileOptionsProto, DeviceAssignmentProto, ExecutableBuildOptionsProto, HloModuleProto,

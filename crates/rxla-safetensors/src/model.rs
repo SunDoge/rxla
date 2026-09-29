@@ -350,7 +350,7 @@ impl<R: Read + Seek> SafeTensors<R> {
     /// paths. This is the conventional safetensors layout for new RXLA models.
     pub fn load_parameter_schema(
         &mut self,
-        client: &Client,
+        destination: &impl BufferDestination,
         schema: &ModelSchema,
     ) -> Result<SchemaBuffers> {
         let mapping = schema
@@ -358,7 +358,7 @@ impl<R: Read + Seek> SafeTensors<R> {
             .iter()
             .map(|spec| (spec.path().to_owned(), spec.path().to_owned()))
             .collect();
-        self.load_parameter_schema_with_mapping(client, schema, &mapping)
+        self.load_parameter_schema_with_mapping(destination, schema, &mapping)
     }
 
     /// Upload parameters selected by stable schema path to explicit checkpoint
@@ -366,7 +366,7 @@ impl<R: Read + Seek> SafeTensors<R> {
     /// All headers are validated before the first payload read or device upload.
     pub fn load_parameter_schema_with_mapping(
         &mut self,
-        client: &Client,
+        destination: &impl BufferDestination,
         schema: &ModelSchema,
         mapping: &HashMap<String, String>,
     ) -> Result<SchemaBuffers> {
@@ -382,13 +382,13 @@ impl<R: Read + Seek> SafeTensors<R> {
                     .ok_or_else(|| invalid(format!("missing tensor {source:?}")))?
                     .dtype;
                 let buffer = match spec.dtype() {
-                    DType::U8 => self.upload_u8(client, &source)?,
-                    DType::F32 => self.upload_f32(client, &source)?,
-                    DType::F16 => self.upload_f16(client, &source)?,
+                    DType::U8 => self.upload_u8(destination, &source)?,
+                    DType::F32 => self.upload_f32(destination, &source)?,
+                    DType::F16 => self.upload_f16(destination, &source)?,
                     DType::BF16 if source_dtype == Dtype::BF16 => {
-                        self.upload_bf16(client, &source)?
+                        self.upload_bf16(destination, &source)?
                     }
-                    DType::BF16 => self.upload_bf16_converted(client, &source)?,
+                    DType::BF16 => self.upload_bf16_converted(destination, &source)?,
                     dtype => return Err(invalid(format!("unsupported parameter dtype {dtype:?}"))),
                 };
                 Ok((spec.path().to_owned(), buffer))
@@ -405,18 +405,18 @@ impl<R: Read + Seek> SafeTensors<R> {
     /// stateful layers such as BatchNorm.
     pub fn load_model_schema(
         &mut self,
-        client: &Client,
+        destination: &impl BufferDestination,
         schema: &ModelSchema,
     ) -> Result<SchemaBuffers> {
         self.validate_model_schema(schema)?;
-        let parameters = self.load_parameter_schema(client, schema)?.parameters;
+        let parameters = self.load_parameter_schema(destination, schema)?.parameters;
         let states = schema
             .states()
             .iter()
             .map(|spec| {
                 Ok((
                     spec.path().to_owned(),
-                    upload_typed(self, client, spec.path(), spec.dtype())?,
+                    upload_typed(self, destination, spec.path(), spec.dtype())?,
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -524,7 +524,7 @@ fn validate_tensor_info<R: Read + Seek>(
 
 fn upload_typed<R: Read + Seek>(
     checkpoint: &mut SafeTensors<R>,
-    client: &Client,
+    destination: &impl BufferDestination,
     path: &str,
     dtype: DType,
 ) -> Result<Buffer> {
@@ -533,12 +533,12 @@ fn upload_typed<R: Read + Seek>(
         .ok_or_else(|| invalid(format!("missing tensor {path:?}")))?
         .dtype;
     match dtype {
-        DType::U8 => checkpoint.upload_u8(client, path),
-        DType::I32 => checkpoint.upload_i32(client, path),
-        DType::F32 => checkpoint.upload_f32(client, path),
-        DType::F16 => checkpoint.upload_f16(client, path),
-        DType::BF16 if source_dtype == Dtype::BF16 => checkpoint.upload_bf16(client, path),
-        DType::BF16 => checkpoint.upload_bf16_converted(client, path),
+        DType::U8 => checkpoint.upload_u8(destination, path),
+        DType::I32 => checkpoint.upload_i32(destination, path),
+        DType::F32 => checkpoint.upload_f32(destination, path),
+        DType::F16 => checkpoint.upload_f16(destination, path),
+        DType::BF16 if source_dtype == Dtype::BF16 => checkpoint.upload_bf16(destination, path),
+        DType::BF16 => checkpoint.upload_bf16_converted(destination, path),
         dtype => Err(invalid(format!("unsupported schema dtype {dtype:?}"))),
     }
 }
