@@ -73,6 +73,13 @@ XLA's BFC allocator for a contiguous 6.75-GiB block and fails. The default
 `--vae-batch-size 4` decodes the same eight latents in two launches without
 reducing transformer utilization.
 
+The DiT-to-VAE boundary remains device-resident: latent denormalization,
+micro-batch slicing and final-batch padding are compiled as a small StableHLO
+bridge. An A/B run produced byte-identical PNGs for all eight samples. Its
+measured latency is neutral at this latent size (9.08 s versus 9.04 s), but it
+removes a host synchronization point required for overlapping stages in a
+persistent serving pipeline.
+
 These RXLA measurements are warm disk-cache, fresh-process runs. Consequently
 they still include roughly one second of checkpoint loading plus tracing and
 cache lookup. PNG writes are included. The official batch 2/4 rows are

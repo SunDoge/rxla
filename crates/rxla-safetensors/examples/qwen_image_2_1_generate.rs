@@ -5,7 +5,7 @@ use image::{ImageBuffer, Rgba};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
-use rxla_core::{Buffer, CacheLimits, Client, ClientOptions, Compiler, Memory};
+use rxla_core::{Buffer, CacheLimits, Client, ClientOptions, Compiler, Memory, Tensor};
 use rxla_models::qwen_image_2_1::{
     QwenImage21Config, QwenImage21FlowScheduler, qwen_image_2_1_denoise, qwen_image_2_1_euler_step,
     qwen_image_2_1_vae_decoder, qwen_image_2_1_vae_decoder_raw,
@@ -140,7 +140,7 @@ fn cuda_offload_memories(client: &Client) -> Result<(Memory, Memory)> {
     Ok((host, device))
 }
 
-fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
+fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Buffer> {
     let mut conditioning = SafeTensors::open(options.conditioning_path)?;
     let prompt = conditioning.read_f32("prompt_embeds")?;
     if prompt.shape.len() != 3 || prompt.shape[0] != 1 || prompt.shape[2] != 4096 {
@@ -268,7 +268,7 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
         options.batch_size,
         options.steps,
     );
-    Ok(sample.to_vec::<f32>()?)
+    Ok(sample)
 }
 
 struct DecodeOptions<'a> {
@@ -280,7 +280,72 @@ struct DecodeOptions<'a> {
     cache_dir: Option<&'a PathBuf>,
 }
 
-fn decode(client: &Client, latent: &[f32], options: &DecodeOptions<'_>) -> Result<Vec<f32>> {
+fn prepare_vae_batches(
+    client: &Client,
+    latent: &Buffer,
+    mean: &[f32],
+    std: &[f32],
+    options: &DecodeOptions<'_>,
+) -> Result<Vec<(Buffer, usize)>> {
+    let image_tokens = options.latent_height * options.latent_width;
+    let decode_batch_size = options.batch_size.min(options.max_batch_size);
+    let decode_batch_i64 = i64::try_from(decode_batch_size)?;
+    let image_tokens_usize = usize::try_from(image_tokens)?;
+    let chunks = (0..options.batch_size)
+        .step_by(decode_batch_size)
+        .map(|start| {
+            let actual = decode_batch_size.min(options.batch_size - start);
+            Ok((i64::try_from(start)?, i64::try_from(actual)?, actual))
+        })
+        .collect::<std::result::Result<Vec<_>, std::num::TryFromIntError>>()?;
+    let model = Model::new(|cx: Cx, latent: Tensor| -> rxla_nn::Result<Vec<Tensor>> {
+        let mean = cx
+            .constant([1, 1, 64], mean)?
+            .broadcast_to(latent.shape())?;
+        let std = cx.constant([1, 1, 64], std)?.broadcast_to(latent.shape())?;
+        let normalized = latent.mul(&std)?.add(&mean)?;
+        let mut batches = Vec::new();
+        for &(start, actual_i64, actual) in &chunks {
+            let chunk = normalized.narrow(0, start, actual_i64)?;
+            if actual == decode_batch_size {
+                batches.push(chunk);
+            } else {
+                let padding = cx.constant(
+                    [decode_batch_i64 - actual_i64, image_tokens, 64],
+                    vec![0.0; (decode_batch_size - actual) * image_tokens_usize * 64],
+                )?;
+                batches.push(Tensor::concatenate(&[chunk, padding], 0)?);
+            }
+        }
+        Ok(batches)
+    })
+    .inputs(ModelInput::new([
+        i64::try_from(options.batch_size)?,
+        image_tokens,
+        64,
+    ]))
+    .trace()?;
+    let compiled = model.compile(&mut compiler(
+        client,
+        options.cache_dir,
+        "qwen-image-2.1-vae-input-v1",
+    )?)?;
+    let batches: Vec<Buffer> = compiled.run(latent, std::iter::empty::<(&str, &Buffer)>())?;
+    Ok(batches
+        .into_iter()
+        .enumerate()
+        .map(|(index, buffer)| {
+            let start = index * decode_batch_size;
+            (buffer, decode_batch_size.min(options.batch_size - start))
+        })
+        .collect())
+}
+
+fn decode(
+    client: &Client,
+    latent_batches: &[(Buffer, usize)],
+    options: &DecodeOptions<'_>,
+) -> Result<Vec<f32>> {
     let image_tokens = options.latent_height * options.latent_width;
     let decode_batch_size = options.batch_size.min(options.max_batch_size);
     let model = Model::new(|cx: Cx, latent| {
@@ -300,27 +365,13 @@ fn decode(client: &Client, latent: &[f32], options: &DecodeOptions<'_>) -> Resul
         "qwen-image-2.1-vae-v1",
     )?)?;
     let runner = compiled.bind_parameters(parameters.bindings())?;
-    let values_per_latent = usize::try_from(image_tokens * 64)?;
     let values_per_image =
         usize::try_from(options.latent_height * 16 * options.latent_width * 16 * 4)?;
     let mut images = Vec::with_capacity(values_per_image * options.batch_size);
-    for chunk in latent.chunks(values_per_latent * decode_batch_size) {
-        let actual_batch = chunk.len() / values_per_latent;
-        let mut padded;
-        let input = if actual_batch == decode_batch_size {
-            chunk
-        } else {
-            padded = vec![0.0; values_per_latent * decode_batch_size];
-            padded[..chunk.len()].copy_from_slice(chunk);
-            &padded
-        };
-        let latent = client.buffer(
-            &[i64::try_from(decode_batch_size)?, image_tokens, 64],
-            input,
-        )?;
-        let image: Buffer = runner.run(&latent)?;
+    for (latent, actual_batch) in latent_batches {
+        let image: Buffer = runner.run(latent)?;
         let values = image.to_vec::<f32>()?;
-        images.extend_from_slice(&values[..values_per_image * actual_batch]);
+        images.extend_from_slice(&values[..values_per_image * *actual_batch]);
     }
     Ok(images)
 }
@@ -487,7 +538,7 @@ fn run(args: Args) -> Result<()> {
     let generation_start = Instant::now();
     let latent_height = i64::from(args.height / 16);
     let latent_width = i64::from(args.width / 16);
-    let mut latent = denoise(
+    let latent = denoise(
         &client,
         &DenoiseOptions {
             checkpoint_path: &args.transformer,
@@ -510,26 +561,32 @@ fn run(args: Args) -> Result<()> {
     if vae_config.latents_mean.len() != 64 || vae_config.latents_std.len() != 64 {
         return Err("VAE config must contain 64 latent means and standard deviations".into());
     }
-    for token in latent.as_chunks_mut::<64>().0 {
-        for (channel, value) in token.iter_mut().enumerate() {
-            *value = *value * vae_config.latents_std[channel] + vae_config.latents_mean[channel];
-        }
-    }
+    let decode_options = DecodeOptions {
+        checkpoint_path: &args.vae,
+        latent_height,
+        latent_width,
+        batch_size: args.batch_size,
+        max_batch_size: args.vae_batch_size,
+        cache_dir: args.cache_dir.as_ref(),
+    };
     let vae_start = Instant::now();
     let values = if args.width <= args.vae_tile && args.height <= args.vae_tile {
-        decode(
+        let latent_batches = prepare_vae_batches(
             &client,
             &latent,
-            &DecodeOptions {
-                checkpoint_path: &args.vae,
-                latent_height,
-                latent_width,
-                batch_size: args.batch_size,
-                max_batch_size: args.vae_batch_size,
-                cache_dir: args.cache_dir.as_ref(),
-            },
-        )?
+            &vae_config.latents_mean,
+            &vae_config.latents_std,
+            &decode_options,
+        )?;
+        decode(&client, &latent_batches, &decode_options)?
     } else {
+        let mut latent = latent.to_vec::<f32>()?;
+        for token in latent.as_chunks_mut::<64>().0 {
+            for (channel, value) in token.iter_mut().enumerate() {
+                *value =
+                    *value * vae_config.latents_std[channel] + vae_config.latents_mean[channel];
+            }
+        }
         let tile_height = usize::try_from((args.vae_tile / 16).min(args.height / 16))?;
         let tile_width = usize::try_from((args.vae_tile / 16).min(args.width / 16))?;
         let stride = usize::try_from((args.vae_tile - args.vae_overlap) / 16)?;
