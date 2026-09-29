@@ -24,18 +24,27 @@ fn schema_buffers_round_trip_through_pinned_host_memory() {
         states: vec![("counter".to_owned(), client.buffer(&[1], &[7_i32]).unwrap())],
     };
 
-    let evicted = buffers.copy_to_memory(pinned).unwrap();
+    let evicted = buffers.offload_to(pinned).unwrap();
+    assert_eq!(evicted.payload_bytes(), 16);
     assert!(
         evicted
-            .parameters
-            .iter()
-            .chain(&evicted.states)
-            .all(|(_, buffer)| buffer.memory_info().unwrap().kind.contains("pinned_host"))
+            .memory_info()
+            .unwrap()
+            .unwrap()
+            .kind
+            .contains("pinned_host")
     );
-    let restored = evicted.copy_to_memory(device).unwrap();
+    let restored = evicted.prefetch_to(device).unwrap();
     assert_eq!(
         restored.parameters[0].1.to_vec::<f32>().unwrap(),
         [1.0, 2.0, 3.0]
     );
     assert_eq!(restored.states[0].1.to_vec::<i32>().unwrap(), [7]);
+
+    // Prefetching does not consume the retained host copy.
+    let restored_again = evicted.prefetch_to(device).unwrap();
+    assert_eq!(
+        restored_again.parameters[0].1.to_vec::<f32>().unwrap(),
+        [1.0, 2.0, 3.0]
+    );
 }

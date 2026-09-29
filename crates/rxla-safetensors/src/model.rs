@@ -14,6 +14,17 @@ pub struct SchemaBuffers {
     pub states: Vec<(String, Buffer)>,
 }
 
+/// A parameter bundle retained outside executable device memory.
+///
+/// The wrapper deliberately exposes no model bindings: callers must prefetch
+/// it into the execution memory space first. The offloaded copy stays alive,
+/// so a serving process can repeatedly create short-lived device-resident
+/// bundles without reading or decoding the checkpoint again.
+pub struct OffloadedSchemaBuffers {
+    buffers: SchemaBuffers,
+    payload_bytes: usize,
+}
+
 impl SchemaBuffers {
     /// Borrow named checkpoint buffers in the form accepted by
     /// `rxla_nn::AppliedModel::bind`.
@@ -34,6 +45,38 @@ impl SchemaBuffers {
             .iter()
             .map(|(path, buffer)| (path.as_str(), buffer))
             .collect()
+    }
+
+    /// Sum of logical tensor payload bytes in this bundle.
+    ///
+    /// This is suitable for residency budgeting. A backend may consume more
+    /// physical memory because of alignment, allocator slabs, or executable
+    /// temporaries.
+    pub fn payload_bytes(&self) -> Result<usize> {
+        self.parameters
+            .iter()
+            .chain(&self.states)
+            .try_fold(0usize, |total, (_, buffer)| {
+                let bytes = buffer
+                    .host_payload_bytes()
+                    .map_err(|source| Error::Runtime { source })?;
+                total
+                    .checked_add(bytes)
+                    .ok_or_else(|| invalid("schema buffer payload size overflow"))
+            })
+    }
+
+    /// Retain this bundle in a backend-provided offload memory space.
+    ///
+    /// CUDA PJRT commonly names this space `pinned_host`. The target remains
+    /// explicit because PJRT memory kinds are backend-defined and form an open
+    /// set.
+    pub fn offload_to(self, memory: &Memory) -> Result<OffloadedSchemaBuffers> {
+        let payload_bytes = self.payload_bytes()?;
+        Ok(OffloadedSchemaBuffers {
+            buffers: self.copy_to_memory(memory)?,
+            payload_bytes,
+        })
     }
 
     /// Move every parameter and state buffer into a PJRT memory space.
@@ -77,6 +120,52 @@ impl SchemaBuffers {
     ) -> rxla_nn::Result<ModelSessionBuilder<'model>> {
         let SchemaBuffers { parameters, states } = self;
         builder.parameters(parameters)?.states(states)
+    }
+}
+
+impl OffloadedSchemaBuffers {
+    /// Logical bytes that will be prefetched when this component becomes live.
+    pub fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+    }
+
+    /// Prefetch a fresh resident copy without consuming the offloaded source.
+    ///
+    /// Keeping the source is useful for request-oriented serving: dropping the
+    /// returned bundle evicts the device copy, while the decoded pinned-host
+    /// checkpoint remains ready for the next request.
+    pub fn prefetch_to(&self, memory: &Memory) -> Result<SchemaBuffers> {
+        fn copy(buffers: &[(String, Buffer)], memory: &Memory) -> Result<Vec<(String, Buffer)>> {
+            buffers
+                .iter()
+                .map(|(path, buffer)| {
+                    buffer
+                        .copy_to_memory(memory)
+                        .map(|buffer| (path.clone(), buffer))
+                        .map_err(|source| Error::Runtime { source })
+                })
+                .collect()
+        }
+
+        Ok(SchemaBuffers {
+            parameters: copy(&self.buffers.parameters, memory)?,
+            states: copy(&self.buffers.states, memory)?,
+        })
+    }
+
+    /// Backend memory containing the retained offloaded tensors.
+    pub fn memory_info(&self) -> Result<Option<rxla_pjrt::MemoryInfo>> {
+        self.buffers
+            .parameters
+            .iter()
+            .chain(&self.buffers.states)
+            .next()
+            .map(|(_, buffer)| {
+                buffer
+                    .memory_info()
+                    .map_err(|source| Error::Runtime { source })
+            })
+            .transpose()
     }
 }
 
