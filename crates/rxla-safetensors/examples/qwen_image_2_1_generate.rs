@@ -56,6 +56,9 @@ struct Args {
     /// host enqueue path remains faster on the currently tested CUDA plugin.
     #[arg(long)]
     device_loop: bool,
+    /// Persistent serialized PJRT executable cache.
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -64,27 +67,52 @@ struct VaeConfig {
     latents_std: Vec<f32>,
 }
 
-fn denoise(
-    client: &Client,
-    checkpoint_path: &PathBuf,
-    conditioning_path: &PathBuf,
+fn compiler(client: &Client, cache_dir: Option<&PathBuf>, _namespace: &str) -> Result<Compiler> {
+    let compiler = Compiler::new(client.clone(), CacheLimits::default());
+    #[cfg(feature = "disk-cache")]
+    let compiler = if let Some(directory) = cache_dir {
+        let cache = unsafe {
+            rxla_core::DiskCache::new_for_client(
+                directory,
+                _namespace,
+                client,
+                4 * 1024 * 1024 * 1024,
+            )?
+        };
+        compiler.with_disk_cache(cache)
+    } else {
+        compiler
+    };
+    #[cfg(not(feature = "disk-cache"))]
+    if cache_dir.is_some() {
+        return Err("--cache-dir requires rxla-safetensors/disk-cache".into());
+    }
+    Ok(compiler)
+}
+
+struct DenoiseOptions<'a> {
+    checkpoint_path: &'a PathBuf,
+    conditioning_path: &'a PathBuf,
     latent_height: i64,
     latent_width: i64,
     steps: usize,
     seed: u64,
     device_loop: bool,
-) -> Result<Vec<f32>> {
-    let mut conditioning = SafeTensors::open(conditioning_path)?;
+    cache_dir: Option<&'a PathBuf>,
+}
+
+fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
+    let mut conditioning = SafeTensors::open(options.conditioning_path)?;
     let prompt = conditioning.read_f32("prompt_embeds")?;
     if prompt.shape.len() != 3 || prompt.shape[0] != 1 || prompt.shape[2] != 4096 {
         return Err("prompt_embeds must have shape [1, tokens, 4096]".into());
     }
     let context_tokens = prompt.shape[1];
-    let image_tokens = latent_height * latent_width;
-    let config = QwenImage21Config::official_w8(latent_height, latent_width);
-    let schedule = QwenImage21FlowScheduler::new(steps, image_tokens as usize)?;
+    let image_tokens = options.latent_height * options.latent_width;
+    let config = QwenImage21Config::official_w8(options.latent_height, options.latent_width);
+    let schedule = QwenImage21FlowScheduler::new(options.steps, image_tokens as usize)?;
     let trace_start = Instant::now();
-    let model = if device_loop {
+    let model = if options.device_loop {
         Model::new(|cx: Cx, sample, context| {
             qwen_image_2_1_denoise(cx, &sample, &context, &schedule, &config)
         })
@@ -107,7 +135,7 @@ fn denoise(
     };
     let trace_time = trace_start.elapsed();
     let load_start = Instant::now();
-    let mut checkpoint = SafeTensors::open(checkpoint_path)?;
+    let mut checkpoint = SafeTensors::open(options.checkpoint_path)?;
     checkpoint.require_metadata(&[
         ("format", "rxla-qwen-image-2.1-w8-v1"),
         ("group_size", "64"),
@@ -116,21 +144,21 @@ fn denoise(
     let load_time = load_start.elapsed();
     let compile_start = Instant::now();
     let mut compiler =
-        Compiler::new(client.clone(), CacheLimits::default()).with_cudnn_attention(true);
-    if !device_loop {
+        compiler(client, options.cache_dir, "qwen-image-2.1-dit-v1")?.with_cudnn_attention(true);
+    if !options.device_loop {
         compiler = compiler.with_compute_dtype(rxla_core::DType::BF16);
     }
     let compiled = model.compile(&mut compiler)?;
     let runner = compiled.bind_parameters(parameters.bindings())?;
     let compile_time = compile_start.elapsed();
     let context = client.buffer(&prompt.shape, &prompt.values)?;
-    let mut random = ChaCha8Rng::seed_from_u64(seed);
+    let mut random = ChaCha8Rng::seed_from_u64(options.seed);
     let initial = (0..image_tokens * 64)
         .map(|_| StandardNormal.sample(&mut random))
         .collect::<Vec<f32>>();
     let mut sample = client.buffer(&[1, image_tokens, 64], &initial)?;
     let execute_start = Instant::now();
-    if device_loop {
+    if options.device_loop {
         sample = runner.run((&sample, &context))?;
     } else {
         for index in 0..schedule.len() {
@@ -142,12 +170,13 @@ fn denoise(
     }
     let execute_time = execute_start.elapsed();
     eprintln!(
-        "denoise mode={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} execute={execute_time:.3?} steps={steps}",
-        if device_loop {
+        "denoise mode={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} execute={execute_time:.3?} steps={}",
+        if options.device_loop {
             "device-loop"
         } else {
             "host-enqueue"
         },
+        options.steps,
     );
     Ok(sample.to_vec::<f32>()?)
 }
@@ -158,6 +187,7 @@ fn decode(
     latent: &[f32],
     latent_height: i64,
     latent_width: i64,
+    cache_dir: Option<&PathBuf>,
 ) -> Result<Vec<f32>> {
     let image_tokens = latent_height * latent_width;
     let model = Model::new(|cx: Cx, latent| {
@@ -167,7 +197,7 @@ fn decode(
     .trace()?;
     let mut checkpoint = SafeTensors::open(checkpoint_path)?;
     let parameters = checkpoint.load_parameter_schema(client, model.schema())?;
-    let compiled = model.compile(&mut Compiler::new(client.clone(), CacheLimits::default()))?;
+    let compiled = model.compile(&mut compiler(client, cache_dir, "qwen-image-2.1-vae-v1")?)?;
     let runner = compiled.bind_parameters(parameters.bindings())?;
     let latent = client.buffer(&[1, image_tokens, 64], latent)?;
     let image: Buffer = runner.run(&latent)?;
@@ -214,6 +244,7 @@ fn decode_tiled(
     tile_width: usize,
     stride_height: usize,
     stride_width: usize,
+    cache_dir: Option<&PathBuf>,
 ) -> Result<Vec<f32>> {
     const CHANNELS: usize = 64;
     const SCALE: usize = 16;
@@ -228,7 +259,11 @@ fn decode_tiled(
     .trace()?;
     let mut checkpoint = SafeTensors::open(checkpoint_path)?;
     let parameters = checkpoint.load_parameter_schema(client, model.schema())?;
-    let compiled = model.compile(&mut Compiler::new(client.clone(), CacheLimits::default()))?;
+    let compiled = model.compile(&mut compiler(
+        client,
+        cache_dir,
+        "qwen-image-2.1-vae-tiled-v1",
+    )?)?;
     let runner = compiled.bind_parameters(parameters.bindings())?;
     let y_starts = tile_starts(latent_height, tile_height, stride_height);
     let x_starts = tile_starts(latent_width, tile_width, stride_width);
@@ -329,13 +364,16 @@ fn run(args: Args) -> Result<()> {
     let latent_width = i64::from(args.width / 16);
     let mut latent = denoise(
         &client,
-        &args.transformer,
-        &args.conditioning,
-        latent_height,
-        latent_width,
-        args.steps,
-        args.seed,
-        args.device_loop,
+        &DenoiseOptions {
+            checkpoint_path: &args.transformer,
+            conditioning_path: &args.conditioning,
+            latent_height,
+            latent_width,
+            steps: args.steps,
+            seed: args.seed,
+            device_loop: args.device_loop,
+            cache_dir: args.cache_dir.as_ref(),
+        },
     )?;
     let vae_config: VaeConfig = serde_json::from_slice(&fs::read(&args.vae_config)?)?;
     if vae_config.latents_mean.len() != 64 || vae_config.latents_std.len() != 64 {
@@ -347,7 +385,14 @@ fn run(args: Args) -> Result<()> {
         }
     }
     let values = if args.width <= args.vae_tile && args.height <= args.vae_tile {
-        decode(&client, &args.vae, &latent, latent_height, latent_width)?
+        decode(
+            &client,
+            &args.vae,
+            &latent,
+            latent_height,
+            latent_width,
+            args.cache_dir.as_ref(),
+        )?
     } else {
         let tile_height = usize::try_from((args.vae_tile / 16).min(args.height / 16))?;
         let tile_width = usize::try_from((args.vae_tile / 16).min(args.width / 16))?;
@@ -362,6 +407,7 @@ fn run(args: Args) -> Result<()> {
             tile_width,
             stride.min(tile_height),
             stride.min(tile_width),
+            args.cache_dir.as_ref(),
         )?
     };
     let pixels = values
