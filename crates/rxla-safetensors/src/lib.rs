@@ -240,6 +240,41 @@ impl<R: Read + Seek> SafeTensors<R> {
         Ok(Some((shape, values)))
     }
 
+    fn mapped_u8(&self, name: &str) -> Result<Option<(Vec<i64>, &[u8])>> {
+        let Some(mapping) = &self.mapping else {
+            return Ok(None);
+        };
+        let info = self
+            .metadata
+            .info(name)
+            .ok_or_else(|| invalid(format!("missing tensor {name:?}")))?;
+        if info.dtype != Dtype::U8 {
+            return Err(invalid(format!(
+                "tensor {name:?}: expected U8, got {:?}",
+                info.dtype
+            )));
+        }
+        let shape = info
+            .shape
+            .iter()
+            .map(|&dimension| {
+                i64::try_from(dimension).map_err(|_| invalid("dimension exceeds i64"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (start, end) = info.data_offsets;
+        let offset = usize::try_from(self.data_start)
+            .ok()
+            .and_then(|base| base.checked_add(start))
+            .ok_or_else(|| invalid("tensor offset overflow"))?;
+        let mapped_end = offset
+            .checked_add(end - start)
+            .ok_or_else(|| invalid("tensor offset overflow"))?;
+        let values = mapping
+            .get(offset..mapped_end)
+            .ok_or_else(|| invalid("tensor payload exceeds mapped file"))?;
+        Ok(Some((shape, values)))
+    }
+
     /// Decode little-endian F32/F16/BF16 into owned F32 host values. This does not
     /// quantize or change layouts; source axis order is retained.
     pub fn read_f32(&mut self, name: &str) -> Result<HostF32> {
@@ -613,6 +648,26 @@ impl<R: Read + Seek> SafeTensors<R> {
         destination: &impl BufferDestination,
         name: &str,
     ) -> Result<Buffer> {
+        if let Some((shape, values)) = self.mapped_u8(name)? {
+            let payload_bytes = values.len();
+            let upload_start = Instant::now();
+            let buffer = destination
+                .buffer(&shape, values)
+                .map_err(|source| Error::Runtime { source })?;
+            let upload_time = upload_start.elapsed();
+            self.stats.reads = self.stats.reads.saturating_add(1);
+            self.stats.payload_bytes = self
+                .stats
+                .payload_bytes
+                .saturating_add(payload_bytes as u64);
+            self.stats.uploads = self.stats.uploads.saturating_add(1);
+            self.stats.uploaded_bytes = self
+                .stats
+                .uploaded_bytes
+                .saturating_add(payload_bytes as u64);
+            self.stats.upload_time = self.stats.upload_time.saturating_add(upload_time);
+            return Ok(buffer);
+        }
         let tensor = self.read_u8(name)?;
         let upload_start = Instant::now();
         let buffer = destination
