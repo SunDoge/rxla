@@ -687,14 +687,29 @@ impl Tensor {
         Condition: FnOnce(&[Tensor; N]) -> Result<Tensor>,
         Body: FnOnce(&[Tensor; N]) -> Result<[Tensor; N]>,
     {
-        let outputs = Self::while_loop_many(
+        Self::while_loop_with_error(initial, condition, body)
+    }
+
+    /// Error-generic form of [`Self::while_loop`] for higher-level model APIs.
+    pub fn while_loop_with_error<const N: usize, Condition, Body, E>(
+        initial: [Tensor; N],
+        condition: Condition,
+        body: Body,
+    ) -> std::result::Result<[Tensor; N], E>
+    where
+        Condition: FnOnce(&[Tensor; N]) -> std::result::Result<Tensor, E>,
+        Body: FnOnce(&[Tensor; N]) -> std::result::Result<[Tensor; N], E>,
+        E: From<Error>,
+    {
+        let outputs = Self::while_loop_many_with_error(
             &initial,
             |carry| {
-                let carry =
-                    <&[Tensor; N]>::try_from(carry).map_err(|_| Error::WhileResultCount {
+                let carry = <&[Tensor; N]>::try_from(carry).map_err(|_| {
+                    E::from(Error::WhileResultCount {
                         expected: N,
                         actual: carry.len(),
-                    })?;
+                    })
+                })?;
                 condition(carry)
             },
             |carry| {
@@ -706,12 +721,12 @@ impl Tensor {
                 body(carry).map(Vec::from)
             },
         )?;
-        outputs
-            .try_into()
-            .map_err(|outputs: Vec<Tensor>| Error::WhileResultCount {
+        outputs.try_into().map_err(|outputs: Vec<Tensor>| {
+            E::from(Error::WhileResultCount {
                 expected: N,
                 actual: outputs.len(),
             })
+        })
     }
 
     /// Dynamic-arity counterpart to [`Tensor::while_loop`]. Prefer the array
@@ -725,20 +740,34 @@ impl Tensor {
         Condition: FnOnce(&[Tensor]) -> Result<Tensor>,
         Body: FnOnce(&[Tensor]) -> Result<Vec<Tensor>>,
     {
+        Self::while_loop_many_with_error(initial, condition, body)
+    }
+
+    /// Error-generic form of [`Self::while_loop_many`].
+    pub fn while_loop_many_with_error<Condition, Body, E>(
+        initial: &[Tensor],
+        condition: Condition,
+        body: Body,
+    ) -> std::result::Result<Vec<Tensor>, E>
+    where
+        Condition: FnOnce(&[Tensor]) -> std::result::Result<Tensor, E>,
+        Body: FnOnce(&[Tensor]) -> std::result::Result<Vec<Tensor>, E>,
+        E: From<Error>,
+    {
         let Some(first) = initial.first() else {
-            return Err(Error::EmptyWhileCarry);
+            return Err(Error::EmptyWhileCarry.into());
         };
         if initial.iter().any(|value| !first.same_trace(value)) {
-            return Err(Error::WhileTraceMismatch);
+            return Err(Error::WhileTraceMismatch.into());
         }
         let graph = first.graph().clone();
         let condition_marker = graph.region_marker()?;
         let predicate = condition(initial)?;
         if predicate.dtype() != DType::I32 || !predicate.shape().is_empty() {
-            return Err(Error::InvalidWhileCondition);
+            return Err(Error::InvalidWhileCondition.into());
         }
         if !first.same_trace(&predicate) {
-            return Err(Error::WhileTraceMismatch);
+            return Err(Error::WhileTraceMismatch.into());
         }
         let body_marker = graph.region_marker()?;
         let next = body(initial)?;
@@ -746,10 +775,11 @@ impl Tensor {
             return Err(Error::WhileResultCount {
                 expected: initial.len(),
                 actual: next.len(),
-            });
+            }
+            .into());
         }
         if next.iter().any(|value| !first.same_trace(value)) {
-            return Err(Error::WhileTraceMismatch);
+            return Err(Error::WhileTraceMismatch.into());
         }
         for (index, (initial, next)) in initial.iter().zip(&next).enumerate() {
             if initial.shape() != next.shape() || initial.dtype() != next.dtype() {
@@ -759,18 +789,19 @@ impl Tensor {
                     initial_dtype: initial.dtype(),
                     next_shape: next.shape().to_vec(),
                     next_dtype: next.dtype(),
-                });
+                }
+                .into());
             }
         }
         let types = initial.iter().map(Tensor::ty).collect::<Vec<_>>();
-        graph.while_loop(
+        Ok(graph.while_loop(
             &initial.iter().map(Tensor::node_id).collect::<Vec<_>>(),
             condition_marker,
             predicate.node_id(),
             body_marker,
             &next.iter().map(Tensor::node_id).collect::<Vec<_>>(),
             &types,
-        )
+        )?)
     }
 
     /// Build a lazy structured conditional. Only the selected branch executes;

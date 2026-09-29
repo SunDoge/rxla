@@ -27,7 +27,78 @@ fn emit_simple_operation(emission: &mut OperationEmission<'_>) -> Result<bool> {
     {
         return Ok(true);
     }
-    Ok(false)
+    let ctx = emission.ctx;
+    let operation = emission.operation.deref(ctx);
+    let op = Operation::get_op_dyn(emission.operation, ctx);
+    if let Some(integer) = op.as_ref().downcast_ref::<StableIntegerBinaryOp>() {
+        let opcode = integer
+            .get_attr_stable_integer_binary(ctx)
+            .unwrap()
+            .opcode()
+            .replace('-', "_");
+        writeln!(
+            emission.body,
+            "    {} = stablehlo.{opcode} {}, {} : {}",
+            emission.name, emission.operands[0], emission.operands[1], emission.ty
+        )
+        .unwrap();
+    } else if let Some(dot) = op.as_ref().downcast_ref::<StableDotGeneralOp>() {
+        let lhs_type = stablehlo_type(&value_type(ctx, operation.get_operand(0)))?;
+        let rhs_type = stablehlo_type(&value_type(ctx, operation.get_operand(1)))?;
+        let batch_rank = dot.get_attr_stable_batch_rank(ctx).unwrap().value();
+        let batching = if batch_rank == 0 {
+            String::new()
+        } else {
+            let dimensions = (0..batch_rank)
+                .map(|dimension| dimension.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("batching_dims = [{dimensions}] x [{dimensions}], ")
+        };
+        writeln!(emission.body, "    {} = stablehlo.dot_general {}, {}, {batching}contracting_dims = [{}] x [{}], precision = [HIGHEST, HIGHEST] : ({lhs_type}, {rhs_type}) -> {}", emission.name, emission.operands[0], emission.operands[1], batch_rank + 1, batch_rank, emission.ty).unwrap();
+    } else if let Some(custom) = op.as_ref().downcast_ref::<StableCustomCallOp>() {
+        let target = escape_mlir_string(
+            custom
+                .get_attr_stable_custom_call_target(ctx)
+                .unwrap()
+                .as_str(),
+        );
+        let config = escape_mlir_string(
+            custom
+                .get_attr_stable_custom_call_backend_config(ctx)
+                .unwrap()
+                .as_str(),
+        );
+        let side_effect = custom
+            .get_attr_stable_custom_call_has_side_effect(ctx)
+            .unwrap();
+        let api_version = custom.get_attr_stable_custom_call_api_version(ctx).unwrap();
+        let operand_types = operation
+            .operands()
+            .map(|operand| stablehlo_type(&value_type(ctx, operand)))
+            .collect::<Result<Vec<_>>>()?;
+        writeln!(
+            emission.body,
+            "    {} = \"stablehlo.custom_call\"({}) {{call_target_name = \"{target}\", has_side_effect = {}, backend_config = \"{config}\", api_version = {} : i32}} : ({}) -> {}",
+            emission.name,
+            emission.operands.join(", "),
+            side_effect.as_str(),
+            api_version.as_str(),
+            operand_types.join(", "),
+            emission.ty
+        )
+        .unwrap();
+    } else if op.as_ref().is::<ChloErfOp>() {
+        writeln!(
+            emission.body,
+            "    {} = chlo.erf {} : {} -> {}",
+            emission.name, emission.operands[0], emission.ty, emission.ty
+        )
+        .unwrap();
+    } else {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn emitted_name(ctx: &Context, names: &HashMap<Value, String>, value: Value) -> Result<String> {

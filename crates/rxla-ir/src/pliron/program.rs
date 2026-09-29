@@ -264,6 +264,14 @@ impl ProgramIr {
                 }
             }
             for operation in operations {
+                let op = Operation::get_op_dyn(operation, &self.graph.ctx);
+                if op.as_ref().is::<ParameterOp>() || op.as_ref().is::<StateInputOp>() {
+                    // Effects are function ABI declarations and dominate the
+                    // loop. Their values are captured by region operations;
+                    // nesting the declarations would make StableHLO lowering
+                    // treat an ABI argument as an executable operation.
+                    continue;
+                }
                 remap_operation_operands(operation, &self.graph.ctx, &remap);
                 operation.unlink(&self.graph.ctx);
                 operation.insert_at_back(block, &self.graph.ctx);
