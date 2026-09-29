@@ -36,7 +36,8 @@ pub(crate) fn infer(op: &Op, types: &[DType]) -> Result<DType> {
         | Op::Conv2dOihw(_)
         | Op::Conv2dInputGradient(_)
         | Op::Conv2dKernelGradient(_)
-        | Op::ConvTranspose2d(_) => (
+        | Op::ConvTranspose2d(_)
+        | Op::Matmul { .. } => (
             types.len() == 2
                 && all(first)
                 && matches!(first, DType::F16 | DType::BF16 | DType::F32),
@@ -71,7 +72,9 @@ pub(crate) fn infer(op: &Op, types: &[DType]) -> Result<DType> {
         Op::CustomCall { result_dtype, .. } => (!types.is_empty(), *result_dtype),
         Op::Binary(Binary::Add | Binary::Sub | Binary::Mul | Binary::Maximum | Binary::Minimum) => {
             (
-                types.len() == 2 && all(first) && first != DType::BF16,
+                types.len() == 2
+                    && all(first)
+                    && matches!(first, DType::I32 | DType::F16 | DType::BF16 | DType::F32),
                 first,
             )
         }

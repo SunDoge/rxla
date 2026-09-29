@@ -283,12 +283,18 @@ fn apply_quantized_linear(scope: &Cx, input: &Tensor, layer: &QuantizedLinear) -
         .param("scale", [layer.out_features, groups])?
         .reshape([layer.out_features, groups, 1])?
         .broadcast_to([layer.out_features, groups, layer.group_size])?;
-    Ok(input.linear(
-        &weight
-            .mul(&scale)?
-            .reshape([layer.out_features, in_features])?,
-        None,
-    )?)
+    let weight = weight
+        .mul(&scale)?
+        .reshape([layer.out_features, in_features])?;
+    let compute_dtype = scope.layer_compute_dtype();
+    if compute_dtype == DType::F32 {
+        Ok(input.linear(&weight, None)?)
+    } else {
+        Ok(input
+            .cast(compute_dtype)?
+            .linear(&weight.cast(compute_dtype)?, None)?
+            .cast(DType::F32)?)
+    }
 }
 
 impl Linear {
@@ -858,7 +864,19 @@ fn apply_linear(cx: &Cx, input: &Tensor, out_features: i64, bias: bool) -> Resul
             )
         })
         .transpose()?;
-    Ok(input.linear(&weight, bias.as_ref())?)
+    let compute_dtype = cx.layer_compute_dtype();
+    if compute_dtype == DType::F32 {
+        Ok(input.linear(&weight, bias.as_ref())?)
+    } else {
+        let bias = bias
+            .as_ref()
+            .map(|bias| bias.cast(compute_dtype))
+            .transpose()?;
+        Ok(input
+            .cast(compute_dtype)?
+            .linear(&weight.cast(compute_dtype)?, bias.as_ref())?
+            .cast(DType::F32)?)
+    }
 }
 
 /// Apply an NHWC convolution with checkpoint-native OIHW parameters at the
@@ -1125,6 +1143,25 @@ mod tests {
             .unwrap()
             .prepare()
             .unwrap();
+    }
+
+    #[test]
+    fn linear_layers_honor_bf16_compute_with_f32_boundaries() {
+        let model = |cx: Cx| {
+            let cx = cx.with_layer_compute_dtype(DType::BF16)?;
+            let input = cx.input([2, 64])?;
+            let dense = input.through(cx.scope("dense")?, Linear::new(32))?;
+            dense.through(cx.scope("quantized")?, QuantizedLinear::new(16, 32))
+        };
+        let (schema, output) = init(model).unwrap();
+        assert_eq!(output.dtype(), DType::F32);
+        assert_eq!(schema.get("dense.weight").unwrap().dtype(), DType::F32);
+        assert_eq!(schema.get("quantized.weight").unwrap().dtype(), DType::U8);
+        let applied = apply(&schema, model).unwrap();
+        let lowered = applied.prepare().unwrap();
+        let stablehlo = std::str::from_utf8(lowered.code()).unwrap();
+        assert!(stablehlo.contains("xbf16"));
+        assert!(stablehlo.matches("stablehlo.dot_general").count() >= 2);
     }
 
     #[test]

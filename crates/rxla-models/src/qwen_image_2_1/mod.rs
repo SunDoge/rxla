@@ -30,6 +30,7 @@ pub struct QwenImage21Config {
     latent_height: i64,
     latent_width: i64,
     parameter_dtype: DType,
+    compute_dtype: DType,
     quant_group_size: Option<i64>,
 }
 
@@ -50,6 +51,7 @@ impl QwenImage21Config {
             latent_height,
             latent_width,
             parameter_dtype: DType::BF16,
+            compute_dtype: DType::BF16,
             quant_group_size: None,
         }
     }
@@ -80,6 +82,7 @@ impl QwenImage21Config {
             latent_height,
             latent_width,
             parameter_dtype: DType::F32,
+            compute_dtype: DType::F32,
             quant_group_size: None,
         }
     }
@@ -89,6 +92,14 @@ impl QwenImage21Config {
             quant_group_size: Some(8),
             ..Self::tiny(latent_height, latent_width)
         }
+    }
+
+    /// Select the arithmetic used by affine projections while retaining F32
+    /// tensor boundaries. Official inference defaults to BF16; F32 is useful
+    /// for numerical diagnostics.
+    pub fn compute_dtype(mut self, dtype: DType) -> Self {
+        self.compute_dtype = dtype;
+        self
     }
 
     fn head_dim(&self) -> i64 {
@@ -120,7 +131,8 @@ impl QwenImage21Config {
             && self.rope_theta > 0.0
             && self.epsilon.is_finite()
             && self.epsilon > 0.0
-            && matches!(self.parameter_dtype, DType::BF16 | DType::F32);
+            && matches!(self.parameter_dtype, DType::BF16 | DType::F32)
+            && matches!(self.compute_dtype, DType::BF16 | DType::F32);
         let valid = valid
             && self.quant_group_size.is_none_or(|group| {
                 group > 0
@@ -391,7 +403,9 @@ pub fn qwen_image_2_1_transformer(
     config: &QwenImage21Config,
 ) -> Result<Tensor> {
     config.validate()?;
-    let cx = cx.with_parameter_storage_dtype(config.parameter_dtype)?;
+    let cx = cx
+        .with_parameter_storage_dtype(config.parameter_dtype)?
+        .with_layer_compute_dtype(config.compute_dtype)?;
     let ([batch, image_tokens, image_width], [context_batch, text_tokens, context_width]) =
         (image.shape(), context.shape())
     else {
