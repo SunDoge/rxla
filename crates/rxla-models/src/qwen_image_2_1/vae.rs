@@ -139,6 +139,22 @@ pub fn qwen_image_2_1_vae_decoder(
     latent_height: i64,
     latent_width: i64,
 ) -> Result<Tensor> {
+    Ok(
+        qwen_image_2_1_vae_decoder_raw(cx, tokens, latent_height, latent_width)?
+            .clamp(-1.0, 1.0)?,
+    )
+}
+
+/// Decode Qwen-Image-2.1 latents without the final range clamp.
+///
+/// Tiled decoders must blend overlapping raw tiles before clamping once, which
+/// matches the official Diffusers VAE and avoids saturation seams.
+pub fn qwen_image_2_1_vae_decoder_raw(
+    cx: Cx,
+    tokens: &Tensor,
+    latent_height: i64,
+    latent_width: i64,
+) -> Result<Tensor> {
     let [batch, sequence, channels] = tokens.shape() else {
         return Err(Error::InvalidModel {
             kind: ModelDefinitionError::InvalidQwenImage21VaeLatent,
@@ -177,7 +193,7 @@ pub fn qwen_image_2_1_vae_decoder(
         )?;
     }
     let hidden = rms_norm(decoder.scope("norm_out")?, &hidden)?.silu()?;
-    Ok(conv(decoder.scope("conv_out")?, &hidden, OUTPUT_CHANNELS, 3)?.clamp(-1.0, 1.0)?)
+    conv(decoder.scope("conv_out")?, &hidden, OUTPUT_CHANNELS, 3)
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use rand_distr::{Distribution, StandardNormal};
 use rxla_core::{Buffer, CacheLimits, Client, Compiler};
 use rxla_models::qwen_image_2_1::{
     QwenImage21Config, QwenImage21FlowScheduler, qwen_image_2_1_euler_step,
-    qwen_image_2_1_vae_decoder,
+    qwen_image_2_1_vae_decoder, qwen_image_2_1_vae_decoder_raw,
 };
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::SafeTensors;
@@ -40,6 +40,12 @@ struct Args {
     steps: usize,
     #[arg(long, default_value_t = 42)]
     seed: u64,
+    /// VAE tile side in output pixels. Larger images are decoded as overlapping tiles.
+    #[arg(long, default_value_t = 1024)]
+    vae_tile: u32,
+    /// VAE tile overlap in output pixels.
+    #[arg(long, default_value_t = 128)]
+    vae_overlap: u32,
 }
 
 #[derive(Deserialize)]
@@ -126,6 +132,131 @@ fn decode(
     Ok(image.to_vec::<f32>()?)
 }
 
+fn tile_starts(length: usize, tile: usize, stride: usize) -> Vec<usize> {
+    if length <= tile {
+        return vec![0];
+    }
+    let mut starts = (0..=length - tile).step_by(stride).collect::<Vec<_>>();
+    let final_start = length - tile;
+    if starts.last().copied() != Some(final_start) {
+        starts.push(final_start);
+    }
+    starts
+}
+
+fn axis_weight(position: usize, index: usize, starts: &[usize], tile: usize) -> f32 {
+    let mut weight = 1.0_f32;
+    if index > 0 {
+        let overlap = starts[index - 1] + tile - starts[index];
+        if position < overlap {
+            weight = weight.min((position + 1) as f32 / (overlap + 1) as f32);
+        }
+    }
+    if index + 1 < starts.len() {
+        let overlap = starts[index] + tile - starts[index + 1];
+        if position >= tile - overlap {
+            weight = weight.min((tile - position) as f32 / (overlap + 1) as f32);
+        }
+    }
+    weight
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_tiled(
+    client: &Client,
+    checkpoint_path: &PathBuf,
+    latent: &[f32],
+    latent_height: usize,
+    latent_width: usize,
+    tile_height: usize,
+    tile_width: usize,
+    stride_height: usize,
+    stride_width: usize,
+) -> Result<Vec<f32>> {
+    const CHANNELS: usize = 64;
+    const SCALE: usize = 16;
+    const OUTPUT_CHANNELS: usize = 4;
+    let tile_height_i64 = i64::try_from(tile_height)?;
+    let tile_width_i64 = i64::try_from(tile_width)?;
+    let tile_tokens_i64 = i64::try_from(tile_height * tile_width)?;
+    let model = Model::new(|cx: Cx, latent| {
+        qwen_image_2_1_vae_decoder_raw(cx, &latent, tile_height_i64, tile_width_i64)
+    })
+    .inputs(ModelInput::new([1, tile_tokens_i64, 64]))
+    .trace()?;
+    let mut checkpoint = SafeTensors::open(checkpoint_path)?;
+    let parameters = checkpoint.load_parameter_schema(client, model.schema())?;
+    let compiled = model.compile(&mut Compiler::new(client.clone(), CacheLimits::default()))?;
+    let runner = compiled.bind_parameters(parameters.bindings())?;
+    let y_starts = tile_starts(latent_height, tile_height, stride_height);
+    let x_starts = tile_starts(latent_width, tile_width, stride_width);
+    let output_height = latent_height * SCALE;
+    let output_width = latent_width * SCALE;
+    let mut accumulated = vec![0.0_f32; output_height * output_width * OUTPUT_CHANNELS];
+    let mut weights = vec![0.0_f32; output_height * output_width];
+    let output_tile_height = tile_height * SCALE;
+    let output_tile_width = tile_width * SCALE;
+    let output_y_starts = y_starts
+        .iter()
+        .map(|start| start * SCALE)
+        .collect::<Vec<_>>();
+    let output_x_starts = x_starts
+        .iter()
+        .map(|start| start * SCALE)
+        .collect::<Vec<_>>();
+    for (tile_y, &start_y) in y_starts.iter().enumerate() {
+        for (tile_x, &start_x) in x_starts.iter().enumerate() {
+            let mut tile = vec![0.0_f32; tile_height * tile_width * CHANNELS];
+            for y in 0..tile_height {
+                let source = ((start_y + y) * latent_width + start_x) * CHANNELS;
+                let target = y * tile_width * CHANNELS;
+                tile[target..target + tile_width * CHANNELS]
+                    .copy_from_slice(&latent[source..source + tile_width * CHANNELS]);
+            }
+            let tile = client.buffer(&[1, i64::try_from(tile_height * tile_width)?, 64], &tile)?;
+            let decoded: Buffer = runner.run(&tile)?;
+            let decoded = decoded.to_vec::<f32>()?;
+            for y in 0..output_tile_height {
+                let wy = axis_weight(y, tile_y, &output_y_starts, output_tile_height);
+                let output_y = start_y * SCALE + y;
+                for x in 0..output_tile_width {
+                    let wx = axis_weight(x, tile_x, &output_x_starts, output_tile_width);
+                    let weight = wy * wx;
+                    let output_x = start_x * SCALE + x;
+                    let output_pixel = output_y * output_width + output_x;
+                    let tile_pixel = y * output_tile_width + x;
+                    weights[output_pixel] += weight;
+                    for channel in 0..OUTPUT_CHANNELS {
+                        accumulated[output_pixel * OUTPUT_CHANNELS + channel] +=
+                            decoded[tile_pixel * OUTPUT_CHANNELS + channel] * weight;
+                    }
+                }
+            }
+            eprintln!(
+                "vae_tile={}/{} origin={}x{}",
+                tile_y * x_starts.len() + tile_x + 1,
+                y_starts.len() * x_starts.len(),
+                start_x * SCALE,
+                start_y * SCALE,
+            );
+        }
+    }
+    for (pixel, &weight) in accumulated
+        .as_chunks_mut::<OUTPUT_CHANNELS>()
+        .0
+        .iter_mut()
+        .zip(&weights)
+    {
+        if weight == 0.0 {
+            return Err("VAE tiling left an uncovered output pixel".into());
+        }
+        for channel in pixel {
+            *channel /= weight;
+        }
+    }
+    Ok(accumulated)
+}
+
 fn run(args: Args) -> Result<()> {
     if args.width == 0
         || args.height == 0
@@ -133,6 +264,13 @@ fn run(args: Args) -> Result<()> {
         || !args.height.is_multiple_of(16)
     {
         return Err("width and height must be positive multiples of 16".into());
+    }
+    if args.vae_tile == 0
+        || !args.vae_tile.is_multiple_of(16)
+        || args.vae_overlap >= args.vae_tile
+        || !args.vae_overlap.is_multiple_of(16)
+    {
+        return Err("VAE tile and overlap must be multiples of 16, with tile > overlap".into());
     }
     let client = unsafe { Client::load(&args.plugin) }?;
     let latent_height = i64::from(args.height / 16);
@@ -155,7 +293,24 @@ fn run(args: Args) -> Result<()> {
             *value = *value * vae_config.latents_std[channel] + vae_config.latents_mean[channel];
         }
     }
-    let values = decode(&client, &args.vae, &latent, latent_height, latent_width)?;
+    let values = if args.width <= args.vae_tile && args.height <= args.vae_tile {
+        decode(&client, &args.vae, &latent, latent_height, latent_width)?
+    } else {
+        let tile_height = usize::try_from((args.vae_tile / 16).min(args.height / 16))?;
+        let tile_width = usize::try_from((args.vae_tile / 16).min(args.width / 16))?;
+        let stride = usize::try_from((args.vae_tile - args.vae_overlap) / 16)?;
+        decode_tiled(
+            &client,
+            &args.vae,
+            &latent,
+            usize::try_from(latent_height)?,
+            usize::try_from(latent_width)?,
+            tile_height,
+            tile_width,
+            stride.min(tile_height),
+            stride.min(tile_width),
+        )?
+    };
     let pixels = values
         .into_iter()
         .map(|value| ((value + 1.0) * 127.5).round().clamp(0.0, 255.0) as u8)
@@ -169,4 +324,24 @@ fn run(args: Args) -> Result<()> {
 
 fn main() -> Result<()> {
     run(Args::parse())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feathered_tiles_cover_irregular_final_stride_with_unit_weight() {
+        let starts = tile_starts(128, 64, 48);
+        assert_eq!(starts, [0, 48, 64]);
+        let mut weights = [0.0_f32; 128];
+        for (index, &start) in starts.iter().enumerate() {
+            for position in 0..64 {
+                weights[start + position] += axis_weight(position, index, &starts, 64);
+            }
+        }
+        for weight in weights {
+            assert!((weight - 1.0).abs() < 1e-6, "partition weight {weight}");
+        }
+    }
 }
