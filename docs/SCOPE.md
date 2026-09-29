@@ -42,7 +42,9 @@ Tensor and Storage are now Arc-backed and `Send + Sync`; prepared snapshots rema
 the preferred serialization and worker-handoff boundary.
 CPU/CUDA managed-input and Tensor-first lazy evaluation paths pass. Compact
 CUDA/CUDA-managed DLPack allocations can be imported as zero-copy PJRT device
-views; DLPack export, non-compact device views, and donation remain pending.
+views. Stateless models support explicit, ownership-consuming input/output
+donation; automatic donation planning, DLPack export and non-compact device
+views remain pending.
 
 The development gate has an explicit `--quick` host-only mode for default-feature
 library checks/tests/Clippy. Native unit tests stay ignored and plugin paths are

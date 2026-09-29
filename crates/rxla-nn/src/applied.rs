@@ -34,6 +34,7 @@ pub struct ModelArguments<'a> {
 pub struct CompiledModel {
     model: AppliedModel,
     executable: Arc<Executable>,
+    donated_inputs: Vec<usize>,
 }
 
 /// A self-contained compiled model with owned, shared device-buffer handles.
@@ -41,6 +42,7 @@ pub struct BoundModel {
     model: AppliedModel,
     executable: Arc<Executable>,
     parameters: Vec<Option<Buffer>>,
+    donated_inputs: Vec<usize>,
 }
 
 /// A compiled parameter-free tensor program operating directly on PJRT
@@ -165,6 +167,7 @@ impl CompiledModel {
             model: self.model.clone(),
             executable: Arc::clone(&self.executable),
             parameters,
+            donated_inputs: self.donated_inputs.clone(),
         })
     }
 
@@ -204,6 +207,13 @@ impl BufferProgram {
     pub fn executable(&self) -> &Executable {
         self.model.executable()
     }
+
+    pub fn run_donating<O>(&self, inputs: Vec<Buffer>) -> Result<O>
+    where
+        O: ModelOutputValues,
+    {
+        self.model.run_donating(inputs)
+    }
 }
 
 impl BoundModel {
@@ -221,6 +231,31 @@ impl BoundModel {
             .collect::<Vec<_>>();
         let arguments = self.model.bind_ordered(&inputs, &parameters)?;
         let outputs = self.executable.execute(arguments.as_slice())?;
+        self.model.decode_outputs(outputs)
+    }
+
+    /// Execute by consuming model inputs selected for donation at compilation.
+    /// All supplied buffers are consumed so a successfully donated native
+    /// allocation cannot remain observable through this call site.
+    pub fn run_donating<O>(&self, inputs: Vec<Buffer>) -> Result<O>
+    where
+        O: ModelOutputValues,
+    {
+        {
+            let input_references = inputs.iter().collect::<Vec<_>>();
+            let parameter_references = self
+                .parameters
+                .iter()
+                .map(Option::as_ref)
+                .collect::<Vec<_>>();
+            self.model
+                .bind_ordered(&input_references, &parameter_references)?;
+        }
+        let mut arguments = inputs;
+        arguments.extend(self.parameters.iter().filter_map(Clone::clone));
+        let outputs = self
+            .executable
+            .execute_donating(arguments, &self.donated_inputs)?;
         self.model.decode_outputs(outputs)
     }
 
@@ -763,6 +798,41 @@ impl AppliedModel {
         Ok(CompiledModel {
             model: self.clone(),
             executable: self.compile_executable(compiler)?,
+            donated_inputs: Vec::new(),
+        })
+    }
+
+    /// Compile one-to-one aliases from model input indices to output indices.
+    /// A subsequent [`BoundModel::run_donating`] may transfer ownership of
+    /// those inputs to XLA for buffer reuse.
+    pub fn compile_donating(
+        &self,
+        compiler: &mut Compiler,
+        aliases: &[(usize, usize)],
+    ) -> Result<CompiledModel> {
+        ensure!(
+            !self.is_stateful(),
+            StatefulOperationSnafu {
+                operation: "compile_donating"
+            }
+        );
+        ensure!(
+            aliases
+                .iter()
+                .all(|(input, _)| *input < self.schema.inputs().len()),
+            InputCountSnafu {
+                expected: self.schema.inputs().len(),
+                actual: aliases
+                    .iter()
+                    .map(|(input, _)| input + 1)
+                    .max()
+                    .unwrap_or(0),
+            }
+        );
+        Ok(CompiledModel {
+            model: self.clone(),
+            executable: compiler.compile_many_donating(&self.graph, &self.outputs, aliases)?,
+            donated_inputs: aliases.iter().map(|(input, _)| *input).collect(),
         })
     }
 

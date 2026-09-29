@@ -171,3 +171,16 @@ The primary remaining performance target is the resident DiT gap, not offload.
 Profiling should focus on grouped-W8 dequantization/GEMM, attention lowering and
 layout conversions. Closing the 0.27-second four-step compute gap would improve
 both resident and offloaded serving without sacrificing RXLA's memory advantage.
+
+### Buffer-donation experiment
+
+RXLA now supports explicit input/output aliases and ownership-consuming PJRT
+execution, but the Qwen denoising latent is deliberately not donated. On the
+RTX 5080 batch-8 workload, forcing latent input 0 to alias output 0 constrained
+XLA's global buffer assignment: execution peaked at 9.07 GiB and then requested
+another 5.63 GiB, exhausting the 14 GiB allocator pool. The ordinary executable
+completes the same workload.
+
+Donation remains useful for small, isolated update programs and is verified on
+the CPU PJRT backend. It should be selected from measured buffer-assignment
+results, not inferred merely because an input and output have identical types.

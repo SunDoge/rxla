@@ -985,9 +985,12 @@ latency improvement over `to_vec::<T>()`.
 an execution error. Multiple submissions can be retained and waited in a different
 order. Each pending handle retains shared native ownership of the executable,
 inputs, outputs and client, so original handles can be dropped before waiting.
-Inputs remain non-donatable. Dropping a pending handle waits and discards its
-outputs/errors; it does not cancel execution. Forgetting it leaks these owners
-rather than freeing in-flight resources. Submission itself may block in the plugin.
+Ordinary `submit` marks every input non-donatable. Explicitly aliased stateless
+models instead use ownership-consuming `execute_donating`; selected inputs must
+be uniquely owned, while unselected inputs remain non-donatable. Dropping a
+pending handle waits and discards its outputs/errors; it does not cancel
+execution. Forgetting it leaks these owners rather than freeing in-flight
+resources. Submission itself may block in the plugin.
 This is not a Future or a Send/Sync handle and does not prove kernel overlap or
 better throughput. `execute` remains synchronous (submit then wait), and Session
 state commits remain synchronous. Shared ownership and submission bookkeeping add

@@ -2146,12 +2146,36 @@ impl Executable {
         self.submit(inputs)?.wait()
     }
 
+    /// Execute while transferring ownership of selected input buffers to the
+    /// executable. The executable must have matching input/output aliases.
+    /// Donated buffers must be uniquely owned; this API consumes every input so
+    /// Rust code cannot observe an invalid native buffer after submission.
+    pub fn execute_donating(
+        &self,
+        inputs: Vec<Buffer>,
+        donated_input_indices: &[usize],
+    ) -> Result<Vec<Buffer>> {
+        let references = inputs.iter().collect::<Vec<_>>();
+        let pending = self.submit_impl(&references, donated_input_indices, true)?;
+        drop(inputs);
+        pending.wait()
+    }
+
     /// Submit without an explicit device-completion wait. The plugin may still
     /// block during submission; neither asynchronous kernels nor overlap is
     /// guaranteed. All inputs are non-donatable and their native owners are
     /// retained until completion. Original Buffer/Executable/Client handles may
     /// be dropped after submission. PendingExecution is thread-affine, not Future.
     pub fn submit(&self, inputs: &[&Buffer]) -> Result<PendingExecution> {
+        self.submit_impl(inputs, &[], false)
+    }
+
+    fn submit_impl(
+        &self,
+        inputs: &[&Buffer],
+        donated_input_indices: &[usize],
+        require_unique_donations: bool,
+    ) -> Result<PendingExecution> {
         let _span =
             tracing::debug_span!("pjrt.submit", inputs = inputs.len(), outputs = self.outputs)
                 .entered();
@@ -2169,13 +2193,35 @@ impl Executable {
                 message: "buffers belong to a different client",
             }
         );
+        let mut donated = vec![false; inputs.len()];
+        for &index in donated_input_indices {
+            ensure!(
+                index < inputs.len() && !donated[index],
+                InvalidArgumentSnafu {
+                    message: format!("invalid or duplicate donated input index {index}"),
+                }
+            );
+            if require_unique_donations {
+                ensure!(
+                    Arc::strong_count(&inputs[index].inner) == 1,
+                    InvalidArgumentSnafu {
+                        message: format!("donated input {index} is not uniquely owned"),
+                    }
+                );
+            }
+            donated[index] = true;
+        }
         let retained_inputs: Vec<_> = inputs.iter().map(|b| b.inner.clone()).collect();
         let plugin = &self.inner.client.plugin;
         let pointers: Vec<_> = inputs.iter().map(|b| b.inner.raw.as_ptr()).collect();
         let input_list = pointers.as_ptr();
         let mut output = vec![ptr::null_mut(); self.outputs];
         let output_list = output.as_mut_ptr();
-        let non_donated: Vec<i64> = (0..inputs.len() as i64).collect();
+        let non_donated: Vec<i64> = donated
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &donated)| (!donated).then_some(index as i64))
+            .collect();
         let mut options = args!(PJRT_ExecuteOptions, PJRT_ExecuteOptions_STRUCT_SIZE);
         options.non_donatable_input_indices = non_donated.as_ptr();
         options.num_non_donatable_input_indices = non_donated.len();

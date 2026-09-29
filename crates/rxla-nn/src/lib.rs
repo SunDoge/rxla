@@ -2092,4 +2092,32 @@ mod tests {
             assert_eq!(output.to_vec::<f32>().unwrap(), [10., 12., 0., 0.]);
         }
     }
+
+    #[test]
+    #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
+    fn donating_execution_consumes_an_aliased_input() {
+        let client = unsafe {
+            Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
+        }
+        .unwrap();
+        let model = Model::new(|_: Cx, input: Tensor| -> Result<_> { Ok(input.add_scalar(1.0)?) })
+            .inputs(ModelInput::new([4]))
+            .trace()
+            .unwrap();
+        let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
+        let runner = model
+            .compile_donating(&mut compiler, &[(0, 0)])
+            .unwrap()
+            .bind_buffer_program()
+            .unwrap();
+        let input = client.buffer(&[4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let remaining_owner = input.clone();
+        let error = match runner.run_donating::<Buffer>(vec![input]) {
+            Ok(_) => panic!("shared donation unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("not uniquely owned"));
+        let output: Buffer = runner.run_donating(vec![remaining_owner]).unwrap();
+        assert_eq!(output.to_vec::<f32>().unwrap(), [2.0, 3.0, 4.0, 5.0]);
+    }
 }

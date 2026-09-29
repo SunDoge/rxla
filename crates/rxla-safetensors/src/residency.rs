@@ -222,6 +222,15 @@ impl ResidentBoundModel {
     {
         self.model.run(inputs)
     }
+
+    /// Execute while transferring ownership of inputs selected for donation
+    /// when the model was compiled.
+    pub fn run_donating<O>(&self, inputs: Vec<Buffer>) -> std::result::Result<O, rxla_nn::Error>
+    where
+        O: ModelOutputValues,
+    {
+        self.model.run_donating(inputs)
+    }
 }
 
 #[cfg(test)]

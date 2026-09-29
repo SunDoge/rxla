@@ -117,6 +117,72 @@ impl LoweredProgram {
             outputs,
         }
     }
+
+    fn with_input_output_aliases(mut self, aliases: &[(usize, usize)]) -> Result<Self> {
+        let mut input_indices = std::collections::BTreeSet::new();
+        let mut output_indices = std::collections::BTreeSet::new();
+        for &(input, output) in aliases {
+            let input_type = self
+                .inputs
+                .get(input)
+                .ok_or_else(|| err(format!("donated input index {input} is out of bounds")))?;
+            let output_type = self
+                .outputs
+                .get(output)
+                .ok_or_else(|| err(format!("aliased output index {output} is out of bounds")))?;
+            if input_type != output_type {
+                return Err(err(format!(
+                    "donated input {input} and output {output} have different tensor types"
+                )));
+            }
+            if !input_indices.insert(input) || !output_indices.insert(output) {
+                return Err(err("input-output donation aliases must be one-to-one"));
+            }
+        }
+        let mut code = String::from_utf8(self.code)
+            .map_err(|error| err(format!("StableHLO is not UTF-8: {error}")))?;
+        for &(input, output) in aliases {
+            code = annotate_main_argument_alias(&code, input, output)?;
+        }
+        self.code = code.into_bytes();
+        Ok(self)
+    }
+}
+
+fn annotate_main_argument_alias(code: &str, input: usize, output: usize) -> Result<String> {
+    let marker = "func.func public @main(";
+    let start = code
+        .find(marker)
+        .map(|index| index + marker.len())
+        .ok_or_else(|| err("StableHLO has no public @main function"))?;
+    let end = code[start..]
+        .find(')')
+        .map(|index| start + index)
+        .ok_or_else(|| err("StableHLO public @main argument list is unterminated"))?;
+    let arguments = &code[start..end];
+    let needle = format!("%arg{input}:");
+    let argument_start = arguments
+        .find(&needle)
+        .ok_or_else(|| err(format!("StableHLO has no argument {input}")))?;
+    let tail = &arguments[argument_start..];
+    let argument_end = tail.find(", %arg").unwrap_or(tail.len());
+    let argument = &tail[..argument_end];
+    let alias = format!("tf.aliasing_output = {output} : i32");
+    let annotated = if let Some(open) = argument.find('{') {
+        let mut value = argument.to_owned();
+        value.insert_str(open + 1, &format!("{alias}, "));
+        value
+    } else {
+        format!("{argument} {{{alias}}}")
+    };
+    let absolute_start = start + argument_start;
+    let absolute_end = absolute_start + argument.len();
+    Ok(format!(
+        "{}{}{}",
+        &code[..absolute_start],
+        annotated,
+        &code[absolute_end..]
+    ))
 }
 
 impl Graph {
@@ -463,6 +529,20 @@ impl Compiler {
         self.compile_graph_outputs(&tracer.graph, outputs)
     }
 
+    /// Compile with one-to-one input/output aliases. Each aliased input may be
+    /// donated at execution and must have exactly the output's tensor type.
+    pub fn compile_many_donating(
+        &mut self,
+        tracer: &Tracer,
+        outputs: &[Tensor],
+        aliases: &[(usize, usize)],
+    ) -> Result<Arc<Executable>> {
+        let lowered = tracer
+            .graph
+            .direct_lowered_for(outputs, true, self.lowering_target()?)?;
+        self.compile_lowered(&lowered.with_input_output_aliases(aliases)?)
+    }
+
     pub(crate) fn compile_graph_outputs(
         &mut self,
         graph: &Graph,
@@ -609,5 +689,18 @@ mod tests {
         assert_eq!(MemoryFittingLevel::Default.proto(), 0);
         assert_eq!(MemoryFittingLevel::O2.proto(), EffortLevel::EffortO2 as i32);
         assert_eq!(MemoryFittingLevel::O3.proto(), EffortLevel::EffortO3 as i32);
+    }
+
+    #[test]
+    fn donation_aliases_annotate_plain_and_attributed_main_arguments() {
+        let plain = "module {\n  func.func public @main(%arg0: tensor<4xf32>, %arg1: tensor<4xf32>) -> tensor<4xf32> {\n  }\n}\n";
+        let plain = annotate_main_argument_alias(plain, 1, 0).unwrap();
+        assert!(plain.contains("%arg1: tensor<4xf32> {tf.aliasing_output = 0 : i32}"));
+
+        let attributed = "module {\n  func.func public @main(%arg0: tensor<4xf32> {sdy.sharding = #sdy.sharding<@mesh, [{\"x\"}]>}) -> tensor<4xf32> {\n  }\n}\n";
+        let attributed = annotate_main_argument_alias(attributed, 0, 0).unwrap();
+        assert!(
+            attributed.contains("%arg0: tensor<4xf32> {tf.aliasing_output = 0 : i32, sdy.sharding")
+        );
     }
 }

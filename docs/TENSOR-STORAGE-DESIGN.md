@@ -22,7 +22,10 @@ shape allocation's refcount. Attaching storage returns a new descriptor; other
 clones retain their previous binding. Distinct descriptors can share a storage
 owner while describing distinct host views. Storage identity is not a universal
 alias detector: independently wrapping the same external allocation may create
-distinct owners. No writable aliases, donation or copy-on-write are provided.
+distinct owners. Tensor storage still exposes no writable aliases or
+copy-on-write. Explicit compiled input/output aliasing can donate uniquely owned
+runtime `Buffer` values, but it does not mutate or donate shared `Tensor`
+storage.
 
 The descriptor is immutable and exposed only as an opaque Deref target; its
 fields are crate-private and no DerefMut exists. Arc is deliberate: std already
@@ -149,9 +152,10 @@ callback owns the DLPack handle, and callers may provide the native producer
 stream. Other device kinds and non-compact layouts remain rejected rather than
 pretending a device pointer is host memory.
 
-Still pending: general layout-aware native views, DLPack export, donation, and
-typed host-storage upload optimization. No intrusive pointer implementation is
-included.
+Still pending: general layout-aware native views, DLPack export, automatic
+donation planning, and typed host-storage upload optimization. Explicit
+ownership-consuming `Buffer` donation is available for compiled stateless
+models. No intrusive pointer implementation is included.
 
 ## References and what was adopted
 

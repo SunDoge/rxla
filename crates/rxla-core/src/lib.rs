@@ -1055,6 +1055,19 @@ impl Executable {
         self.validate_inputs(inputs)?;
         Ok(self.raw.execute(inputs)?)
     }
+    /// Execute with owned buffers and donate the selected input allocations.
+    /// The executable must have been compiled with matching aliases.
+    pub fn execute_donating(
+        &self,
+        inputs: Vec<Buffer>,
+        donated_input_indices: &[usize],
+    ) -> Result<Vec<Buffer>> {
+        {
+            let references = inputs.iter().collect::<Vec<_>>();
+            self.validate_inputs(&references)?;
+        }
+        Ok(self.raw.execute_donating(inputs, donated_input_indices)?)
+    }
     /// Replicate complete logical inputs across every executable device, run a
     /// multi-device SPMD executable, and return the first replica's complete
     /// logical outputs. This requires replicated program boundaries; it is the
