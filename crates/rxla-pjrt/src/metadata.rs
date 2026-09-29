@@ -54,6 +54,24 @@ unsafe fn copy_string(data: *const std::os::raw::c_char, len: usize) -> Result<S
 }
 
 impl Client {
+    /// Default execution memory of this client's selected device.
+    pub fn default_memory(&self) -> Result<Memory> {
+        let plugin = &self.0.plugin;
+        let result = pjrt_call!(
+            plugin,
+            PJRT_Device_DefaultMemory,
+            PJRT_Device_DefaultMemory_Args,
+            PJRT_Device_DefaultMemory_Args_STRUCT_SIZE,
+            device = self.0.device,
+        );
+        Ok(Memory {
+            client: self.0.clone(),
+            raw: NonNull::new(result.memory).context(InvalidPluginDataSnafu {
+                message: "selected device has null default memory",
+            })?,
+        })
+    }
+
     /// Addressable memory spaces exposed by this PJRT client.
     pub fn memories(&self) -> Result<Vec<Memory>> {
         let plugin = &self.0.plugin;
