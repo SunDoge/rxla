@@ -660,12 +660,18 @@ mod tests {
     fn official_w8_step_compiles_on_cuda() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let plugin = std::env::var("PJRT_CUDA_PLUGIN_PATH")?;
         let client = unsafe { Client::load(plugin) }?;
-        let config = QwenImage21Config::official_w8(32, 32);
+        let latent_side = std::env::var("QWEN_IMAGE_TEST_LATENT_SIDE")
+            .ok()
+            .map(|value| value.parse::<i64>())
+            .transpose()?
+            .unwrap_or(32);
+        let image_tokens = latent_side * latent_side;
+        let config = QwenImage21Config::official_w8(latent_side, latent_side);
         let model = Model::new(|cx: Cx, sample, timestep, step_size, context| {
             qwen_image_2_1_euler_step(cx, &sample, &timestep, &step_size, &context, &config)
         })
         .inputs((
-            ModelInput::new([1, 1024, 64]),
+            ModelInput::new([1, image_tokens, 64]),
             ModelInput::new([1]),
             ModelInput::new([1]),
             ModelInput::new([1, 32, 4096]),
