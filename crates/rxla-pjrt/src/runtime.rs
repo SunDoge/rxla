@@ -1607,6 +1607,24 @@ impl Buffer {
         Arc::ptr_eq(&self.inner.client, &client.0)
     }
 
+    /// Wait until all work producing this buffer has completed.
+    ///
+    /// Copies and executable outputs may return a handle before their device
+    /// work finishes. A serving scheduler can enqueue a prefetch, perform
+    /// independent CPU work, and then account for only the unhidden transfer
+    /// tail at this synchronization point.
+    pub fn block_until_ready(&self) -> Result<()> {
+        let plugin = &self.inner.client.plugin;
+        let event = pjrt_call!(
+            plugin,
+            PJRT_Buffer_ReadyEvent,
+            PJRT_Buffer_ReadyEvent_Args,
+            PJRT_Buffer_ReadyEvent_Args_STRUCT_SIZE,
+            buffer = self.inner.raw.as_ptr(),
+        );
+        plugin.wait(event.event)
+    }
+
     /// Copy this buffer to another addressable device owned by the same client.
     ///
     /// PJRT performs the transfer directly; no host allocation or download is

@@ -53,8 +53,10 @@ fn buffer_round_trips_through_pinned_host_memory() {
         .expect("buffer memory is addressable");
 
     let evicted = source.copy_to_memory(pinned).unwrap();
+    evicted.block_until_ready().unwrap();
     assert!(evicted.memory_info().unwrap().kind.contains("pinned_host"));
     let restored = evicted.copy_to_memory(device).unwrap();
+    restored.block_until_ready().unwrap();
     assert_eq!(restored.memory_info().unwrap().id, device_id);
     assert_eq!(restored.to_vec::<f32>().unwrap(), [1.0, -2.0, 3.5, 0.0]);
 }
