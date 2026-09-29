@@ -177,13 +177,11 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
     };
     let load_time = load_start.elapsed();
     let prefetch_start = Instant::now();
-    let prefetched;
-    let parameters = if let Some(offloaded) = &offloaded {
+    let prefetched = if let Some(offloaded) = &offloaded {
         let (_, device) = cuda_offload_memories(client)?;
-        prefetched = offloaded.prefetch_to(&device)?;
-        &prefetched
+        Some(offloaded.prefetch_to(&device)?)
     } else {
-        resident.as_ref().expect("resident branch initialized")
+        None
     };
     let prefetch_time = prefetch_start.elapsed();
     let compile_start = Instant::now();
@@ -194,7 +192,17 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
     }
     let compiled = model.compile(&mut compiler)?;
     let compile_time = compile_start.elapsed();
-    let runner = compiled.bind_parameters(parameters.bindings())?;
+    let prefetch_wait_start = Instant::now();
+    if let Some(prefetched) = &prefetched {
+        prefetched.block_until_ready()?;
+    }
+    let prefetch_wait_time = prefetch_wait_start.elapsed();
+    let bindings = match (&prefetched, &resident) {
+        (Some(prefetched), None) => prefetched.bindings(),
+        (None, Some(resident)) => resident.bindings(),
+        _ => return Err("invalid transformer residency state".into()),
+    };
+    let runner = compiled.bind_parameters(bindings)?;
     let context = client.buffer(&prompt.shape, &prompt.values)?;
     let mut random = ChaCha8Rng::seed_from_u64(options.seed);
     let initial = (0..image_tokens * 64)
@@ -214,7 +222,7 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
     }
     let execute_time = execute_start.elapsed();
     eprintln!(
-        "denoise mode={} residency={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} prefetch={prefetch_time:.3?} execute={execute_time:.3?} steps={}",
+        "denoise mode={} residency={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} prefetch-submit={prefetch_time:.3?} prefetch-tail={prefetch_wait_time:.3?} execute={execute_time:.3?} steps={}",
         if options.device_loop {
             "device-loop"
         } else {

@@ -25,6 +25,17 @@ pub struct OffloadedSchemaBuffers {
     payload_bytes: usize,
 }
 
+/// A device-resident copy whose source offload bundle remains borrowed.
+///
+/// PJRT transfers are asynchronous, so retaining the source until this value
+/// is dropped makes the source/destination lifetime relationship explicit even
+/// for backends that do not internally retain the source allocation.
+pub struct PrefetchedSchemaBuffers<'offload> {
+    buffers: SchemaBuffers,
+    payload_bytes: usize,
+    _source: std::marker::PhantomData<&'offload OffloadedSchemaBuffers>,
+}
+
 impl SchemaBuffers {
     /// Borrow named checkpoint buffers in the form accepted by
     /// `rxla_nn::AppliedModel::bind`.
@@ -134,7 +145,7 @@ impl OffloadedSchemaBuffers {
     /// Keeping the source is useful for request-oriented serving: dropping the
     /// returned bundle evicts the device copy, while the decoded pinned-host
     /// checkpoint remains ready for the next request.
-    pub fn prefetch_to(&self, memory: &Memory) -> Result<SchemaBuffers> {
+    pub fn prefetch_to(&self, memory: &Memory) -> Result<PrefetchedSchemaBuffers<'_>> {
         fn copy(buffers: &[(String, Buffer)], memory: &Memory) -> Result<Vec<(String, Buffer)>> {
             buffers
                 .iter()
@@ -147,9 +158,13 @@ impl OffloadedSchemaBuffers {
                 .collect()
         }
 
-        Ok(SchemaBuffers {
-            parameters: copy(&self.buffers.parameters, memory)?,
-            states: copy(&self.buffers.states, memory)?,
+        Ok(PrefetchedSchemaBuffers {
+            buffers: SchemaBuffers {
+                parameters: copy(&self.buffers.parameters, memory)?,
+                states: copy(&self.buffers.states, memory)?,
+            },
+            payload_bytes: self.payload_bytes,
+            _source: std::marker::PhantomData,
         })
     }
 
@@ -166,6 +181,34 @@ impl OffloadedSchemaBuffers {
                     .map_err(|source| Error::Runtime { source })
             })
             .transpose()
+    }
+}
+
+impl PrefetchedSchemaBuffers<'_> {
+    pub fn buffers(&self) -> &SchemaBuffers {
+        &self.buffers
+    }
+
+    pub fn bindings(&self) -> Vec<(&str, &Buffer)> {
+        self.buffers.bindings()
+    }
+
+    pub fn state_bindings(&self) -> Vec<(&str, &Buffer)> {
+        self.buffers.state_bindings()
+    }
+
+    pub fn payload_bytes(&self) -> usize {
+        self.payload_bytes
+    }
+
+    /// Wait for all asynchronous prefetch copies to become usable.
+    pub fn block_until_ready(&self) -> Result<()> {
+        for (_, buffer) in self.buffers.parameters.iter().chain(&self.buffers.states) {
+            buffer
+                .block_until_ready()
+                .map_err(|source| Error::Runtime { source })?;
+        }
+        Ok(())
     }
 }
 

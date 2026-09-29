@@ -11,7 +11,7 @@ mod model;
 use half::{bf16, f16};
 use memmap2::{Mmap, MmapOptions};
 #[cfg(feature = "model")]
-pub use model::{OffloadedSchemaBuffers, SchemaBuffers};
+pub use model::{OffloadedSchemaBuffers, PrefetchedSchemaBuffers, SchemaBuffers};
 #[cfg(all(feature = "model", feature = "export"))]
 pub use model::{save_model_new, save_parameter_selection_new, save_training_state_new};
 #[cfg(feature = "model")]
