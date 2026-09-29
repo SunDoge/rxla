@@ -183,7 +183,8 @@ pub fn qwen_image_2_1_vae_decoder(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rxla_nn::{Cx, Model};
+    use rxla_core::{CacheLimits, Client, Compiler};
+    use rxla_nn::{Cx, Model, ModelInput};
 
     #[test]
     fn decoder_schema_matches_official_checkpoint_header() {
@@ -222,5 +223,25 @@ mod tests {
             [1152, 1, 1]
         );
         model.prepare().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a trusted PJRT_CUDA_PLUGIN_PATH and compiles the complete VAE decoder"]
+    fn official_decoder_compiles_on_cuda() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let plugin = std::env::var("PJRT_CUDA_PLUGIN_PATH")?;
+        let client = unsafe { Client::load(plugin) }?;
+        let latent_side = std::env::var("QWEN_IMAGE_TEST_LATENT_SIDE")
+            .ok()
+            .map(|value| value.parse::<i64>())
+            .transpose()?
+            .unwrap_or(32);
+        let image_tokens = latent_side * latent_side;
+        let model = Model::new(|cx: Cx, latent| {
+            qwen_image_2_1_vae_decoder(cx, &latent, latent_side, latent_side)
+        })
+        .inputs(ModelInput::new([1, image_tokens, LATENT_CHANNELS]))
+        .trace()?;
+        model.compile(&mut Compiler::new(client, CacheLimits::default()))?;
+        Ok(())
     }
 }
