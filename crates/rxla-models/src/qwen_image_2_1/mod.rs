@@ -456,6 +456,28 @@ pub fn qwen_image_2_1_transformer(
     )
 }
 
+/// One reusable device-resident Qwen-Image-2.1 FlowMatch Euler step.
+/// `step_size` is `next_sigma - sigma` with shape `[batch]`.
+pub fn qwen_image_2_1_euler_step(
+    cx: Cx,
+    sample: &Tensor,
+    timestep: &Tensor,
+    step_size: &Tensor,
+    context: &Tensor,
+    config: &QwenImage21Config,
+) -> Result<Tensor> {
+    let prediction = qwen_image_2_1_transformer(cx, sample, timestep, context, config)?;
+    if step_size.dtype() != DType::F32 || step_size.shape() != [sample.shape()[0]] {
+        return Err(Error::InvalidModel {
+            kind: ModelDefinitionError::InvalidQwenImage21Input,
+        });
+    }
+    let coefficient = step_size
+        .reshape([sample.shape()[0], 1, 1])?
+        .broadcast_to(sample.shape())?;
+    Ok(sample.add(&prediction.mul(&coefficient)?)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,5 +598,22 @@ mod tests {
             })
             .sum::<i64>();
         assert!(storage_bytes < 7_700_000_000, "{storage_bytes}");
+    }
+
+    #[test]
+    fn reusable_flow_step_has_one_parameter_tree() {
+        let config = QwenImage21Config::tiny_w8(2, 3);
+        let model = Model::new(|cx: Cx| {
+            let image = cx.input([1, 6, 8])?;
+            let timestep = cx.input([1])?;
+            let step_size = cx.input([1])?;
+            let context = cx.input([1, 5, 24])?;
+            qwen_image_2_1_euler_step(cx, &image, &timestep, &step_size, &context, &config)
+        })
+        .trace()
+        .unwrap();
+        assert_eq!(model.outputs()[0].shape(), [1, 6, 8]);
+        assert_eq!(model.schema().parameters().len(), 49);
+        model.prepare().unwrap();
     }
 }
