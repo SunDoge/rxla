@@ -1,4 +1,40 @@
-use rxla_core::{Client, Tracer};
+use rxla_core::{CacheLimits, Client, Compiler, DType, Tracer};
+
+#[test]
+#[ignore = "requires trusted PJRT_CUDA_PLUGIN_PATH"]
+fn real_cudnn_cross_attention_matches_portable_attention() {
+    let client = unsafe { Client::load(std::env::var("PJRT_CUDA_PLUGIN_PATH").unwrap()) }.unwrap();
+    let g = Tracer::default();
+    let q = g.input([1, 1, 512, 64]).unwrap();
+    let k = g.input([1, 1, 544, 64]).unwrap();
+    let v = g.input([1, 1, 544, 64]).unwrap();
+    let output = q.scaled_dot_product_attention(&k, &v, None, None).unwrap();
+    let mut portable = Compiler::new(client.clone(), CacheLimits::default());
+    let mut fused = Compiler::new(client, CacheLimits::default())
+        .with_compute_dtype(DType::BF16)
+        .with_cudnn_attention(true);
+    let portable = portable
+        .compile_many(&g, std::slice::from_ref(&output))
+        .unwrap();
+    let fused = fused.compile_many(&g, &[output]).unwrap();
+    let query = (0..512 * 64)
+        .map(|index| ((index * 17 % 101) as f32 - 50.0) / 100.0)
+        .collect::<Vec<_>>();
+    let key = (0..544 * 64)
+        .map(|index| ((index * 29 % 103) as f32 - 51.0) / 100.0)
+        .collect::<Vec<_>>();
+    let value = (0..544 * 64)
+        .map(|index| ((index * 31 % 107) as f32 - 53.0) / 53.0)
+        .collect::<Vec<_>>();
+    let expected = portable.run(&[&query, &key, &value]).unwrap();
+    let actual = fused.run(&[&query, &key, &value]).unwrap();
+    let maximum = actual
+        .iter()
+        .zip(expected)
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(maximum < 0.01, "maximum absolute error {maximum}");
+}
 
 #[test]
 fn attention_validation_and_broadcast_shapes() {

@@ -671,7 +671,11 @@ mod tests {
             ModelInput::new([1, 32, 4096]),
         ))
         .trace()?;
-        model.compile(&mut Compiler::new(client, CacheLimits::default()))?;
+        model.compile(
+            &mut Compiler::new(client, CacheLimits::default())
+                .with_compute_dtype(DType::BF16)
+                .with_cudnn_attention(true),
+        )?;
         Ok(())
     }
 }

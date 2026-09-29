@@ -178,12 +178,21 @@ fn low_precision_ordered_and_gather_regions_follow_operand_dtype() {
 #[test]
 fn cuda_attention_matches_jax_cudnn_logical_abi() {
     let mut program = ProgramIr::default();
-    let ty = TensorType::static_shape(vec![1, 2, 512, 64], DType::F32);
-    let query = program.append(&Op::Parameter(0), &[], &ty).unwrap();
-    let key = program.append(&Op::Parameter(1), &[], &ty).unwrap();
-    let value = program.append(&Op::Parameter(2), &[], &ty).unwrap();
+    let query_ty = TensorType::static_shape(vec![1, 2, 512, 64], DType::F32);
+    let key_value_ty = TensorType::static_shape(vec![1, 2, 544, 64], DType::F32);
+    let query = program.append(&Op::Parameter(0), &[], &query_ty).unwrap();
+    let key = program
+        .append(&Op::Parameter(1), &[], &key_value_ty)
+        .unwrap();
+    let value = program
+        .append(&Op::Parameter(2), &[], &key_value_ty)
+        .unwrap();
     let attention = program
-        .append(&Op::Attention { scale: 0.125 }, &[query, key, value], &ty)
+        .append(
+            &Op::Attention { scale: 0.125 },
+            &[query, key, value],
+            &query_ty,
+        )
         .unwrap();
 
     let snapshot = SemanticProgram::capture(&program, &[attention], true).unwrap();
@@ -198,6 +207,7 @@ fn cuda_attention_matches_jax_cudnn_logical_abi() {
             .contains("result_layouts = [dense<[3, 1, 2, 0]>")
     );
     assert!(lowered.code.contains("tensor<1x512x2x64xf16>"));
+    assert!(lowered.code.contains("tensor<1x544x2x64xf16>"));
 }
 
 #[test]

@@ -81,7 +81,11 @@ fn denoise(
         ("group_size", "64"),
     ])?;
     let parameters = checkpoint.load_parameter_schema(client, model.schema())?;
-    let compiled = model.compile(&mut Compiler::new(client.clone(), CacheLimits::default()))?;
+    let compiled = model.compile(
+        &mut Compiler::new(client.clone(), CacheLimits::default())
+            .with_compute_dtype(rxla_core::DType::BF16)
+            .with_cudnn_attention(true),
+    )?;
     let runner = compiled.bind_parameters(parameters.bindings())?;
     let context = client.buffer(&prompt.shape, &prompt.values)?;
     let mut random = ChaCha8Rng::seed_from_u64(seed);

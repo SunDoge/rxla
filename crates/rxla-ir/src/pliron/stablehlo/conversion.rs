@@ -341,13 +341,6 @@ impl DialectConversion for RxlaToStableHlo {
                 && source_result_type.dims.len() == 4
                 && source_result_type.dims.iter().all(|&d| d > 0)
                 && source_result_type.dims[2] >= 512
-                && {
-                    let key_handle = key.get_type(ctx);
-                    let key_ref = key_handle.deref(ctx);
-                    key_ref
-                        .downcast_ref::<RankedTensorType>()
-                        .is_some_and(|ty| ty.shape.values()[2] == source_result_type.dims[2])
-                }
                 && source_result_type.dims[3] % 8 == 0
                 && source_result_type.dims[3] <= 256
             {
