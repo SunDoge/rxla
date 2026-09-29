@@ -205,6 +205,11 @@ impl Client {
 }
 
 impl Memory {
+    /// Client that owns this backend memory descriptor.
+    pub fn client(&self) -> Client {
+        Client(self.client.clone())
+    }
+
     /// Backend-defined identity and kind of this memory space.
     pub fn info(&self) -> Result<MemoryInfo> {
         let plugin = &self.client.plugin;

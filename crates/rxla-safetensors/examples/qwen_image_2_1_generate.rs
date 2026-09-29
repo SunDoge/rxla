@@ -64,6 +64,10 @@ struct Args {
     /// memory budget.
     #[arg(long)]
     offload_transformer: bool,
+    /// Device allocator space kept outside the weight pool for activations and
+    /// executable temporaries.
+    #[arg(long, default_value_t = 2048)]
+    offload_headroom_mib: usize,
 }
 
 #[derive(Deserialize)]
@@ -105,6 +109,7 @@ struct DenoiseOptions<'a> {
     device_loop: bool,
     cache_dir: Option<&'a PathBuf>,
     offload_transformer: bool,
+    offload_headroom_bytes: usize,
 }
 
 fn cuda_offload_memories(client: &Client) -> Result<(Memory, Memory)> {
@@ -174,7 +179,10 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
     let load_time = load_start.elapsed();
     let residency_pool = if let Some(offloaded) = &offloaded {
         let (_, device) = cuda_offload_memories(client)?;
-        Some(WeightResidencyPool::new(device, offloaded.payload_bytes()))
+        Some(
+            WeightResidencyPool::new(device, offloaded.payload_bytes())
+                .with_allocator_headroom(options.offload_headroom_bytes),
+        )
     } else {
         None
     };
@@ -439,6 +447,10 @@ fn run(args: Args) -> Result<()> {
             device_loop: args.device_loop,
             cache_dir: args.cache_dir.as_ref(),
             offload_transformer: args.offload_transformer,
+            offload_headroom_bytes: args
+                .offload_headroom_mib
+                .checked_mul(1024 * 1024)
+                .ok_or("offload headroom exceeds usize")?,
         },
     )?;
     let vae_config: VaeConfig = serde_json::from_slice(&fs::read(&args.vae_config)?)?;

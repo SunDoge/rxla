@@ -2,7 +2,7 @@
 
 use crate::{Error, OffloadedSchemaBuffers, PrefetchedSchemaBuffers, Result, SchemaBuffers};
 use rxla_nn::{BoundModel, CompiledModel, ModelInputValues, ModelOutputValues};
-use rxla_pjrt::{Buffer, Memory};
+use rxla_pjrt::{Buffer, Client, Memory};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -54,19 +54,32 @@ impl Drop for Reservation {
 /// allocator fragmentation, and buffers created outside the pool.
 #[derive(Clone)]
 pub struct WeightResidencyPool {
+    client: Client,
     execution_memory: Memory,
     budget: Arc<Budget>,
+    allocator_headroom_bytes: Option<usize>,
 }
 
 impl WeightResidencyPool {
     pub fn new(execution_memory: Memory, weight_budget_bytes: usize) -> Self {
         Self {
+            client: execution_memory.client(),
             execution_memory,
             budget: Arc::new(Budget {
                 limit: weight_budget_bytes,
                 reserved: AtomicUsize::new(0),
             }),
+            allocator_headroom_bytes: None,
         }
+    }
+
+    /// Require this many allocator bytes to remain available after each
+    /// prefetch. This is an advisory point-in-time guard for activations and
+    /// executable temporaries; the shared logical weight budget remains the
+    /// concurrency-safe authority for allocations made through this pool.
+    pub fn with_allocator_headroom(mut self, bytes: usize) -> Self {
+        self.allocator_headroom_bytes = Some(bytes);
+        self
     }
 
     pub fn budget_bytes(&self) -> usize {
@@ -89,6 +102,31 @@ impl WeightResidencyPool {
         &'pool self,
         source: &'offload OffloadedSchemaBuffers,
     ) -> Result<ResidentSchemaBuffers<'pool, 'offload>> {
+        if let Some(headroom) = self.allocator_headroom_bytes {
+            let stats = self
+                .client
+                .memory_stats()
+                .map_err(|source| Error::Runtime { source })?;
+            if let Some(limit) = stats
+                .bytes_limit
+                .and_then(|bytes| usize::try_from(bytes).ok())
+            {
+                let in_use = usize::try_from(stats.bytes_in_use).unwrap_or(usize::MAX);
+                let available = limit.saturating_sub(in_use);
+                let requested = source.payload_bytes().checked_add(headroom).ok_or(
+                    Error::DeviceMemoryPressure {
+                        requested: usize::MAX,
+                        available,
+                    },
+                )?;
+                if requested > available {
+                    return Err(Error::DeviceMemoryPressure {
+                        requested,
+                        available,
+                    });
+                }
+            }
+        }
         let reservation = self.budget.reserve(source.payload_bytes())?;
         let buffers = source.prefetch_to(&self.execution_memory)?;
         Ok(ResidentSchemaBuffers {

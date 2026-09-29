@@ -49,6 +49,11 @@ pub enum Error {
         "weight residency budget exceeded: requested {requested} bytes, {available} available"
     ))]
     ResidencyBudget { requested: usize, available: usize },
+    #[cfg(feature = "model")]
+    #[snafu(display(
+        "device allocator headroom exceeded: requested {requested} bytes including headroom, {available} available"
+    ))]
+    DeviceMemoryPressure { requested: usize, available: usize },
 }
 pub type Result<T> = std::result::Result<T, Error>;
 fn invalid(message: impl Into<String>) -> Error {
