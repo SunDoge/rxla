@@ -13,7 +13,11 @@ use rxla_models::qwen_image_2_1::{
 use rxla_nn::{Cx, Model, ModelInput};
 use rxla_safetensors::{SafeTensors, WeightResidencyPool};
 use serde::Deserialize;
-use std::{fs, path::PathBuf, time::Instant};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -40,6 +44,14 @@ struct Args {
     steps: usize,
     #[arg(long, default_value_t = 42)]
     seed: u64,
+    /// Number of images generated together by the transformer and VAE.
+    #[arg(long, default_value_t = 1)]
+    batch_size: usize,
+    /// Maximum number of latents decoded by the VAE at once. The transformer
+    /// can use a larger batch without requiring one large contiguous VAE
+    /// allocation.
+    #[arg(long, default_value_t = 4)]
+    vae_batch_size: usize,
     /// VAE tile side in output pixels. Larger images are decoded as overlapping tiles.
     #[arg(long, default_value_t = 1024)]
     vae_tile: u32,
@@ -106,6 +118,7 @@ struct DenoiseOptions<'a> {
     latent_width: i64,
     steps: usize,
     seed: u64,
+    batch_size: usize,
     device_loop: bool,
     cache_dir: Option<&'a PathBuf>,
     offload_transformer: bool,
@@ -134,6 +147,7 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
         return Err("prompt_embeds must have shape [1, tokens, 4096]".into());
     }
     let context_tokens = prompt.shape[1];
+    let batch = i64::try_from(options.batch_size)?;
     let image_tokens = options.latent_height * options.latent_width;
     let config = QwenImage21Config::official_w8(options.latent_height, options.latent_width);
     let schedule = QwenImage21FlowScheduler::new(options.steps, image_tokens as usize)?;
@@ -143,8 +157,8 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
             qwen_image_2_1_denoise(cx, &sample, &context, &schedule, &config)
         })
         .inputs((
-            ModelInput::new([1, image_tokens, 64]),
-            ModelInput::new([1, context_tokens, 4096]),
+            ModelInput::new([batch, image_tokens, 64]),
+            ModelInput::new([batch, context_tokens, 4096]),
         ))
         .trace()?
     } else {
@@ -152,10 +166,10 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
             qwen_image_2_1_euler_step(cx, &sample, &timestep, &step_size, &context, &config)
         })
         .inputs((
-            ModelInput::new([1, image_tokens, 64]),
-            ModelInput::new([1]),
-            ModelInput::new([1]),
-            ModelInput::new([1, context_tokens, 4096]),
+            ModelInput::new([batch, image_tokens, 64]),
+            ModelInput::new([batch]),
+            ModelInput::new([batch]),
+            ModelInput::new([batch, context_tokens, 4096]),
         ))
         .trace()?
     };
@@ -212,12 +226,13 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
         (None, Some(resident)) => (None, Some(compiled.bind_parameters(resident.bindings())?)),
         _ => return Err("invalid transformer residency state".into()),
     };
-    let context = client.buffer(&prompt.shape, &prompt.values)?;
+    let context_values = prompt.values.repeat(options.batch_size);
+    let context = client.buffer(&[batch, context_tokens, 4096], &context_values)?;
     let mut random = ChaCha8Rng::seed_from_u64(options.seed);
-    let initial = (0..image_tokens * 64)
+    let initial = (0..batch * image_tokens * 64)
         .map(|_| StandardNormal.sample(&mut random))
         .collect::<Vec<f32>>();
-    let mut sample = client.buffer(&[1, image_tokens, 64], &initial)?;
+    let mut sample = client.buffer(&[batch, image_tokens, 64], &initial)?;
     let execute_start = Instant::now();
     if options.device_loop {
         sample = match (&offloaded_runner, &device_runner) {
@@ -228,8 +243,8 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
     } else {
         for index in 0..schedule.len() {
             let step = schedule.step(index)?;
-            let timestep = client.buffer(&[1], &[step.timestep])?;
-            let step_size = client.buffer(&[1], &[step.step_size])?;
+            let timestep = client.buffer(&[batch], &vec![step.timestep; options.batch_size])?;
+            let step_size = client.buffer(&[batch], &vec![step.step_size; options.batch_size])?;
             sample = match (&offloaded_runner, &device_runner) {
                 (Some(runner), None) => runner.run((&sample, &timestep, &step_size, &context))?,
                 (None, Some(runner)) => runner.run((&sample, &timestep, &step_size, &context))?,
@@ -239,7 +254,7 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
     }
     let execute_time = execute_start.elapsed();
     eprintln!(
-        "denoise mode={} residency={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} prefetch-launch={prefetch_launch_time:.3?} prefetch-tail={prefetch_wait_time:.3?} execute={execute_time:.3?} steps={}",
+        "denoise mode={} residency={} batch={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} prefetch-launch={prefetch_launch_time:.3?} prefetch-tail={prefetch_wait_time:.3?} execute={execute_time:.3?} steps={}",
         if options.device_loop {
             "device-loop"
         } else {
@@ -250,32 +265,64 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
         } else {
             "device"
         },
+        options.batch_size,
         options.steps,
     );
     Ok(sample.to_vec::<f32>()?)
 }
 
-fn decode(
-    client: &Client,
-    checkpoint_path: &PathBuf,
-    latent: &[f32],
+struct DecodeOptions<'a> {
+    checkpoint_path: &'a Path,
     latent_height: i64,
     latent_width: i64,
-    cache_dir: Option<&PathBuf>,
-) -> Result<Vec<f32>> {
-    let image_tokens = latent_height * latent_width;
+    batch_size: usize,
+    max_batch_size: usize,
+    cache_dir: Option<&'a PathBuf>,
+}
+
+fn decode(client: &Client, latent: &[f32], options: &DecodeOptions<'_>) -> Result<Vec<f32>> {
+    let image_tokens = options.latent_height * options.latent_width;
+    let decode_batch_size = options.batch_size.min(options.max_batch_size);
     let model = Model::new(|cx: Cx, latent| {
-        qwen_image_2_1_vae_decoder(cx, &latent, latent_height, latent_width)
+        qwen_image_2_1_vae_decoder(cx, &latent, options.latent_height, options.latent_width)
     })
-    .inputs(ModelInput::new([1, image_tokens, 64]))
+    .inputs(ModelInput::new([
+        i64::try_from(decode_batch_size)?,
+        image_tokens,
+        64,
+    ]))
     .trace()?;
-    let mut checkpoint = SafeTensors::open(checkpoint_path)?;
+    let mut checkpoint = SafeTensors::open(options.checkpoint_path)?;
     let parameters = checkpoint.load_parameter_schema(client, model.schema())?;
-    let compiled = model.compile(&mut compiler(client, cache_dir, "qwen-image-2.1-vae-v1")?)?;
+    let compiled = model.compile(&mut compiler(
+        client,
+        options.cache_dir,
+        "qwen-image-2.1-vae-v1",
+    )?)?;
     let runner = compiled.bind_parameters(parameters.bindings())?;
-    let latent = client.buffer(&[1, image_tokens, 64], latent)?;
-    let image: Buffer = runner.run(&latent)?;
-    Ok(image.to_vec::<f32>()?)
+    let values_per_latent = usize::try_from(image_tokens * 64)?;
+    let values_per_image =
+        usize::try_from(options.latent_height * 16 * options.latent_width * 16 * 4)?;
+    let mut images = Vec::with_capacity(values_per_image * options.batch_size);
+    for chunk in latent.chunks(values_per_latent * decode_batch_size) {
+        let actual_batch = chunk.len() / values_per_latent;
+        let mut padded;
+        let input = if actual_batch == decode_batch_size {
+            chunk
+        } else {
+            padded = vec![0.0; values_per_latent * decode_batch_size];
+            padded[..chunk.len()].copy_from_slice(chunk);
+            &padded
+        };
+        let latent = client.buffer(
+            &[i64::try_from(decode_batch_size)?, image_tokens, 64],
+            input,
+        )?;
+        let image: Buffer = runner.run(&latent)?;
+        let values = image.to_vec::<f32>()?;
+        images.extend_from_slice(&values[..values_per_image * actual_batch]);
+    }
+    Ok(images)
 }
 
 fn tile_starts(length: usize, tile: usize, stride: usize) -> Vec<usize> {
@@ -409,6 +456,9 @@ fn decode_tiled(
 }
 
 fn run(args: Args) -> Result<()> {
+    if args.batch_size == 0 || args.vae_batch_size == 0 {
+        return Err("batch sizes must be positive".into());
+    }
     if args.width == 0
         || args.height == 0
         || !args.width.is_multiple_of(16)
@@ -446,6 +496,7 @@ fn run(args: Args) -> Result<()> {
             latent_width,
             steps: args.steps,
             seed: args.seed,
+            batch_size: args.batch_size,
             device_loop: args.device_loop,
             cache_dir: args.cache_dir.as_ref(),
             offload_transformer: args.offload_transformer,
@@ -468,43 +519,86 @@ fn run(args: Args) -> Result<()> {
     let values = if args.width <= args.vae_tile && args.height <= args.vae_tile {
         decode(
             &client,
-            &args.vae,
             &latent,
-            latent_height,
-            latent_width,
-            args.cache_dir.as_ref(),
+            &DecodeOptions {
+                checkpoint_path: &args.vae,
+                latent_height,
+                latent_width,
+                batch_size: args.batch_size,
+                max_batch_size: args.vae_batch_size,
+                cache_dir: args.cache_dir.as_ref(),
+            },
         )?
     } else {
         let tile_height = usize::try_from((args.vae_tile / 16).min(args.height / 16))?;
         let tile_width = usize::try_from((args.vae_tile / 16).min(args.width / 16))?;
         let stride = usize::try_from((args.vae_tile - args.vae_overlap) / 16)?;
-        decode_tiled(
-            &client,
-            &args.vae,
-            &latent,
-            usize::try_from(latent_height)?,
-            usize::try_from(latent_width)?,
-            tile_height,
-            tile_width,
-            stride.min(tile_height),
-            stride.min(tile_width),
-            args.cache_dir.as_ref(),
-        )?
+        let values_per_latent = usize::try_from(latent_height * latent_width * 64)?;
+        let mut decoded = Vec::new();
+        for sample in latent.chunks_exact(values_per_latent) {
+            decoded.extend(decode_tiled(
+                &client,
+                &args.vae,
+                sample,
+                usize::try_from(latent_height)?,
+                usize::try_from(latent_width)?,
+                tile_height,
+                tile_width,
+                stride.min(tile_height),
+                stride.min(tile_width),
+                args.cache_dir.as_ref(),
+            )?);
+        }
+        decoded
     };
     let vae_time = vae_start.elapsed();
     let pixels = values
         .into_iter()
         .map(|value| ((value + 1.0) * 127.5).round().clamp(0.0, 255.0) as u8)
         .collect::<Vec<_>>();
-    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(args.width, args.height, pixels)
-        .ok_or("VAE output does not match requested dimensions")?;
-    image.save(&args.output)?;
+    let pixels_per_image = usize::try_from(args.width)? * usize::try_from(args.height)? * 4;
+    let outputs = output_paths(&args.output, args.batch_size);
+    if pixels.len() != pixels_per_image * args.batch_size {
+        return Err("VAE output does not match requested batch dimensions".into());
+    }
+    for (pixels, output) in pixels.chunks_exact(pixels_per_image).zip(&outputs) {
+        let image = ImageBuffer::<Rgba<u8>, _>::from_raw(args.width, args.height, pixels.to_vec())
+            .ok_or("VAE output does not match requested dimensions")?;
+        image.save(output)?;
+    }
     println!(
-        "vae={vae_time:.3?} generation={:.3?} saved {}",
+        "batch={} vae={vae_time:.3?} generation={:.3?} images_per_second={:.3} saved {}",
+        args.batch_size,
         generation_start.elapsed(),
-        args.output.display()
+        args.batch_size as f64 / generation_start.elapsed().as_secs_f64(),
+        outputs
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     Ok(())
+}
+
+fn output_paths(output: &Path, batch_size: usize) -> Vec<PathBuf> {
+    if batch_size == 1 {
+        return vec![output.to_path_buf()];
+    }
+    let parent = output.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let stem = output
+        .file_stem()
+        .unwrap_or(output.as_os_str())
+        .to_string_lossy();
+    let extension = output.extension().map(|value| value.to_string_lossy());
+    (0..batch_size)
+        .map(|index| {
+            let name = match &extension {
+                Some(extension) => format!("{stem}-{index:03}.{extension}"),
+                None => format!("{stem}-{index:03}"),
+            };
+            parent.join(name)
+        })
+        .collect()
 }
 
 fn main() -> Result<()> {

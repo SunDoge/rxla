@@ -37,6 +37,7 @@ class Args(TypedArgs):
     warmup: Annotated[int, Arg("--warmup")] = 1
     iterations: Annotated[int, Arg("--iterations")] = 3
     seed: Annotated[int, Arg("--seed")] = 42
+    batch_size: Annotated[int, Arg("--batch-size")] = 1
     output: Annotated[Literal["latent", "image"], Arg("--output")] = "image"
     residency: Annotated[
         Literal["model-offload", "resident-transformer"], Arg("--residency")
@@ -50,8 +51,8 @@ def synchronize() -> None:
 
 def main() -> None:
     args = Args.parse_args()
-    if args.width <= 0 or args.height <= 0 or args.steps <= 0:
-        raise ValueError("width, height and steps must be positive")
+    if args.width <= 0 or args.height <= 0 or args.steps <= 0 or args.batch_size <= 0:
+        raise ValueError("width, height, steps and batch size must be positive")
     if args.warmup < 0 or args.iterations <= 0:
         raise ValueError("warmup must be nonnegative and iterations positive")
 
@@ -92,6 +93,7 @@ def main() -> None:
     prompt_embeds = load_file(args.conditioning)["prompt_embeds"].to(
         device="cuda", dtype=torch.bfloat16
     )
+    prompt_embeds = prompt_embeds.repeat(args.batch_size, 1, 1)
     prompt_embeds_mask = torch.ones(
         prompt_embeds.shape[:2], dtype=torch.long, device="cuda"
     )
@@ -135,6 +137,7 @@ def main() -> None:
         "width": args.width,
         "height": args.height,
         "steps": args.steps,
+        "batch_size": args.batch_size,
         "kv_cache": args.kv_cache,
         "warmup": args.warmup,
         "iterations": args.iterations,
@@ -142,6 +145,7 @@ def main() -> None:
         "samples_seconds": samples,
         "median_seconds": statistics.median(samples),
         "mean_seconds": statistics.fmean(samples),
+        "median_images_per_second": args.batch_size / statistics.median(samples),
         "peak_cuda_bytes": torch.cuda.max_memory_allocated(),
     }
     print(json.dumps(report, indent=2))

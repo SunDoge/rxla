@@ -64,6 +64,37 @@ At this operating point:
   skips VAE decode and is a compute diagnostic, not a deployable full-pipeline
   result on this card.
 
+## Batch throughput
+
+RXLA now batches the complete transformer graph and uses an independently
+bounded VAE micro-batch. This matters on 16-GiB devices: batch 8 fits through
+the W8 transformer, while decoding all eight images in one VAE invocation asks
+XLA's BFC allocator for a contiguous 6.75-GiB block and fails. The default
+`--vae-batch-size 4` decodes the same eight latents in two launches without
+reducing transformer utilization.
+
+These RXLA measurements are warm disk-cache, fresh-process runs. Consequently
+they still include roughly one second of checkpoint loading plus tracing and
+cache lookup. PNG writes are included. The official batch 2/4 rows are
+single measured requests without warmup; they are deployment-path comparisons,
+not a same-dtype kernel benchmark.
+
+| Implementation | Batch | DiT execute | VAE | End-to-end | Throughput |
+|---|---:|---:|---:|---:|---:|
+| RXLA W8 | 1 | 0.968 s | 1.264 s | 3.787 s | 0.264 img/s |
+| RXLA W8 | 2 | 1.319 s | 1.491 s | 4.367 s | 0.458 img/s |
+| RXLA W8 | 4 | 2.470 s | 1.935 s | 5.909 s | 0.677 img/s |
+| RXLA W8, VAE micro-batch 4 | 8 | 4.845 s | 2.681 s | 9.042 s | 0.885 img/s |
+| Official BF16 model offload | 1 | — | — | 7.582 s | 0.132 img/s |
+| Official BF16 model offload | 2 | — | — | 11.682 s | 0.171 img/s |
+| Official BF16 model offload | 4 | — | — | 13.902 s | 0.288 img/s |
+
+RXLA batch 8 delivers **3.35×** the batch-1 image throughput. It is also
+**3.07×** the throughput of the official batch-4 offload path on this machine,
+with the important caveat that RXLA uses W8 weights while the official model is
+BF16. For latency-sensitive traffic, batch 1 remains appropriate; a serving
+scheduler should choose batch 4 or 8 when throughput is the priority.
+
 ## Reproduction
 
 Official complete-image path:
@@ -104,6 +135,7 @@ target/release/examples/qwen_image_2_1_generate \
   .cache/qwen-image-2.1/conditioning_chair.safetensors \
   .cache/qwen-image-2.1/output.png \
   --width 512 --height 512 --steps 4 \
+  --batch-size 8 --vae-batch-size 4 \
   --memory-fraction 0.9 --preallocate false \
   --cache-dir .cache/qwen-image-2.1/compile-cache
 ```

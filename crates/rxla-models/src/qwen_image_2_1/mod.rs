@@ -547,8 +547,15 @@ pub fn qwen_image_2_1_denoise(
                 .cast(DType::I32)?)
         },
         |carry| -> Result<[Tensor; 2]> {
-            let timestep = timesteps.take(&carry[0], 0)?.reshape([1])?;
-            let step_size = step_sizes.take(&carry[0], 0)?.reshape([1])?;
+            let batch = carry[1].shape()[0];
+            let timestep = timesteps
+                .take(&carry[0], 0)?
+                .reshape([1])?
+                .broadcast_to([batch])?;
+            let step_size = step_sizes
+                .take(&carry[0], 0)?
+                .reshape([1])?
+                .broadcast_to([batch])?;
             let sample = qwen_image_2_1_euler_step(
                 cx.clone(),
                 &carry[1],
@@ -716,6 +723,22 @@ mod tests {
         .trace()
         .unwrap();
         assert_eq!(model.outputs()[0].shape(), [1, 6, 8]);
+        assert_eq!(model.schema().parameters().len(), 49);
+        model.prepare().unwrap();
+    }
+
+    #[test]
+    fn batched_denoise_broadcasts_schedule_scalars() {
+        let config = QwenImage21Config::tiny_w8(2, 3);
+        let schedule = QwenImage21FlowScheduler::new(2, 6).unwrap();
+        let model = Model::new(|cx: Cx| {
+            let image = cx.input([4, 6, 8])?;
+            let context = cx.input([4, 5, 24])?;
+            qwen_image_2_1_denoise(cx, &image, &context, &schedule, &config)
+        })
+        .trace()
+        .unwrap();
+        assert_eq!(model.outputs()[0].shape(), [4, 6, 8]);
         assert_eq!(model.schema().parameters().len(), 49);
         model.prepare().unwrap();
     }
