@@ -2,6 +2,7 @@
 
 use super::*;
 use rxla_nn::{CompiledModelSessionBuilder, ModelSchema, ModelSessionBuilder, ParameterSelection};
+use rxla_pjrt::Memory;
 use std::collections::HashMap;
 
 /// Weight buffers keyed by the stable paths in a parameter-effect schema.
@@ -33,6 +34,30 @@ impl SchemaBuffers {
             .iter()
             .map(|(path, buffer)| (path.as_str(), buffer))
             .collect()
+    }
+
+    /// Move every parameter and state buffer into a PJRT memory space.
+    ///
+    /// Copies are enqueued without downloading tensor payloads into Rust. This
+    /// makes a consumed checkpoint bundle suitable for component-level
+    /// eviction to pinned host memory and later prefetch back to device memory.
+    pub fn copy_to_memory(self, memory: &Memory) -> Result<Self> {
+        fn copy(buffers: Vec<(String, Buffer)>, memory: &Memory) -> Result<Vec<(String, Buffer)>> {
+            buffers
+                .into_iter()
+                .map(|(path, buffer)| {
+                    buffer
+                        .copy_to_memory(memory)
+                        .map(|buffer| (path, buffer))
+                        .map_err(|source| Error::Runtime { source })
+                })
+                .collect()
+        }
+
+        Ok(Self {
+            parameters: copy(self.parameters, memory)?,
+            states: copy(self.states, memory)?,
+        })
     }
 
     /// Initialize a resident model session directly from this checkpoint load.
