@@ -32,6 +32,12 @@ fn rms_norm(cx: Cx, input: &Tensor) -> Result<Tensor> {
     Ok(input.rms_norm(&gamma, 1e-12)?)
 }
 
+fn attention_rms_norm(cx: Cx, input: &Tensor) -> Result<Tensor> {
+    let channels = input.shape()[3];
+    let gamma = cx.param("gamma", [channels, 1, 1])?.reshape([channels])?;
+    Ok(input.rms_norm(&gamma, 1e-12)?)
+}
+
 fn residual_block(cx: Cx, input: &Tensor, output_channels: i64) -> Result<Tensor> {
     let residual = if input.shape()[3] == output_channels {
         input.clone()
@@ -50,7 +56,7 @@ fn attention(cx: Cx, input: &Tensor) -> Result<Tensor> {
             kind: ModelDefinitionError::InvalidQwenImage21VaeLatent,
         });
     };
-    let hidden = rms_norm(cx.scope("norm")?, input)?;
+    let hidden = attention_rms_norm(cx.scope("norm")?, input)?;
     let qkv = conv(cx.scope("to_qkv")?, &hidden, channels * 3, 1)?
         .reshape([*batch, height * width, channels * 3])?
         .split(2, &[*channels, *channels, *channels])?;
@@ -64,16 +70,28 @@ fn attention(cx: Cx, input: &Tensor) -> Result<Tensor> {
     Ok(conv(cx.scope("proj")?, &attended, *channels, 1)?.add(input)?)
 }
 
-fn duplicate_upsample(input: &Tensor, output_channels: i64) -> Result<Tensor> {
+fn duplicate_upsample(input: &Tensor, output_channels: i64, temporal: bool) -> Result<Tensor> {
     let [batch, height, width, input_channels] = input.shape() else {
         unreachable!("Qwen image VAE activations are NHWC")
     };
-    let repeats = output_channels * 4 / input_channels;
-    Ok(input
-        .repeat_interleave(repeats, 3)?
-        .reshape([*batch, *height, *width, output_channels, 2, 2])?
-        .transpose([0, 1, 4, 2, 5, 3])?
-        .reshape([*batch, height * 2, width * 2, output_channels])?)
+    let temporal_factor = if temporal { 2 } else { 1 };
+    let repeats = output_channels * temporal_factor * 4 / input_channels;
+    let repeated = input.repeat_interleave(repeats, 3)?;
+    if temporal {
+        // Exact first-chunk specialization of DupUp3D: construct two temporal
+        // planes, then retain only the final one.
+        Ok(repeated
+            .reshape([*batch, *height, *width, output_channels, 2, 2, 2])?
+            .transpose([0, 4, 1, 5, 2, 6, 3])?
+            .reshape([*batch, 2, height * 2, width * 2, output_channels])?
+            .narrow(1, 1, 1)?
+            .squeeze(1)?)
+    } else {
+        Ok(repeated
+            .reshape([*batch, *height, *width, output_channels, 2, 2])?
+            .transpose([0, 1, 4, 2, 5, 3])?
+            .reshape([*batch, height * 2, width * 2, output_channels])?)
+    }
 }
 
 fn declare_unused_temporal_conv(cx: Cx, channels: i64) -> Result<()> {
@@ -108,7 +126,7 @@ fn residual_up_block(
     }
     if upsample_stage {
         hidden = upsample(cx.scope("upsampler")?, &hidden, output_channels, temporal)?;
-        hidden = hidden.add(&duplicate_upsample(&original, output_channels)?)?;
+        hidden = hidden.add(&duplicate_upsample(&original, output_channels, temporal)?)?;
     }
     Ok(hidden)
 }
@@ -195,6 +213,14 @@ mod tests {
         ] {
             assert!(model.schema().get(path).is_some(), "missing {path}");
         }
+        assert_eq!(
+            model
+                .schema()
+                .get("decoder.mid_block.attentions.0.norm.gamma")
+                .unwrap()
+                .shape(),
+            [1152, 1, 1]
+        );
         model.prepare().unwrap();
     }
 }

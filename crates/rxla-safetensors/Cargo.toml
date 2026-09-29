@@ -57,6 +57,10 @@ name = "qwen_image_2_1_oracle"
 required-features = ["model"]
 
 [[example]]
+name = "qwen_image_2_1_vae_oracle"
+required-features = ["model"]
+
+[[example]]
 name = "flux2_bench"
 required-features = ["model"]
 
