@@ -26,7 +26,7 @@ def main() -> None:
     for shard in sorted(set(weight_map.values())):
         path = args.index.parent / shard
         with safe_open(path, framework="pt", device="cpu") as checkpoint:
-            for name in checkpoint:
+            for name in checkpoint.keys():
                 value = checkpoint.get_tensor(name)
                 if value.ndim != 2:
                     tensors[name] = value.contiguous()
