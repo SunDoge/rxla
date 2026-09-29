@@ -8,12 +8,16 @@ mod export;
 pub use export::{save_buffers_new, write_buffers, write_buffers_with_metadata};
 #[cfg(feature = "model")]
 mod model;
+#[cfg(feature = "model")]
+mod residency;
 use half::{bf16, f16};
 use memmap2::{Mmap, MmapOptions};
 #[cfg(feature = "model")]
 pub use model::{OffloadedSchemaBuffers, PrefetchedSchemaBuffers, SchemaBuffers};
 #[cfg(all(feature = "model", feature = "export"))]
 pub use model::{save_model_new, save_parameter_selection_new, save_training_state_new};
+#[cfg(feature = "model")]
+pub use residency::{ResidentSchemaBuffers, WeightResidencyPool};
 #[cfg(feature = "model")]
 use rxla_pjrt::DType;
 use rxla_pjrt::{Buffer, BufferDestination, Client};
@@ -40,6 +44,11 @@ pub enum Error {
     #[cfg(feature = "model")]
     #[snafu(display("model parameter selection: {source}"))]
     Model { source: rxla_nn::Error },
+    #[cfg(feature = "model")]
+    #[snafu(display(
+        "weight residency budget exceeded: requested {requested} bytes, {available} available"
+    ))]
+    ResidencyBudget { requested: usize, available: usize },
 }
 pub type Result<T> = std::result::Result<T, Error>;
 fn invalid(message: impl Into<String>) -> Error {

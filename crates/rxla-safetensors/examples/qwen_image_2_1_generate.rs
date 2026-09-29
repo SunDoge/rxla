@@ -11,7 +11,7 @@ use rxla_models::qwen_image_2_1::{
     qwen_image_2_1_vae_decoder, qwen_image_2_1_vae_decoder_raw,
 };
 use rxla_nn::{Cx, Model, ModelInput};
-use rxla_safetensors::SafeTensors;
+use rxla_safetensors::{SafeTensors, WeightResidencyPool};
 use serde::Deserialize;
 use std::{fs, path::PathBuf, time::Instant};
 
@@ -118,11 +118,7 @@ fn cuda_offload_memories(client: &Client) -> Result<(Memory, Memory)> {
         })
         .cloned()
         .ok_or("PJRT client does not expose pinned-host memory")?;
-    let device = memories
-        .iter()
-        .find(|memory| memory.info().is_ok_and(|info| info.kind == "device"))
-        .cloned()
-        .ok_or("PJRT client does not expose device memory")?;
+    let device = client.default_memory()?;
     Ok((host, device))
 }
 
@@ -176,12 +172,17 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
         )
     };
     let load_time = load_start.elapsed();
-    let prefetch_start = Instant::now();
-    let prefetched = if let Some(offloaded) = &offloaded {
+    let residency_pool = if let Some(offloaded) = &offloaded {
         let (_, device) = cuda_offload_memories(client)?;
-        Some(offloaded.prefetch_to(&device)?)
+        Some(WeightResidencyPool::new(device, offloaded.payload_bytes()))
     } else {
         None
+    };
+    let prefetch_start = Instant::now();
+    let prefetched = match (&offloaded, &residency_pool) {
+        (Some(offloaded), Some(pool)) => Some(pool.prefetch(offloaded)?),
+        (None, None) => None,
+        _ => return Err("invalid transformer residency pool state".into()),
     };
     let prefetch_time = prefetch_start.elapsed();
     let compile_start = Instant::now();
