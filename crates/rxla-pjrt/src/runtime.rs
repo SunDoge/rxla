@@ -1391,6 +1391,20 @@ pub struct Buffer {
     inner: Arc<BufferInner>,
 }
 
+/// A backend-owned PJRT memory space kept alive by its client.
+///
+/// Memory kinds are backend-defined; common CUDA plugins expose device and
+/// pinned-host spaces. Cloning this handle does not allocate or copy memory.
+#[derive(Clone)]
+pub struct Memory {
+    client: Arc<ClientInner>,
+    raw: NonNull<PJRT_Memory>,
+}
+
+// PJRT memory handles are immutable client-owned descriptors.
+unsafe impl Send for Memory {}
+unsafe impl Sync for Memory {}
+
 /// Pins a PJRT buffer allocation for external pointer access.
 ///
 /// The native external-reference count prevents the backend from deleting or
@@ -1541,6 +1555,45 @@ impl Buffer {
         args.buffer = self.inner.raw.as_ptr();
         args.dst_device = device;
         plugin.check(unsafe { function!(plugin.api(), PJRT_Buffer_CopyToDevice)(&mut args) })?;
+        Ok(Buffer {
+            inner: Arc::new(BufferInner::new(
+                self.inner.client.clone(),
+                args.dst_buffer,
+            )?),
+        })
+    }
+
+    /// Asynchronously copy this buffer into another memory space of its client.
+    ///
+    /// Readiness remains represented by the returned PJRT buffer. This is the
+    /// primitive used by residency managers to evict device buffers to pinned
+    /// host memory and prefetch them back without a host round trip through
+    /// Rust-owned bytes.
+    pub fn copy_to_memory(&self, memory: &Memory) -> Result<Buffer> {
+        ensure!(
+            Arc::ptr_eq(&self.inner.client, &memory.client),
+            InvalidArgumentSnafu {
+                message: "buffer and destination memory belong to different clients",
+            }
+        );
+        let current = pjrt_call!(
+            &self.inner.client.plugin,
+            PJRT_Buffer_Memory,
+            PJRT_Buffer_Memory_Args,
+            PJRT_Buffer_Memory_Args_STRUCT_SIZE,
+            buffer = self.inner.raw.as_ptr(),
+        );
+        if current.memory == memory.raw.as_ptr() {
+            return Ok(self.clone());
+        }
+        let plugin = &self.inner.client.plugin;
+        let mut args = args!(
+            PJRT_Buffer_CopyToMemory_Args,
+            PJRT_Buffer_CopyToMemory_Args_STRUCT_SIZE
+        );
+        args.buffer = self.inner.raw.as_ptr();
+        args.dst_memory = memory.raw.as_ptr();
+        plugin.check(unsafe { function!(plugin.api(), PJRT_Buffer_CopyToMemory)(&mut args) })?;
         Ok(Buffer {
             inner: Arc::new(BufferInner::new(
                 self.inner.client.clone(),

@@ -29,3 +29,32 @@ fn buffer_reports_device_and_backend_memory_independently() {
     assert!(client.info().unwrap().addressable_devices.contains(&device));
     println!("PJRT buffer placement: device={device:?}, memory={memory:?}");
 }
+
+#[test]
+#[ignore = "requires trusted PJRT_PLUGIN_PATH with memory-space copies"]
+fn buffer_round_trips_through_pinned_host_memory() {
+    let client = unsafe { Client::load(std::env::var("PJRT_PLUGIN_PATH").unwrap()) }.unwrap();
+    let memories = client.memories().unwrap();
+    let infos = memories
+        .iter()
+        .map(|memory| memory.info().unwrap())
+        .collect::<Vec<_>>();
+    println!("PJRT addressable memories: {infos:?}");
+
+    let source = client.buffer(&[4], &[1.0_f32, -2.0, 3.5, 0.0]).unwrap();
+    let device_id = source.memory_info().unwrap().id;
+    let pinned = memories
+        .iter()
+        .find(|memory| memory.info().unwrap().kind.contains("pinned_host"))
+        .expect("CUDA PJRT exposes pinned_host memory");
+    let device = memories
+        .iter()
+        .find(|memory| memory.info().unwrap().id == device_id)
+        .expect("buffer memory is addressable");
+
+    let evicted = source.copy_to_memory(pinned).unwrap();
+    assert!(evicted.memory_info().unwrap().kind.contains("pinned_host"));
+    let restored = evicted.copy_to_memory(device).unwrap();
+    assert_eq!(restored.memory_info().unwrap().id, device_id);
+    assert_eq!(restored.to_vec::<f32>().unwrap(), [1.0, -2.0, 3.5, 0.0]);
+}

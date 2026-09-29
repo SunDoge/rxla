@@ -10,8 +10,8 @@ pub use nn::BatchNormTraining;
 use prost::Message;
 pub use rxla_pjrt::{
     Buffer, BufferMemoryLayout, Client, ClientInfo, ClientOptionValue, ClientOptions, DType,
-    DeviceInfo, Element, Error as PjrtError, MemoryInfo, PendingExecution, PendingHostUpload,
-    PjrtErrorCode, Plugin, PluginRegistry,
+    DeviceInfo, Element, Error as PjrtError, Memory, MemoryInfo, PendingExecution,
+    PendingHostUpload, PjrtErrorCode, Plugin, PluginRegistry,
 };
 use rxla_xla_proto::xla::{
     CompileOptionsProto, DeviceAssignmentProto, ExecutableBuildOptionsProto, HloModuleProto,

@@ -54,6 +54,35 @@ unsafe fn copy_string(data: *const std::os::raw::c_char, len: usize) -> Result<S
 }
 
 impl Client {
+    /// Addressable memory spaces exposed by this PJRT client.
+    pub fn memories(&self) -> Result<Vec<Memory>> {
+        let plugin = &self.0.plugin;
+        let memories = pjrt_call!(
+            plugin,
+            PJRT_Client_AddressableMemories,
+            PJRT_Client_AddressableMemories_Args,
+            PJRT_Client_AddressableMemories_Args_STRUCT_SIZE,
+            client = self.0.raw,
+        );
+        ensure!(
+            memories.num_addressable_memories == 0 || !memories.addressable_memories.is_null(),
+            InvalidPluginDataSnafu {
+                message: "null addressable memory list",
+            }
+        );
+        let mut result = Vec::with_capacity(memories.num_addressable_memories);
+        for index in 0..memories.num_addressable_memories {
+            let raw = unsafe { *memories.addressable_memories.add(index) };
+            result.push(Memory {
+                client: self.0.clone(),
+                raw: NonNull::new(raw).context(InvalidPluginDataSnafu {
+                    message: "null addressable memory",
+                })?,
+            });
+        }
+        Ok(result)
+    }
+
     pub fn info(&self) -> Result<ClientInfo> {
         let plugin = &self.0.plugin;
         // load() validated that the complete version prefix exists.
@@ -153,6 +182,31 @@ impl Client {
             platform_version,
             process_index: process.process_index,
             addressable_devices,
+        })
+    }
+}
+
+impl Memory {
+    /// Backend-defined identity and kind of this memory space.
+    pub fn info(&self) -> Result<MemoryInfo> {
+        let plugin = &self.client.plugin;
+        let id = pjrt_call!(
+            plugin,
+            PJRT_Memory_Id,
+            PJRT_Memory_Id_Args,
+            PJRT_Memory_Id_Args_STRUCT_SIZE,
+            memory = self.raw.as_ptr(),
+        );
+        let kind = pjrt_call!(
+            plugin,
+            PJRT_Memory_Kind,
+            PJRT_Memory_Kind_Args,
+            PJRT_Memory_Kind_Args_STRUCT_SIZE,
+            memory = self.raw.as_ptr(),
+        );
+        Ok(MemoryInfo {
+            id: id.id,
+            kind: unsafe { copy_string(kind.kind, kind.kind_size) }?,
         })
     }
 }
