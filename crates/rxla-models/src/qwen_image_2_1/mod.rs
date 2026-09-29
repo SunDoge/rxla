@@ -235,20 +235,14 @@ fn rotary_angles(cx: &Cx, text_tokens: i64, config: &QwenImage21Config) -> Resul
     Ok(cx.constant([1, 1, tokens, config.head_dim() / 2], phases)?)
 }
 
-fn block_causal_bias(cx: &Cx, text_tokens: i64, image_tokens: i64) -> Result<Tensor> {
-    let tokens = text_tokens + image_tokens;
-    let mut bias = Vec::with_capacity((tokens * tokens) as usize);
-    for query in 0..tokens {
-        for key in 0..tokens {
-            let same_target_image = query >= text_tokens && key >= text_tokens;
-            bias.push(if key <= query || same_target_image {
-                0.0
-            } else {
-                f32::NEG_INFINITY
-            });
+fn text_causal_bias(cx: &Cx, text_tokens: i64) -> Result<Tensor> {
+    let mut bias = Vec::with_capacity((text_tokens * text_tokens) as usize);
+    for query in 0..text_tokens {
+        for key in 0..text_tokens {
+            bias.push(if key <= query { 0.0 } else { f32::NEG_INFINITY });
         }
     }
-    Ok(cx.constant([1, 1, tokens, tokens], bias)?)
+    Ok(cx.constant([1, 1, text_tokens, text_tokens], bias)?)
 }
 
 fn token_modulation(value: &Tensor, text_tokens: i64, image_tokens: i64) -> Result<Tensor> {
@@ -271,7 +265,8 @@ fn attention(
     cx: Cx,
     input: &Tensor,
     angles: &Tensor,
-    bias: &Tensor,
+    text_bias: &Tensor,
+    text_tokens: i64,
     config: &QwenImage21Config,
 ) -> Result<Tensor> {
     let [batch, tokens, _] = input.shape() else {
@@ -301,7 +296,24 @@ fn attention(
         .transpose([0, 2, 1, 3])?
         .rotary_embedding_angles(angles, RotaryLayout::Interleaved)?;
     let value = value.transpose([0, 2, 1, 3])?;
-    let attended = query.scaled_dot_product_attention(&key, &value, Some(bias), None)?;
+    // Exact non-Flex block-causal specialization for text-to-image: text is a
+    // causal prefix and the target image is one internally bidirectional block
+    // that can attend to the complete prefix plus itself. Splitting the two
+    // query regions avoids materializing a quadratic full-sequence mask and
+    // leaves the large image attention mask-free for cuDNN/XLA fusion.
+    let text_attended = query
+        .narrow(2, 0, text_tokens)?
+        .scaled_dot_product_attention(
+            &key.narrow(2, 0, text_tokens)?,
+            &value.narrow(2, 0, text_tokens)?,
+            Some(text_bias),
+            None,
+        )?;
+    let image_tokens = *tokens - text_tokens;
+    let image_attended = query
+        .narrow(2, text_tokens, image_tokens)?
+        .scaled_dot_product_attention(&key, &value, None, None)?;
+    let attended = Tensor::concatenate(&[text_attended, image_attended], 2)?;
     let attended =
         attended
             .transpose([0, 2, 1, 3])?
@@ -320,7 +332,8 @@ fn transformer_block(
     input: &Tensor,
     modulation: &Tensor,
     angles: &Tensor,
-    bias: &Tensor,
+    text_bias: &Tensor,
+    text_tokens: i64,
     config: &QwenImage21Config,
 ) -> Result<Tensor> {
     let parts = modulation.split(2, &[config.hidden_size * 2, config.hidden_size * 2])?;
@@ -331,8 +344,17 @@ fn transformer_block(
         Ok((normalized.mul(&scale)?, value[1].tanh()?))
     };
     let (normalized, gate) = apply_modulation(input, &parts[0])?;
-    let hidden =
-        input.add(&attention(cx.scope("attn")?, &normalized, angles, bias, config)?.mul(&gate)?)?;
+    let hidden = input.add(
+        &attention(
+            cx.scope("attn")?,
+            &normalized,
+            angles,
+            text_bias,
+            text_tokens,
+            config,
+        )?
+        .mul(&gate)?,
+    )?;
     let (normalized, gate) = apply_modulation(&hidden, &parts[1])?;
     let mlp = cx.scope("img_mlp")?;
     let projected = linear(
@@ -402,7 +424,7 @@ pub fn qwen_image_2_1_transformer(
     let context = text_projection(cx.scope("txt_in")?, context, config)?;
     let mut hidden = Tensor::concatenate(&[context, image], 1)?;
     let angles = rotary_angles(&cx, *text_tokens, config)?;
-    let bias = block_causal_bias(&cx, *text_tokens, *image_tokens)?;
+    let text_bias = text_causal_bias(&cx, *text_tokens)?;
 
     let zero_timestep = cx.constant([1], [0.0])?;
     let all_timesteps = Tensor::concatenate(&[timestep.clone(), zero_timestep], 0)?;
@@ -428,7 +450,8 @@ pub fn qwen_image_2_1_transformer(
             &hidden,
             &modulation,
             &angles,
-            &bias,
+            &text_bias,
+            *text_tokens,
             config,
         )?;
     }
