@@ -17,7 +17,9 @@ pub use model::{OffloadedSchemaBuffers, PrefetchedSchemaBuffers, SchemaBuffers};
 #[cfg(all(feature = "model", feature = "export"))]
 pub use model::{save_model_new, save_parameter_selection_new, save_training_state_new};
 #[cfg(feature = "model")]
-pub use residency::{ResidentBoundModel, ResidentSchemaBuffers, WeightResidencyPool};
+pub use residency::{
+    PendingWeightPrefetch, ResidentBoundModel, ResidentSchemaBuffers, WeightResidencyPool,
+};
 #[cfg(feature = "model")]
 use rxla_pjrt::DType;
 use rxla_pjrt::{Buffer, BufferDestination, Client};
@@ -54,6 +56,9 @@ pub enum Error {
         "device allocator headroom exceeded: requested {requested} bytes including headroom, {available} available"
     ))]
     DeviceMemoryPressure { requested: usize, available: usize },
+    #[cfg(feature = "model")]
+    #[snafu(display("weight prefetch worker terminated unexpectedly"))]
+    PrefetchWorker,
 }
 pub type Result<T> = std::result::Result<T, Error>;
 fn invalid(message: impl Into<String>) -> Error {

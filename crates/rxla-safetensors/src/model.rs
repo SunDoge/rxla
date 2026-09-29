@@ -3,7 +3,7 @@
 use super::*;
 use rxla_nn::{CompiledModelSessionBuilder, ModelSchema, ModelSessionBuilder, ParameterSelection};
 use rxla_pjrt::Memory;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 /// Weight buffers keyed by the stable paths in a parameter-effect schema.
 ///
@@ -20,20 +20,23 @@ pub struct SchemaBuffers {
 /// it into the execution memory space first. The offloaded copy stays alive,
 /// so a serving process can repeatedly create short-lived device-resident
 /// bundles without reading or decoding the checkpoint again.
-pub struct OffloadedSchemaBuffers {
+struct OffloadedSchemaBuffersInner {
     buffers: SchemaBuffers,
     payload_bytes: usize,
 }
 
-/// A device-resident copy whose source offload bundle remains borrowed.
+#[derive(Clone)]
+pub struct OffloadedSchemaBuffers(Arc<OffloadedSchemaBuffersInner>);
+
+/// A device-resident copy retaining its offloaded source.
 ///
 /// PJRT transfers are asynchronous, so retaining the source until this value
 /// is dropped makes the source/destination lifetime relationship explicit even
 /// for backends that do not internally retain the source allocation.
-pub struct PrefetchedSchemaBuffers<'offload> {
+pub struct PrefetchedSchemaBuffers {
     buffers: SchemaBuffers,
     payload_bytes: usize,
-    _source: std::marker::PhantomData<&'offload OffloadedSchemaBuffers>,
+    _source: OffloadedSchemaBuffers,
 }
 
 impl SchemaBuffers {
@@ -84,10 +87,12 @@ impl SchemaBuffers {
     /// set.
     pub fn offload_to(self, memory: &Memory) -> Result<OffloadedSchemaBuffers> {
         let payload_bytes = self.payload_bytes()?;
-        Ok(OffloadedSchemaBuffers {
-            buffers: self.copy_to_memory(memory)?,
-            payload_bytes,
-        })
+        Ok(OffloadedSchemaBuffers(Arc::new(
+            OffloadedSchemaBuffersInner {
+                buffers: self.copy_to_memory(memory)?,
+                payload_bytes,
+            },
+        )))
     }
 
     /// Move every parameter and state buffer into a PJRT memory space.
@@ -137,7 +142,7 @@ impl SchemaBuffers {
 impl OffloadedSchemaBuffers {
     /// Logical bytes that will be prefetched when this component becomes live.
     pub fn payload_bytes(&self) -> usize {
-        self.payload_bytes
+        self.0.payload_bytes
     }
 
     /// Prefetch a fresh resident copy without consuming the offloaded source.
@@ -145,7 +150,7 @@ impl OffloadedSchemaBuffers {
     /// Keeping the source is useful for request-oriented serving: dropping the
     /// returned bundle evicts the device copy, while the decoded pinned-host
     /// checkpoint remains ready for the next request.
-    pub fn prefetch_to(&self, memory: &Memory) -> Result<PrefetchedSchemaBuffers<'_>> {
+    pub fn prefetch_to(&self, memory: &Memory) -> Result<PrefetchedSchemaBuffers> {
         fn copy(buffers: &[(String, Buffer)], memory: &Memory) -> Result<Vec<(String, Buffer)>> {
             buffers
                 .iter()
@@ -160,20 +165,21 @@ impl OffloadedSchemaBuffers {
 
         Ok(PrefetchedSchemaBuffers {
             buffers: SchemaBuffers {
-                parameters: copy(&self.buffers.parameters, memory)?,
-                states: copy(&self.buffers.states, memory)?,
+                parameters: copy(&self.0.buffers.parameters, memory)?,
+                states: copy(&self.0.buffers.states, memory)?,
             },
-            payload_bytes: self.payload_bytes,
-            _source: std::marker::PhantomData,
+            payload_bytes: self.0.payload_bytes,
+            _source: self.clone(),
         })
     }
 
     /// Backend memory containing the retained offloaded tensors.
     pub fn memory_info(&self) -> Result<Option<rxla_pjrt::MemoryInfo>> {
-        self.buffers
+        self.0
+            .buffers
             .parameters
             .iter()
-            .chain(&self.buffers.states)
+            .chain(&self.0.buffers.states)
             .next()
             .map(|(_, buffer)| {
                 buffer
@@ -184,7 +190,7 @@ impl OffloadedSchemaBuffers {
     }
 }
 
-impl PrefetchedSchemaBuffers<'_> {
+impl PrefetchedSchemaBuffers {
     pub fn buffers(&self) -> &SchemaBuffers {
         &self.buffers
     }

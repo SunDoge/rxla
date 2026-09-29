@@ -186,13 +186,13 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
     } else {
         None
     };
-    let prefetch_start = Instant::now();
-    let prefetched = match (&offloaded, &residency_pool) {
-        (Some(offloaded), Some(pool)) => Some(pool.prefetch(offloaded)?),
+    let prefetch_launch_start = Instant::now();
+    let pending_prefetch = match (&offloaded, &residency_pool) {
+        (Some(offloaded), Some(pool)) => Some(pool.prefetch_async(offloaded.clone())),
         (None, None) => None,
         _ => return Err("invalid transformer residency pool state".into()),
     };
-    let prefetch_time = prefetch_start.elapsed();
+    let prefetch_launch_time = prefetch_launch_start.elapsed();
     let compile_start = Instant::now();
     let mut compiler =
         compiler(client, options.cache_dir, "qwen-image-2.1-dit-v1")?.with_cudnn_attention(true);
@@ -202,6 +202,7 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
     let compiled = model.compile(&mut compiler)?;
     let compile_time = compile_start.elapsed();
     let prefetch_wait_start = Instant::now();
+    let prefetched = pending_prefetch.map(|pending| pending.wait()).transpose()?;
     if let Some(prefetched) = &prefetched {
         prefetched.block_until_ready()?;
     }
@@ -238,7 +239,7 @@ fn denoise(client: &Client, options: &DenoiseOptions<'_>) -> Result<Vec<f32>> {
     }
     let execute_time = execute_start.elapsed();
     eprintln!(
-        "denoise mode={} residency={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} prefetch-submit={prefetch_time:.3?} prefetch-tail={prefetch_wait_time:.3?} execute={execute_time:.3?} steps={}",
+        "denoise mode={} residency={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} prefetch-launch={prefetch_launch_time:.3?} prefetch-tail={prefetch_wait_time:.3?} execute={execute_time:.3?} steps={}",
         if options.device_loop {
             "device-loop"
         } else {

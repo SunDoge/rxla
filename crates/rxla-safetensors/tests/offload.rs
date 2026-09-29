@@ -81,7 +81,8 @@ fn schema_buffers_round_trip_through_pinned_host_memory() {
     assert_eq!(pool.reserved_bytes(), 16);
     drop(runner);
     assert_eq!(pool.reserved_bytes(), 0);
-    let restored_again = pool.prefetch(&evicted).unwrap();
+    let pending = pool.prefetch_async(evicted.clone());
+    let restored_again = pending.wait().unwrap();
     assert_eq!(
         restored_again.buffers().parameters[0]
             .1

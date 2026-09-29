@@ -98,10 +98,7 @@ impl WeightResidencyPool {
     ///
     /// The reservation is rolled back automatically if submission fails and is
     /// released when the returned resident bundle is dropped.
-    pub fn prefetch<'pool, 'offload>(
-        &'pool self,
-        source: &'offload OffloadedSchemaBuffers,
-    ) -> Result<ResidentSchemaBuffers<'pool, 'offload>> {
+    pub fn prefetch(&self, source: &OffloadedSchemaBuffers) -> Result<ResidentSchemaBuffers> {
         if let Some(headroom) = self.allocator_headroom_bytes {
             let stats = self
                 .client
@@ -132,19 +129,48 @@ impl WeightResidencyPool {
         Ok(ResidentSchemaBuffers {
             buffers,
             _reservation: reservation,
-            _pool: std::marker::PhantomData,
         })
+    }
+
+    /// Submit prefetch work on a dedicated host thread.
+    ///
+    /// This moves the short PJRT submission and allocator checks off the caller
+    /// thread. Device transfer remains asynchronous and can overlap the current
+    /// model stage without requiring an async runtime.
+    pub fn prefetch_async(&self, source: OffloadedSchemaBuffers) -> PendingWeightPrefetch {
+        let pool = self.clone();
+        PendingWeightPrefetch {
+            worker: Some(std::thread::spawn(move || pool.prefetch(&source))),
+        }
+    }
+}
+
+/// Background submission of one component's weight prefetch.
+#[must_use = "wait for the prefetched resident weights or explicitly discard the task"]
+pub struct PendingWeightPrefetch {
+    worker: Option<std::thread::JoinHandle<Result<ResidentSchemaBuffers>>>,
+}
+
+impl PendingWeightPrefetch {
+    pub fn is_finished(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+
+    pub fn wait(mut self) -> Result<ResidentSchemaBuffers> {
+        let worker = self.worker.take().ok_or(Error::PrefetchWorker)?;
+        worker.join().map_err(|_| Error::PrefetchWorker)?
     }
 }
 
 /// Prefetched weights holding a reservation in their originating pool.
-pub struct ResidentSchemaBuffers<'pool, 'offload> {
-    buffers: PrefetchedSchemaBuffers<'offload>,
+pub struct ResidentSchemaBuffers {
+    buffers: PrefetchedSchemaBuffers,
     _reservation: Reservation,
-    _pool: std::marker::PhantomData<&'pool WeightResidencyPool>,
 }
 
-impl<'pool, 'offload> ResidentSchemaBuffers<'pool, 'offload> {
+impl ResidentSchemaBuffers {
     pub fn buffers(&self) -> &SchemaBuffers {
         self.buffers.buffers()
     }
@@ -173,7 +199,7 @@ impl<'pool, 'offload> ResidentSchemaBuffers<'pool, 'offload> {
     pub fn bind(
         self,
         compiled: &CompiledModel,
-    ) -> std::result::Result<ResidentBoundModel<'pool, 'offload>, rxla_nn::Error> {
+    ) -> std::result::Result<ResidentBoundModel, rxla_nn::Error> {
         let model = compiled.bind_parameters(self.bindings())?;
         Ok(ResidentBoundModel {
             model,
@@ -183,12 +209,12 @@ impl<'pool, 'offload> ResidentSchemaBuffers<'pool, 'offload> {
 }
 
 /// A bound runner that keeps its weight-budget reservation alive.
-pub struct ResidentBoundModel<'pool, 'offload> {
+pub struct ResidentBoundModel {
     model: BoundModel,
-    _weights: ResidentSchemaBuffers<'pool, 'offload>,
+    _weights: ResidentSchemaBuffers,
 }
 
-impl ResidentBoundModel<'_, '_> {
+impl ResidentBoundModel {
     pub fn run<'inputs, I, O>(&self, inputs: I) -> std::result::Result<O, rxla_nn::Error>
     where
         I: ModelInputValues<'inputs>,
