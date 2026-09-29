@@ -9,6 +9,9 @@ use super::{Error, ModelDefinitionError, Result};
 use rxla_core::{DType, RotaryLayout, Tensor};
 use rxla_nn::{Cx, Linear, TensorApply};
 
+mod scheduler;
+pub use scheduler::{QwenImage21FlowScheduler, QwenImage21FlowStep};
+
 /// Static topology and latent grid for a Qwen-Image-2.1 transformer trace.
 #[derive(Clone, Debug)]
 pub struct QwenImage21Config {
@@ -122,8 +125,8 @@ fn timestep_embedding(cx: Cx, timestep: &Tensor, hidden: i64) -> Result<Tensor> 
         .mul(&frequency.broadcast_to([timestep.shape()[0], half])?)?;
     let embedded = Tensor::concatenate(&[phase.cos()?, phase.sin()?], 1)?;
     let scope = cx.scope("timestep_embedder")?;
-    let embedded = linear(scope.scope("linear_1")?, &embedded, hidden, true)?.silu()?;
-    linear(scope.scope("linear_2")?, &embedded, hidden, true)
+    let embedded = linear(scope.scope("linear_1")?, &embedded, hidden, false)?.silu()?;
+    linear(scope.scope("linear_2")?, &embedded, hidden, false)
 }
 
 fn zero_center_rms_norm(cx: Cx, input: &Tensor, epsilon: f32) -> Result<Tensor> {
@@ -417,5 +420,38 @@ mod tests {
         assert_eq!(config.num_layers, 32);
         assert_eq!(config.in_channels, 64);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn official_schema_matches_checkpoint_index() {
+        let config = QwenImage21Config::official(1, 1);
+        let model = Model::new(|cx: Cx| {
+            let image = cx.input([1, 1, 64])?;
+            let timestep = cx.input([1])?;
+            let context = cx.input([1, 1, 4096])?;
+            qwen_image_2_1_transformer(cx, &image, &timestep, &context, &config)
+        })
+        .trace()
+        .unwrap();
+        let parameters = model.schema().parameters();
+        assert_eq!(parameters.len(), 297);
+        assert!(
+            parameters
+                .iter()
+                .all(|parameter| parameter.storage_dtype() == DType::BF16)
+        );
+        assert_eq!(
+            parameters
+                .iter()
+                .map(|parameter| parameter.shape().iter().product::<i64>())
+                .sum::<i64>(),
+            7_115_124_736
+        );
+        assert!(
+            model
+                .schema()
+                .get("time_text_embed.timestep_embedder.linear_1.bias")
+                .is_none()
+        );
     }
 }

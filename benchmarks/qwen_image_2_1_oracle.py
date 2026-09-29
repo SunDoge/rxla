@@ -103,8 +103,8 @@ class Block(nn.Module):
 class TimestepEmbedder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.linear_1 = nn.Linear(256, 32)
-        self.linear_2 = nn.Linear(32, 32)
+        self.linear_1 = nn.Linear(256, 32, bias=False)
+        self.linear_2 = nn.Linear(32, 32, bias=False)
 
     def forward(self, timestep: torch.Tensor) -> torch.Tensor:
         frequency = torch.exp(-torch.log(torch.tensor(10000.0)) * torch.arange(128) / 128)

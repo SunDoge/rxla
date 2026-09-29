@@ -102,6 +102,10 @@ pub enum ModelDefinitionError {
     InvalidQwenImage21Configuration,
     #[snafu(display("Qwen-Image-2.1 inputs do not match the configured topology"))]
     InvalidQwenImage21Input,
+    #[snafu(display("Qwen-Image-2.1 schedule requires positive steps and image sequence length"))]
+    InvalidQwenImage21Schedule,
+    #[snafu(display("Qwen-Image-2.1 scheduler step is out of range"))]
+    QwenImage21StepOutOfRange,
     #[snafu(display("invalid Gaussian splatting input or camera configuration"))]
     InvalidGaussianSplattingInput,
 }
