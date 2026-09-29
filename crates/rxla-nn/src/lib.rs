@@ -16,7 +16,10 @@ pub use applied::{
     TransformState,
 };
 mod inputs;
-pub use inputs::{ModelHandler, ModelInput, ModelInputValues, ModelInputs};
+pub use inputs::{
+    BufferDonationExt, Donated, ModelExecutionInputs, ModelHandler, ModelInput, ModelInputValues,
+    ModelInputs,
+};
 mod initializer;
 pub use initializer::Initializer;
 mod layers;
@@ -118,6 +121,13 @@ pub enum Error {
     MissingBinding { path: String },
     #[snafu(display("model expected {expected} inputs, received {actual}"))]
     InputCount { expected: usize, actual: usize },
+    #[snafu(display(
+        "compiled model donates input indices {expected:?}, but the call donated {actual:?}"
+    ))]
+    DonationInputs {
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
     #[snafu(display("model expected {expected} bound parameters, received {actual}"))]
     ParameterCount { expected: usize, actual: usize },
     #[snafu(display("parameter selection belongs to a different model schema"))]
@@ -2100,10 +2110,11 @@ mod tests {
             Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH").expect("CPU plugin path"))
         }
         .unwrap();
-        let model = Model::new(|_: Cx, input: Tensor| -> Result<_> { Ok(input.add_scalar(1.0)?) })
-            .inputs(ModelInput::new([4]))
-            .trace()
-            .unwrap();
+        let model =
+            Model::new(|_: Cx, input: Tensor, bias: Tensor| -> Result<_> { Ok(input.add(&bias)?) })
+                .inputs((ModelInput::new([4]), ModelInput::new([4])))
+                .trace()
+                .unwrap();
         let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
         let runner = model
             .compile_donating(&mut compiler, &[(0, 0)])
@@ -2111,13 +2122,22 @@ mod tests {
             .bind_buffer_program()
             .unwrap();
         let input = client.buffer(&[4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let bias = client.buffer(&[4], &[10.0, 20.0, 30.0, 40.0]).unwrap();
         let remaining_owner = input.clone();
-        let error = match runner.run_donating::<Buffer>(vec![input]) {
+        let error = match runner.run_donating::<_, Buffer>((input.donate(), &bias)) {
             Ok(_) => panic!("shared donation unexpectedly succeeded"),
             Err(error) => error,
         };
         assert!(error.to_string().contains("not uniquely owned"));
-        let output: Buffer = runner.run_donating(vec![remaining_owner]).unwrap();
-        assert_eq!(output.to_vec::<f32>().unwrap(), [2.0, 3.0, 4.0, 5.0]);
+        let error = match runner.run_donating::<_, Buffer>((&remaining_owner, &bias)) {
+            Ok(_) => panic!("missing donation unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("call donated []"));
+        let output: Buffer = runner
+            .run_donating((remaining_owner.donate(), &bias))
+            .unwrap();
+        assert_eq!(output.to_vec::<f32>().unwrap(), [11.0, 22.0, 33.0, 44.0]);
+        assert_eq!(bias.to_vec::<f32>().unwrap(), [10.0, 20.0, 30.0, 40.0]);
     }
 }

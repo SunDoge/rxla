@@ -208,8 +208,9 @@ impl BufferProgram {
         self.model.executable()
     }
 
-    pub fn run_donating<O>(&self, inputs: Vec<Buffer>) -> Result<O>
+    pub fn run_donating<'inputs, I, O>(&self, inputs: I) -> Result<O>
     where
+        I: ModelExecutionInputs<'inputs>,
         O: ModelOutputValues,
     {
         self.model.run_donating(inputs)
@@ -234,13 +235,23 @@ impl BoundModel {
         self.model.decode_outputs(outputs)
     }
 
-    /// Execute by consuming model inputs selected for donation at compilation.
-    /// All supplied buffers are consumed so a successfully donated native
-    /// allocation cannot remain observable through this call site.
-    pub fn run_donating<O>(&self, inputs: Vec<Buffer>) -> Result<O>
+    /// Execute with borrowed inputs and ownership-consuming donated inputs.
+    /// Donated positions must exactly match the aliases selected at compile
+    /// time. Borrowed buffers remain observable and non-donatable.
+    pub fn run_donating<'inputs, I, O>(&self, inputs: I) -> Result<O>
     where
+        I: ModelExecutionInputs<'inputs>,
         O: ModelOutputValues,
     {
+        let (inputs, mut donated_inputs) = inputs.into_execution_inputs();
+        donated_inputs.sort_unstable();
+        ensure!(
+            donated_inputs == self.donated_inputs,
+            DonationInputsSnafu {
+                expected: self.donated_inputs.clone(),
+                actual: donated_inputs,
+            }
+        );
         {
             let input_references = inputs.iter().collect::<Vec<_>>();
             let parameter_references = self
@@ -829,10 +840,12 @@ impl AppliedModel {
                     .unwrap_or(0),
             }
         );
+        let mut donated_inputs = aliases.iter().map(|(input, _)| *input).collect::<Vec<_>>();
+        donated_inputs.sort_unstable();
         Ok(CompiledModel {
             model: self.clone(),
             executable: compiler.compile_many_donating(&self.graph, &self.outputs, aliases)?,
-            donated_inputs: aliases.iter().map(|(input, _)| *input).collect(),
+            donated_inputs,
         })
     }
 

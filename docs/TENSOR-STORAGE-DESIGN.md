@@ -27,6 +27,22 @@ copy-on-write. Explicit compiled input/output aliasing can donate uniquely owned
 runtime `Buffer` values, but it does not mutate or donate shared `Tensor`
 storage.
 
+At the model boundary donation is expressed by ownership instead of a runtime
+index list:
+
+```rust,ignore
+use rxla_nn::BufferDonationExt;
+
+let next: Buffer = step.run_donating((sample.donate(), &context))?;
+```
+
+`sample` is moved and cannot be observed again, while `context` remains borrowed
+and reusable. The call verifies that its donated positions exactly match the
+input/output aliases selected by `compile_donating`; PJRT additionally rejects
+a donated buffer whose native owner is still shared through another `Buffer`
+clone. Rust ownership establishes safety, but donation remains explicit because
+an alias can constrain XLA's global buffer assignment and hurt peak memory.
+
 The descriptor is immutable and exposed only as an opaque Deref target; its
 fields are crate-private and no DerefMut exists. Arc is deliberate: std already
 provides a one-allocation control block and a one-pointer handle, without custom

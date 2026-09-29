@@ -1,7 +1,9 @@
 //! Weight-only device residency budgeting for serving pipelines.
 
 use crate::{Error, OffloadedSchemaBuffers, PrefetchedSchemaBuffers, Result, SchemaBuffers};
-use rxla_nn::{BoundModel, CompiledModel, ModelInputValues, ModelOutputValues};
+use rxla_nn::{
+    BoundModel, CompiledModel, ModelExecutionInputs, ModelInputValues, ModelOutputValues,
+};
 use rxla_pjrt::{Buffer, Client, Memory};
 use std::sync::{
     Arc,
@@ -225,8 +227,9 @@ impl ResidentBoundModel {
 
     /// Execute while transferring ownership of inputs selected for donation
     /// when the model was compiled.
-    pub fn run_donating<O>(&self, inputs: Vec<Buffer>) -> std::result::Result<O, rxla_nn::Error>
+    pub fn run_donating<'inputs, I, O>(&self, inputs: I) -> std::result::Result<O, rxla_nn::Error>
     where
+        I: ModelExecutionInputs<'inputs>,
         O: ModelOutputValues,
     {
         self.model.run_donating(inputs)

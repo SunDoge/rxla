@@ -88,6 +88,72 @@ pub trait ModelInputValues<'a> {
     }
 }
 
+/// An owned runtime input whose allocation may be reused by the executable.
+/// Construct this with [`BufferDonationExt::donate`].
+pub struct Donated(Buffer);
+
+/// Convert an owned buffer into an explicitly donated model input.
+pub trait BufferDonationExt: Sized {
+    fn donate(self) -> Donated;
+}
+
+impl BufferDonationExt for Buffer {
+    fn donate(self) -> Donated {
+        Donated(self)
+    }
+}
+
+/// Flatten a mixture of borrowed and donated runtime model inputs.
+pub trait ModelExecutionInputs<'a> {
+    #[doc(hidden)]
+    fn into_execution_inputs(self) -> (Vec<Buffer>, Vec<usize>);
+}
+
+impl<'a> ModelExecutionInputs<'a> for &'a Buffer {
+    fn into_execution_inputs(self) -> (Vec<Buffer>, Vec<usize>) {
+        (vec![self.clone()], Vec::new())
+    }
+}
+
+impl<'a> ModelExecutionInputs<'a> for Donated {
+    fn into_execution_inputs(self) -> (Vec<Buffer>, Vec<usize>) {
+        (vec![self.0], vec![0])
+    }
+}
+
+impl<'a, I: ModelExecutionInputs<'a>, const N: usize> ModelExecutionInputs<'a> for [I; N] {
+    fn into_execution_inputs(self) -> (Vec<Buffer>, Vec<usize>) {
+        let mut buffers = Vec::new();
+        let mut donated = Vec::new();
+        for input in self {
+            append_execution_group(&mut buffers, &mut donated, input);
+        }
+        (buffers, donated)
+    }
+}
+
+impl<'a, I: ModelExecutionInputs<'a>> ModelExecutionInputs<'a> for Vec<I> {
+    fn into_execution_inputs(self) -> (Vec<Buffer>, Vec<usize>) {
+        let mut buffers = Vec::new();
+        let mut donated = Vec::new();
+        for input in self {
+            append_execution_group(&mut buffers, &mut donated, input);
+        }
+        (buffers, donated)
+    }
+}
+
+fn append_execution_group<'a>(
+    buffers: &mut Vec<Buffer>,
+    donated: &mut Vec<usize>,
+    input: impl ModelExecutionInputs<'a>,
+) {
+    let offset = buffers.len();
+    let (next_buffers, next_donated) = input.into_execution_inputs();
+    buffers.extend(next_buffers);
+    donated.extend(next_donated.into_iter().map(|index| offset + index));
+}
+
 impl<'a> ModelInputValues<'a> for &'a Buffer {
     fn append_to(self, values: &mut Vec<&'a Buffer>) {
         values.push(self);
@@ -252,7 +318,44 @@ macro_rules! impl_tuple_input_values {
     };
 }
 
+macro_rules! impl_tuple_execution_inputs {
+    ($(($($name:ident),+)),+ $(,)?) => {
+        $(
+            impl<'a, $($name: ModelExecutionInputs<'a>),+> ModelExecutionInputs<'a>
+                for ($($name,)+)
+            {
+                #[allow(non_snake_case)]
+                fn into_execution_inputs(self) -> (Vec<Buffer>, Vec<usize>) {
+                    let ($($name,)+) = self;
+                    let mut buffers = Vec::new();
+                    let mut donated = Vec::new();
+                    $(append_execution_group(&mut buffers, &mut donated, $name);)+
+                    (buffers, donated)
+                }
+            }
+        )+
+    };
+}
+
 impl_tuple_input_values!(
+    (A, B),
+    (A, B, C),
+    (A, B, C, D),
+    (A, B, C, D, E),
+    (A, B, C, D, E, F),
+    (A, B, C, D, E, F, G),
+    (A, B, C, D, E, F, G, H),
+    (A, B, C, D, E, F, G, H, I),
+    (A, B, C, D, E, F, G, H, I, J),
+    (A, B, C, D, E, F, G, H, I, J, K),
+    (A, B, C, D, E, F, G, H, I, J, K, L),
+    (A, B, C, D, E, F, G, H, I, J, K, L, M),
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N),
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O),
+    (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P),
+);
+
+impl_tuple_execution_inputs!(
     (A, B),
     (A, B, C),
     (A, B, C, D),
