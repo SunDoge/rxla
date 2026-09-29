@@ -98,6 +98,10 @@ pub enum ModelDefinitionError {
     InvalidFlux2Schedule,
     #[snafu(display("FLUX.2 scheduler step is out of range"))]
     Flux2StepOutOfRange,
+    #[snafu(display("invalid Qwen-Image-2.1 transformer configuration"))]
+    InvalidQwenImage21Configuration,
+    #[snafu(display("Qwen-Image-2.1 inputs do not match the configured topology"))]
+    InvalidQwenImage21Input,
     #[snafu(display("invalid Gaussian splatting input or camera configuration"))]
     InvalidGaussianSplattingInput,
 }
@@ -130,6 +134,7 @@ pub use qwen3_5::{Qwen3_5Config, qwen3_5};
 pub mod flux2;
 pub mod gaussian_splatting;
 pub mod pp_ocr_v6;
+pub mod qwen_image_2_1;
 pub mod sam2;
 mod yolo;
 pub use yolo::{
