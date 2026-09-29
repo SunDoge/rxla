@@ -7,7 +7,7 @@
 
 use super::{Error, ModelDefinitionError, Result};
 use rxla_core::{DType, RotaryLayout, Tensor};
-use rxla_nn::{Cx, Linear, TensorApply};
+use rxla_nn::{Cx, Linear, QuantizedLinear, TensorApply};
 
 mod scheduler;
 pub use scheduler::{QwenImage21FlowScheduler, QwenImage21FlowStep};
@@ -30,6 +30,7 @@ pub struct QwenImage21Config {
     latent_height: i64,
     latent_width: i64,
     parameter_dtype: DType,
+    quant_group_size: Option<i64>,
 }
 
 impl QwenImage21Config {
@@ -49,6 +50,17 @@ impl QwenImage21Config {
             latent_height,
             latent_width,
             parameter_dtype: DType::BF16,
+            quant_group_size: None,
+        }
+    }
+
+    /// Official topology using RXLA symmetric grouped W8 matrix storage.
+    /// Group size 64 is required by the transformer's 64-channel image input.
+    pub fn official_w8(latent_height: i64, latent_width: i64) -> Self {
+        Self {
+            parameter_dtype: DType::F32,
+            quant_group_size: Some(64),
+            ..Self::official(latent_height, latent_width)
         }
     }
 
@@ -68,6 +80,14 @@ impl QwenImage21Config {
             latent_height,
             latent_width,
             parameter_dtype: DType::F32,
+            quant_group_size: None,
+        }
+    }
+
+    pub fn tiny_w8(latent_height: i64, latent_width: i64) -> Self {
+        Self {
+            quant_group_size: Some(8),
+            ..Self::tiny(latent_height, latent_width)
         }
     }
 
@@ -101,6 +121,14 @@ impl QwenImage21Config {
             && self.epsilon.is_finite()
             && self.epsilon > 0.0
             && matches!(self.parameter_dtype, DType::BF16 | DType::F32);
+        let valid = valid
+            && self.quant_group_size.is_none_or(|group| {
+                group > 0
+                    && self.in_channels % group == 0
+                    && self.context_in_dim % group == 0
+                    && self.hidden_size % group == 0
+                    && 256 % group == 0
+            });
         if !valid {
             return Err(Error::InvalidModel {
                 kind: ModelDefinitionError::InvalidQwenImage21Configuration,
@@ -110,11 +138,28 @@ impl QwenImage21Config {
     }
 }
 
-fn linear(cx: Cx, input: &Tensor, width: i64, bias: bool) -> Result<Tensor> {
-    Ok(input.through(cx, Linear::new(width).bias(bias))?)
+fn linear(
+    cx: Cx,
+    input: &Tensor,
+    width: i64,
+    bias: bool,
+    config: &QwenImage21Config,
+) -> Result<Tensor> {
+    match config.quant_group_size {
+        Some(group) => {
+            debug_assert!(!bias, "Qwen-Image-2.1 W8 projections are bias-free");
+            Ok(input.through(cx, QuantizedLinear::new(width, group))?)
+        }
+        None => Ok(input.through(cx, Linear::new(width).bias(bias))?),
+    }
 }
 
-fn timestep_embedding(cx: Cx, timestep: &Tensor, hidden: i64) -> Result<Tensor> {
+fn timestep_embedding(
+    cx: Cx,
+    timestep: &Tensor,
+    hidden: i64,
+    config: &QwenImage21Config,
+) -> Result<Tensor> {
     let half = 128;
     let frequencies = (0..half)
         .map(|index| (-10_000.0_f32.ln() * index as f32 / half as f32).exp())
@@ -127,8 +172,8 @@ fn timestep_embedding(cx: Cx, timestep: &Tensor, hidden: i64) -> Result<Tensor> 
         .mul(&frequency.broadcast_to([timestep.shape()[0], half])?)?;
     let embedded = Tensor::concatenate(&[phase.cos()?, phase.sin()?], 1)?;
     let scope = cx.scope("timestep_embedder")?;
-    let embedded = linear(scope.scope("linear_1")?, &embedded, hidden, false)?.silu()?;
-    linear(scope.scope("linear_2")?, &embedded, hidden, false)
+    let embedded = linear(scope.scope("linear_1")?, &embedded, hidden, false, config)?.silu()?;
+    linear(scope.scope("linear_2")?, &embedded, hidden, false, config)
 }
 
 fn zero_center_rms_norm(cx: Cx, input: &Tensor, epsilon: f32) -> Result<Tensor> {
@@ -140,8 +185,21 @@ fn zero_center_rms_norm(cx: Cx, input: &Tensor, epsilon: f32) -> Result<Tensor> 
 
 fn text_projection(cx: Cx, input: &Tensor, config: &QwenImage21Config) -> Result<Tensor> {
     let hidden = zero_center_rms_norm(cx.scope("text_norm")?, input, config.epsilon)?;
-    let hidden = linear(cx.scope("in_layer")?, &hidden, config.hidden_size, false)?.gelu_tanh()?;
-    linear(cx.scope("out_layer")?, &hidden, config.hidden_size, false)
+    let hidden = linear(
+        cx.scope("in_layer")?,
+        &hidden,
+        config.hidden_size,
+        false,
+        config,
+    )?
+    .gelu_tanh()?;
+    linear(
+        cx.scope("out_layer")?,
+        &hidden,
+        config.hidden_size,
+        false,
+        config,
+    )
 }
 
 fn rotary_angles(cx: &Cx, text_tokens: i64, config: &QwenImage21Config) -> Result<Tensor> {
@@ -221,7 +279,7 @@ fn attention(
     };
     let project = |name: &str| -> Result<Tensor> {
         Ok(
-            linear(cx.scope(name)?, input, config.hidden_size, false)?.reshape([
+            linear(cx.scope(name)?, input, config.hidden_size, false, config)?.reshape([
                 *batch,
                 *tokens,
                 config.num_heads,
@@ -253,6 +311,7 @@ fn attention(
         &attended,
         config.hidden_size,
         false,
+        config,
     )
 }
 
@@ -281,16 +340,18 @@ fn transformer_block(
         &normalized,
         config.hidden_size * config.mlp_ratio,
         false,
+        config,
     )?;
     let gated = linear(
         mlp.scope("gate_layer")?,
         &normalized,
         config.hidden_size * config.mlp_ratio,
         false,
+        config,
     )?
     .silu()?
     .mul(&projected)?;
-    let delta = linear(mlp.scope("out")?, &gated, config.hidden_size, false)?;
+    let delta = linear(mlp.scope("out")?, &gated, config.hidden_size, false, config)?;
     Ok(hidden.add(&delta.mul(&gate)?)?)
 }
 
@@ -331,7 +392,13 @@ pub fn qwen_image_2_1_transformer(
         });
     }
 
-    let image = linear(cx.scope("img_in")?, image, config.hidden_size, false)?;
+    let image = linear(
+        cx.scope("img_in")?,
+        image,
+        config.hidden_size,
+        false,
+        config,
+    )?;
     let context = text_projection(cx.scope("txt_in")?, context, config)?;
     let mut hidden = Tensor::concatenate(&[context, image], 1)?;
     let angles = rotary_angles(&cx, *text_tokens, config)?;
@@ -343,12 +410,14 @@ pub fn qwen_image_2_1_transformer(
         cx.scope("time_text_embed")?,
         &all_timesteps,
         config.hidden_size,
+        config,
     )?;
     let modulation = linear(
         cx.scope("modulation")?.scope("1")?,
         &time.silu()?,
         config.hidden_size * 4,
         false,
+        config,
     )?;
     let modulation = token_modulation(&modulation, *text_tokens, *image_tokens)?;
 
@@ -370,6 +439,7 @@ pub fn qwen_image_2_1_transformer(
         &time.narrow(0, 0, *batch)?.silu()?,
         config.hidden_size,
         false,
+        config,
     )?
     .unsqueeze(1)?
     .broadcast_to(output.shape())?
@@ -377,7 +447,13 @@ pub fn qwen_image_2_1_transformer(
     let output = output
         .layer_norm(&[config.hidden_size], None, None, config.epsilon)?
         .mul(&scale)?;
-    linear(cx.scope("proj_out")?, &output, config.out_channels, false)
+    linear(
+        cx.scope("proj_out")?,
+        &output,
+        config.out_channels,
+        false,
+        config,
+    )
 }
 
 #[cfg(test)]
@@ -455,5 +531,50 @@ mod tests {
                 .get("time_text_embed.timestep_embedder.linear_1.bias")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn official_w8_schema_fits_a_sixteen_gib_device() {
+        let config = QwenImage21Config::official_w8(1, 1);
+        let model = Model::new(|cx: Cx| {
+            let image = cx.input([1, 1, 64])?;
+            let timestep = cx.input([1])?;
+            let context = cx.input([1, 1, 4096])?;
+            qwen_image_2_1_transformer(cx, &image, &timestep, &context, &config)
+        })
+        .trace()
+        .unwrap();
+        assert_eq!(model.schema().parameters().len(), 529);
+        assert_eq!(
+            model.schema().get("img_in.weight").unwrap().storage_dtype(),
+            DType::U8
+        );
+        assert_eq!(
+            model.schema().get("img_in.scale").unwrap().shape(),
+            [4096, 1]
+        );
+        assert_eq!(
+            model
+                .schema()
+                .get("transformer_blocks.0.attn.norm_q.weight")
+                .unwrap()
+                .storage_dtype(),
+            DType::F32
+        );
+        let storage_bytes = model
+            .schema()
+            .parameters()
+            .iter()
+            .map(|parameter| {
+                let elements = parameter.shape().iter().product::<i64>();
+                elements
+                    * match parameter.storage_dtype() {
+                        DType::U8 => 1,
+                        DType::F32 => 4,
+                        dtype => panic!("unexpected W8 schema dtype {dtype:?}"),
+                    }
+            })
+            .sum::<i64>();
+        assert!(storage_bytes < 7_700_000_000, "{storage_bytes}");
     }
 }

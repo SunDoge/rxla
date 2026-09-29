@@ -191,6 +191,29 @@ def main() -> None:
         {name: value.detach().contiguous() for name, value in model.state_dict().items()},
         args.output_dir / "weights.safetensors",
     )
+    quantized: dict[str, torch.Tensor] = {}
+    for name, value in model.state_dict().items():
+        if value.ndim != 2:
+            quantized[name] = value.detach().float().contiguous()
+            continue
+        rows, columns = value.shape
+        grouped = value.detach().float().reshape(rows, -1, 8)
+        scale = grouped.abs().amax(2).clamp_min(1e-12) / 127
+        quantized[name] = (
+            (grouped / scale.unsqueeze(2))
+            .round()
+            .clamp(-127, 127)
+            .add(128)
+            .to(torch.uint8)
+            .reshape(rows, columns)
+            .contiguous()
+        )
+        quantized[name.removesuffix(".weight") + ".scale"] = scale.contiguous()
+    save_file(
+        quantized,
+        args.output_dir / "weights_w8.safetensors",
+        metadata={"format": "rxla-qwen-image-2.1-w8-v1", "group_size": "8"},
+    )
     save_file(
         {"image": image, "timestep": timestep, "context": context, "output": output},
         args.output_dir / "oracle.safetensors",

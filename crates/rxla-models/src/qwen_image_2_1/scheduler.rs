@@ -97,7 +97,7 @@ mod tests {
         assert_eq!(scheduler.sigmas().len(), 41);
         for (actual, expected) in scheduler.sigmas()[..5].iter().zip([
             1.0,
-            0.992_645_98,
+            0.992_646,
             0.985_012_95,
             0.977_084_8,
             0.968_844_1,
