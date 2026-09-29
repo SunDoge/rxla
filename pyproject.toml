@@ -11,7 +11,7 @@ dependencies = [
     "loguru>=0.7.3",
     "numpy>=2.3",
     "pydantic>=2.13.5",
-    "safetensors>=0.6,<0.7",
+    "safetensors>=0.8,<0.9",
     "torch>=2.14.0",
     "torchvision>=0.29.0",
     "transformers>=5.12.1",
@@ -31,3 +31,10 @@ package = false
 
 [tool.uv.sources]
 rxla-log = { path = "python/rxla-log", editable = true }
+diffusers = { git = "https://github.com/huggingface/diffusers.git" }
+
+[dependency-groups]
+qwen-bench = [
+    "diffusers",
+    "transformers>=5.17",
+]

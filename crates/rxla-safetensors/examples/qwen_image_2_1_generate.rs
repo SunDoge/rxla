@@ -434,6 +434,7 @@ fn run(args: Args) -> Result<()> {
         client_options = client_options.set("memory_fraction", memory_fraction);
     }
     let client = unsafe { Client::load_with_options(&args.plugin, &client_options) }?;
+    let generation_start = Instant::now();
     let latent_height = i64::from(args.height / 16);
     let latent_width = i64::from(args.width / 16);
     let mut latent = denoise(
@@ -463,6 +464,7 @@ fn run(args: Args) -> Result<()> {
             *value = *value * vae_config.latents_std[channel] + vae_config.latents_mean[channel];
         }
     }
+    let vae_start = Instant::now();
     let values = if args.width <= args.vae_tile && args.height <= args.vae_tile {
         decode(
             &client,
@@ -489,6 +491,7 @@ fn run(args: Args) -> Result<()> {
             args.cache_dir.as_ref(),
         )?
     };
+    let vae_time = vae_start.elapsed();
     let pixels = values
         .into_iter()
         .map(|value| ((value + 1.0) * 127.5).round().clamp(0.0, 255.0) as u8)
@@ -496,7 +499,11 @@ fn run(args: Args) -> Result<()> {
     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(args.width, args.height, pixels)
         .ok_or("VAE output does not match requested dimensions")?;
     image.save(&args.output)?;
-    println!("saved {}", args.output.display());
+    println!(
+        "vae={vae_time:.3?} generation={:.3?} saved {}",
+        generation_start.elapsed(),
+        args.output.display()
+    );
     Ok(())
 }
 
