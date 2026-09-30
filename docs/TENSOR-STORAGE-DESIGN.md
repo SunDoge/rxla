@@ -43,6 +43,11 @@ a donated buffer whose native owner is still shared through another `Buffer`
 clone. Rust ownership establishes safety, but donation remains explicit because
 an alias can constrain XLA's global buffer assignment and hurt peak memory.
 
+External device views (including DLPack imports) are rejected for donation even
+when their Rust handle is unique: producer-side aliases are outside the Rust
+owner count. Pointer-export guards and pending executions retain buffer owners
+and prevent donation until those owners are released.
+
 The descriptor is immutable and exposed only as an opaque Deref target; its
 fields are crate-private and no DerefMut exists. Arc is deliberate: std already
 provides a one-allocation control block and a one-pointer handle, without custom

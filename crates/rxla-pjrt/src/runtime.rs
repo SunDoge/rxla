@@ -1048,13 +1048,14 @@ impl Client {
             drop(unsafe { Box::from_raw(owner) });
             return Err(error);
         }
-        let inner = match BufferInner::new(self.0.clone(), args.buffer) {
+        let mut inner = match BufferInner::new(self.0.clone(), args.buffer) {
             Ok(inner) => inner,
             Err(error) => {
                 drop(unsafe { Box::from_raw(owner) });
                 return Err(error);
             }
         };
+        inner.externally_owned = true;
         Ok(Buffer {
             inner: Arc::new(inner),
         })
@@ -1522,6 +1523,7 @@ impl Drop for BufferExternalReference {
 struct BufferInner {
     client: Arc<ClientInner>,
     raw: NonNull<PJRT_Buffer>,
+    externally_owned: bool,
 }
 
 // PjRtBuffer is explicitly thread-safe in the OpenXLA interface. Destruction
@@ -1529,6 +1531,22 @@ struct BufferInner {
 unsafe impl Send for BufferInner {}
 unsafe impl Sync for BufferInner {}
 impl Buffer {
+    fn validate_donation(&self, index: usize) -> Result<()> {
+        ensure!(
+            !self.inner.externally_owned,
+            InvalidArgumentSnafu {
+                message: format!("donated input {index} uses externally owned memory"),
+            }
+        );
+        ensure!(
+            Arc::strong_count(&self.inner) == 1,
+            InvalidArgumentSnafu {
+                message: format!("donated input {index} is not uniquely owned"),
+            }
+        );
+        Ok(())
+    }
+
     /// Whether PJRT reports that this allocation is host-accessible CPU memory.
     pub fn is_on_cpu(&self) -> Result<bool> {
         let plugin = &self.inner.client.plugin;
@@ -1942,7 +1960,11 @@ impl BufferInner {
         let raw = NonNull::new(raw).context(InvalidPluginDataSnafu {
             message: "PJRT returned a null buffer",
         })?;
-        Ok(Self { client, raw })
+        Ok(Self {
+            client,
+            raw,
+            externally_owned: false,
+        })
     }
 
     fn destroy(&self) -> Result<()> {
@@ -2150,6 +2172,8 @@ impl Executable {
     /// executable. The executable must have matching input/output aliases.
     /// Donated buffers must be uniquely owned; this API consumes every input so
     /// Rust code cannot observe an invalid native buffer after submission.
+    /// Externally owned device views cannot be donated: their producer may
+    /// retain allocation aliases outside this runtime's ownership tracking.
     pub fn execute_donating(
         &self,
         inputs: Vec<Buffer>,
@@ -2202,12 +2226,7 @@ impl Executable {
                 }
             );
             if require_unique_donations {
-                ensure!(
-                    Arc::strong_count(&inputs[index].inner) == 1,
-                    InvalidArgumentSnafu {
-                        message: format!("donated input {index} is not uniquely owned"),
-                    }
-                );
+                inputs[index].validate_donation(index)?;
             }
             donated[index] = true;
         }
@@ -2719,8 +2738,22 @@ mod lifetime_tests {
                 inner: Arc::new(BufferInner {
                     client: client.0.clone(),
                     raw: NonNull::new(ptr::from_ref(&probe).cast_mut().cast()).unwrap(),
+                    externally_owned: false,
                 }),
             };
+            assert!(buffer.validate_donation(0).is_ok());
+            let alias = buffer.clone();
+            assert!(matches!(
+                buffer.validate_donation(0),
+                Err(Error::InvalidArgument { message }) if message.contains("not uniquely owned")
+            ));
+            drop(alias);
+            let mut buffer = buffer;
+            Arc::get_mut(&mut buffer.inner).unwrap().externally_owned = true;
+            assert!(matches!(
+                buffer.validate_donation(0),
+                Err(Error::InvalidArgument { message }) if message.contains("externally owned")
+            ));
             assert_eq!(buffer.host_payload_bytes().unwrap(), usize::MAX - 3);
             assert_eq!(probe.downloads.get(), 0);
             assert_eq!(probe.uploads.get(), 0);

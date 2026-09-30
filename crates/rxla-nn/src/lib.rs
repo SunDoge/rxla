@@ -2134,6 +2134,25 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("call donated []"));
+        // Pointer exports keep an owner alive even if the caller moves its
+        // buffer handle into the donating invocation.
+        let exported = client.buffer(&[4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let pointer_guard = exported.external_reference().unwrap();
+        assert!(
+            runner
+                .run_donating::<_, Buffer>((exported.donate(), &bias))
+                .is_err()
+        );
+        drop(pointer_guard);
+        // An unfinished submission similarly retains native input ownership.
+        let in_flight = client.buffer(&[4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let pending = runner.executable().submit(&[&in_flight, &bias]).unwrap();
+        assert!(
+            runner
+                .run_donating::<_, Buffer>((in_flight.donate(), &bias))
+                .is_err()
+        );
+        pending.wait().unwrap();
         let output: Buffer = runner
             .run_donating((remaining_owner.donate(), &bias))
             .unwrap();
