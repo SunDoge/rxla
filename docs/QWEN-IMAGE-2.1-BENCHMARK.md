@@ -1,5 +1,8 @@
 # Qwen-Image-2.1 inference benchmark
 
+The original results below use four steps. See [40-step measurements](#40-step-measurements)
+for the 2026-10-01 default-step workload and a weight-matched PyTorch reference.
+
 Measured on 2026-09-29 on an NVIDIA GeForce RTX 5080 (16 GiB). Another
 long-lived process occupied about 1 GiB during every run. Both implementations
 used cached prompt embeddings with shape `[1, 43, 4096]`, 512×512 output, four
@@ -120,7 +123,113 @@ This is **4.33×** the measured throughput of the official BF16 batch-4 model
 offload path. A seed-42 persistent request produced byte-identical images to
 the earlier one-shot device-bridge path.
 
-## Reproduction
+## 40-step measurements
+
+Measured on 2026-10-01 on the same RTX 5080, with about 1,036 MiB already used
+by another process. Resolution is 512×512, cached prompt embeddings are
+`[1, 43, 4096]`, and guidance uses the single conditional path (the official
+pipeline's default `true_cfg_scale=1`). Forty steps match the installed official
+pipeline's default. Runs are serial, each with one warmup and three measured
+requests. RXLA retains its pipeline and uses VAE micro-batch 4.
+Each batch repeats the same cached prompt; these runs do not measure mixed
+prompt lengths or concurrent requests.
+
+| Implementation | Batch | Median request | Throughput | Measured request samples |
+|---|---:|---:|---:|---|
+| RXLA W8, resident pipeline | 1 | 6.937 s | 0.144 img/s | 6.916, 6.937, 6.957 s |
+| RXLA W8, resident pipeline | 8 | 49.164 s | 0.163 img/s | 49.362, 49.164, 49.115 s |
+| Diffusers, same RXLA W8 checkpoint, resident pipeline | 1 | 15.512 s | 0.064 img/s | 15.502, 15.512, 15.512 s |
+| Diffusers, same RXLA W8 checkpoint, VAE micro-batch 2 | 8 | 62.024 s | 0.129 img/s | 62.011, 62.040, 62.024 s |
+| Official BF16, model CPU offload | 1 | 12.769 s | 0.078 img/s | 13.320, 12.769, 12.661 s |
+
+The weight-matched reference replaces Diffusers' bias-free Linear modules with
+eager grouped-W8 dequantization (`(U8 - 128) * F32 scale`) followed by BF16 GEMM.
+It loads the exact 7,559,831,552-byte RXLA transformer payload and checks the
+entire state dictionary strictly. This is an executable same-checkpoint
+reference, not a tuned quantization library or a `torch.compile` comparison.
+Both implementations produce visually plausible images for the cached chair
+prompt; different RNGs, seeds of saved requests and intermediate arithmetic
+mean this does not establish numerical equivalence or a quality ranking.
+RXLA batch 1 and the first image of batch 8, at the same final-request seed,
+have mean absolute RGBA byte difference 2.783/255 and maximum difference
+151/255. Batching is therefore not bit-exact over forty denoising steps.
+
+RXLA is **2.24× faster** than this same-weight eager reference at batch 1 and
+**1.84× faster** than the official BF16 offload deployment path. For resident
+compute only, official BF16 takes 6.316 s (samples 6.321, 6.315, 6.316 s),
+versus RXLA W8 DiT's 6.718 s: RXLA takes about **6.4% longer**. The official
+diagnostic skips VAE and retains prefix KV caching; these are different weight
+formats and execution paths, so this is not an isolated GEMM comparison.
+At batch 8 RXLA delivers **26.2% more throughput** than the same-weight eager
+reference. The PyTorch run requires VAE micro-batch 2 and
+`PYTORCH_ALLOC_CONF=expandable_segments:True`, whereas RXLA uses micro-batch 4
+and PJRT's BFC allocator. This is a comparison of the working deployment
+configurations, not identical VAE batching or allocator settings.
+
+RXLA batch 8 improves image throughput by only **12.9%** over batch 1 at forty
+steps. Its DiT median is 47.430 s and VAE/download median is 1.730 s; batch 1
+uses 6.718 s and 0.219 s respectively. Denoising dominates this workload, so
+amortizing VAE and initialization cannot reproduce the large throughput gains
+in the earlier four-step runs. Batch-8 request latency is about 49 s, not the
+6.15 s per-image amortized cost.
+
+Timing boundaries: RXLA request timing includes denoising, VAE and output
+download, and excludes initialization and PNG encoding. Diffusers includes
+denoising and VAE with device-completion synchronization but leaves output on
+GPU; output download and PNG encoding are excluded. Neither includes text
+encoding or network/server overhead. Initialization and the first RXLA request
+are excluded; batch 1's first request took 15.245 s and batch 8's took 49.500 s.
+
+Memory measurements use different counters and must not be compared directly:
+
+- Sampling `nvidia-smi` every approximately 200 ms found 15,699 MiB total GPU
+  usage for both RXLA runs, 14,663 MiB above the baseline. This includes CUDA
+  context and retained BFC allocator regions, including free blocks, and is not
+  the peak live tensor allocation or a minimum required VRAM estimate.
+- PyTorch batch-1 active-allocation peaks were 10,069,532,160 bytes (9.38 GiB)
+  for the W8 resident pipeline and 14,455,545,344 bytes (13.46 GiB) for BF16
+  offload. Those exclude cached allocator blocks and other processes.
+- PyTorch W8 batch 8 with micro-batch 2 peaked at 11,863,838,208 active bytes
+  (11.05 GiB), with the expandable allocator enabled.
+
+Reproduce the RXLA matrix:
+
+```bash
+cargo build --release -p rxla-safetensors --features model,disk-cache \
+  --example qwen_image_2_1_generate
+uv run --group qwen-bench python scripts/benchmark_qwen_image_2_1_rxla.py \
+  --steps 40 --batches 1,8 --warmup 1 --iterations 3
+```
+
+The wrapper writes logs, `results.json` and final-request PNGs to
+`.cache/qwen-image-2.1/benchmark-40steps/`. Sampling errors and failed/incomplete
+generation requests are recorded rather than reported as valid benchmarks.
+
+Reproduce the weight-matched reference:
+
+```bash
+uv run --group qwen-bench python scripts/benchmark_qwen_image_2_1_official.py \
+  --steps 40 --batch-size 1 --warmup 1 --iterations 3 \
+  --transformer-weights rxla-w8 --residency resident-pipeline --kv-cache on
+
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+uv run --group qwen-bench python scripts/benchmark_qwen_image_2_1_official.py \
+  --steps 40 --batch-size 8 --vae-batch-size 2 --warmup 1 --iterations 3 \
+  --transformer-weights rxla-w8 --residency resident-pipeline --kv-cache on
+```
+
+For the BF16 deployment reference use `--transformer-weights bf16 --residency
+model-offload`. For the BF16 compute diagnostic use `--transformer-weights bf16
+--residency resident-transformer --output latent`. `--save-image PATH` optionally
+saves the first image of the final measured image request after the timer ends.
+
+The PyTorch same-W8 batch-8 pipeline exhausted memory with a full-batch VAE and
+again with VAE micro-batch 4. The latter failed inside VAE normalization with
+12.20 GiB of active allocations and another 1.12 GiB allocation requested.
+RXLA's measured batch-8 path completes with micro-batch 4. These failed runs
+provide no valid complete-request latency samples.
+
+## Four-step reproduction
 
 Official complete-image path:
 
