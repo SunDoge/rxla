@@ -31,6 +31,9 @@ class Args(TypedArgs):
     iterations: Annotated[int, Arg("--iterations")] = 3
     width: Annotated[int, Arg("--width")] = 512
     height: Annotated[int, Arg("--height")] = 512
+    prepare_schedule: Annotated[bool, Arg("--prepare-schedule", action="store_true")] = False
+    seed: Annotated[int, Arg("--seed")] = 42
+    reference_dir: Annotated[Path | None, Arg("--reference-dir")] = None
 
 
 def gpu_memory_mib() -> int:
@@ -58,10 +61,14 @@ def benchmark(args: Args, batch: int) -> dict:
         str(args.output_dir / f"batch{batch}.png"),
         "--width", str(args.width), "--height", str(args.height),
         "--steps", str(args.steps), "--batch-size", str(batch),
+        "--seed", str(args.seed),
         "--vae-batch-size", "4", "--requests", str(args.warmup + args.iterations),
         "--memory-fraction", "0.9", "--preallocate", "false",
         "--cache-dir", str(root / "compile-cache"),
+        "--latent-output", str(args.output_dir / f"batch{batch}.latent.f32"),
     ]
+    if args.prepare_schedule:
+        command.append("--prepare-schedule")
     baseline = gpu_memory_mib()
     samples = [baseline]
     sampler_errors: list[str] = []
@@ -95,6 +102,8 @@ def benchmark(args: Args, batch: int) -> dict:
     steady = requests[args.warmup:]
     report = {
         "backend": "rxla", "weight_format": "grouped-w8", "compute_dtype": "bf16",
+        "prepare_schedule": args.prepare_schedule,
+        "seed": args.seed, "final_seed": args.seed + args.warmup + args.iterations - 1,
         "cached_prompt_embeddings": True, "width": args.width, "height": args.height,
         "steps": args.steps, "batch_size": batch, "warmup": args.warmup,
         "iterations": args.iterations, "command": command,
@@ -103,7 +112,7 @@ def benchmark(args: Args, batch: int) -> dict:
         "sampled_gpu_peak_mib": max(samples),
         "sampled_gpu_peak_above_baseline_mib": max(samples) - baseline,
         "memory_sampling_errors": sampler_errors,
-        "timing_boundary": "denoising plus VAE and output download; excludes PNG encoding",
+        "timing_boundary": "denoising plus VAE and output download; excludes PNG encoding and diagnostic latent export",
     }
     if completed.returncode == 0 and len(steady) == args.iterations:
         median = statistics.median(item["total_seconds"] for item in steady)
@@ -112,6 +121,25 @@ def benchmark(args: Args, batch: int) -> dict:
             median_dit_seconds=statistics.median(item["dit_seconds"] for item in steady),
             median_vae_seconds=statistics.median(item["vae_seconds"] for item in steady),
         )
+        if args.reference_dir is not None:
+            import numpy as np
+
+            filename = f"batch{batch}.latent.f32"
+            reference = np.fromfile(args.reference_dir / filename, dtype="<f4")
+            actual = np.fromfile(args.output_dir / filename, dtype="<f4")
+            expected = batch * (args.width // 16) * (args.height // 16) * 64
+            if actual.size != expected or reference.shape != actual.shape:
+                raise ValueError("reference and output latent dimensions do not match")
+            if not np.isfinite(reference).all() or not np.isfinite(actual).all():
+                raise ValueError("latent comparison contains nonfinite values")
+            difference = actual.astype(np.float64) - reference.astype(np.float64)
+            report["latent_comparison"] = {
+                "reference_dir": str(args.reference_dir), "elements": actual.size,
+                "bit_exact": reference.tobytes() == actual.tobytes(),
+                "max_absolute_error": float(np.max(np.abs(difference))),
+                "mean_absolute_error": float(np.mean(np.abs(difference))),
+                "rms_error": float(np.sqrt(np.mean(difference ** 2))),
+            }
     else:
         report["error"] = "generation failed or request timing samples are incomplete; see log"
     return report

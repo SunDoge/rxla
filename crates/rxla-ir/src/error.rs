@@ -6,6 +6,8 @@ use snafu::Snafu;
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
 pub enum IrError {
+    #[snafu(display("cannot stage program: {reason}"))]
+    InvalidStage { reason: &'static str },
     #[snafu(display("invalid SSA value while {operation}"))]
     InvalidValue { operation: &'static str },
     #[snafu(display("malformed Pliron attribute {attribute}"))]

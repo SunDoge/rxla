@@ -16,10 +16,12 @@ pub use applied::{
     TransformState,
 };
 mod inputs;
+mod staging;
 pub use inputs::{
     BufferDonationExt, Donated, ModelExecutionInputs, ModelHandler, ModelInput, ModelInputValues,
     ModelInputs,
 };
+pub use staging::{BoundModelStages, CompiledModelStages, PreparedModelValues};
 mod initializer;
 pub use initializer::Initializer;
 mod layers;
@@ -78,6 +80,10 @@ pub struct NoModelInputs;
 #[non_exhaustive]
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
+    #[snafu(display("prepared values belong to another bound model or weight binding"))]
+    PreparedModelMismatch,
+    #[snafu(display("invalid staged model ABI"))]
+    InvalidStageAbi,
     #[snafu(transparent)]
     Tensor { source: rxla_core::Error },
     #[snafu(transparent)]

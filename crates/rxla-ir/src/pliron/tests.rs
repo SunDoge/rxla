@@ -10,6 +10,77 @@ fn vector_type(size: i64, dtype: DType) -> TensorType {
 }
 
 #[test]
+fn staging_prunes_dependencies_without_changing_source() -> Result<()> {
+    let mut ir = ProgramIr::default();
+    let ty = vector_type(4, DType::F32);
+    let dynamic = ir.append(&Op::Parameter(0), &[], &ty)?;
+    let schedule = ir.append(&Op::Parameter(1), &[], &ty)?;
+    let cut = ir.append(&Op::Unary(Unary::Exp), &[schedule], &ty)?;
+    let output = ir.append(&Op::Binary(Binary::Add), &[dynamic, cut], &ty)?;
+    let source = SemanticProgram::capture(&ir, &[output], false)?;
+    let before = source.lower(LoweringTarget::Portable)?;
+    let (prep, execution, count) = source.split_at(&[cut])?;
+    assert_eq!(count, 2);
+    let prep = prep.lower(LoweringTarget::Portable)?;
+    let execution = execution.lower(LoweringTarget::Portable)?;
+    assert_eq!(prep.parameters, [1]);
+    assert_eq!(execution.parameters, [0, 2]);
+    assert!(prep.code.contains("stablehlo.exponential"));
+    assert!(!execution.code.contains("stablehlo.exponential"));
+    assert_eq!(before.code, source.lower(LoweringTarget::Portable)?.code);
+    assert!(source.split_at(&[]).is_err());
+    assert!(source.split_at(&[cut, cut]).is_err());
+    assert!(source.split_at(&[schedule]).is_err());
+    assert!(source.split_at(&[SsaId::from_index(999)]).is_err());
+    Ok(())
+}
+
+#[test]
+fn staging_rejects_custom_calls_even_if_not_selected() -> Result<()> {
+    let mut ir = ProgramIr::default();
+    let ty = vector_type(4, DType::F32);
+    let input = ir.append(&Op::Parameter(0), &[], &ty)?;
+    let cut = ir.append(&Op::Unary(Unary::Exp), &[input], &ty)?;
+    let output = ir.append(
+        &Op::CustomCall {
+            target: "external_operation".to_owned(),
+            backend_config: String::new(),
+            has_side_effect: true,
+            api_version: 4,
+            result_dtype: DType::F32,
+        },
+        &[cut],
+        &ty,
+    )?;
+    let source = SemanticProgram::capture(&ir, &[output], false)?;
+    assert!(matches!(
+        source.split_at(&[cut]),
+        Err(IrError::InvalidStage { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn staging_preserves_cut_order_and_intermediate_dependencies() -> Result<()> {
+    let mut ir = ProgramIr::default();
+    let ty = vector_type(4, DType::F32);
+    let input = ir.append(&Op::Parameter(0), &[], &ty)?;
+    let first = ir.append(&Op::Unary(Unary::Exp), &[input], &ty)?;
+    let second = ir.append(&Op::Binary(Binary::Add), &[first, input], &ty)?;
+    let output = ir.append(&Op::Binary(Binary::Add), &[first, second], &ty)?;
+    let source = SemanticProgram::capture(&ir, &[output], false)?;
+    let (prep, execution, _) = source.split_at(&[second, first])?;
+    let prep = prep.lower(LoweringTarget::Portable)?;
+    let execution = execution.lower(LoweringTarget::Portable)?;
+    assert_eq!(prep.parameters, [0]);
+    assert_eq!(prep.outputs, [ty.clone(), ty]);
+    assert_eq!(execution.parameters, [1, 2]);
+    assert_eq!(execution.code.matches("stablehlo.add").count(), 1);
+    assert!(!execution.code.contains("stablehlo.exponential"));
+    Ok(())
+}
+
+#[test]
 fn semantic_ssa_lowers_to_verified_stablehlo() {
     let mut program = ProgramIr::default();
     let ty = vector_type(4, DType::F32);

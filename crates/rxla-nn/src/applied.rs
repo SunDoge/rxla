@@ -945,7 +945,7 @@ impl AppliedModel {
         self.assemble(&inputs, &parameters)
     }
 
-    fn order_parameters<'a>(
+    pub(crate) fn order_parameters<'a>(
         &self,
         parameters: impl IntoIterator<Item = (&'a str, &'a Buffer)>,
     ) -> Result<Vec<Option<&'a Buffer>>> {

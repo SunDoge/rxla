@@ -57,7 +57,9 @@ pub use planning::{
 pub use rearrange::Rearrange;
 pub use rotary::RotaryLayout;
 pub use rxla_ir::{Mesh, MeshAxis, PartitionSpec, Sharding, ShardingError};
+mod staging;
 mod state;
+pub use staging::{CompiledStages, StageInput, StagedProgram};
 pub mod state_tree;
 mod transposed_convolution;
 mod typed_state;

@@ -274,6 +274,70 @@ target/release/examples/qwen_image_2_1_generate \
   --cache-dir .cache/qwen-image-2.1/compile-cache
 ```
 
+## IR staging experiment
+
+On 2026-10-01 we extracted timestep embedding/modulation and final output scale
+from the same traced Qwen model using explicit named SSA cuts. The preparation
+ABI contains only model input 1 (timestep); the execution ABI contains inputs
+0/2/3 (sample, step size, prompt) plus prepared vectors. This is an IR partition,
+not a separately maintained model implementation. The original program remains
+available for the A/B reference. See [API and restrictions](IR-STAGING.md).
+
+Same RTX 5080, W8 checkpoint, BF16 projections, 512×512, 40 steps, conditional
+path, one warmup and three measured requests, run serially with the same binary:
+
+| Path | Batch | Median request | DiT median | Request samples |
+|---|---:|---:|---:|---|
+| Original | 1 | 6.961 s | 6.740 s | 6.938, 6.961, 6.969 s |
+| Prepared schedule | 1 | 6.989 s | 6.767 s | 6.972, 6.989, 6.996 s |
+| Original | 8 | 49.296 s | 47.558 s | 49.272, 49.296, 49.300 s |
+| Prepared schedule | 8 | 48.992 s | 47.257 s | 49.122, 48.992, 48.980 s |
+
+Preparation took 31.480 ms for batch 1 and 47.958 ms for batch 8. Its cached
+F32 tensor payload is 5.625 MiB / 27.5 MiB respectively for all forty steps,
+excluding allocator overhead and step-size buffers. Preparation is charged to
+pipeline initialization, not steady-state requests. Step-size buffers are also
+uploaded once in the staged path; the baseline still uploads both scalars each
+step, so this is a serving-path experiment rather than an isolated kernel test.
+
+Batch 1's final seed-45 latent has 65,536 F32 values and is bit-exact against
+the original after forty steps. Batch 8's 524,288 values are also bit-exact;
+all nine final PNG files match byte-for-byte against their corresponding
+references. Sampled whole-GPU peaks are unchanged between paths: 15,699 MiB
+at batch 1 and 15,701 MiB at batch 8, including the 1,036 MiB background usage
+and retained BFC allocator regions. This is not a live-tensor memory counter.
+The tiny CPU test
+checks four chained steps at batch 1/2 with both F32 and BF16 projections.
+These checks establish equivalence for these inputs, not for every possible
+compiler configuration.
+
+There is **no substantial demonstrated acceleration**: batch 1 is about 0.4%
+slower, within the observed run spread; batch 8 is about 0.6% faster in this
+single serial A/B, insufficient to claim a stable gain. Staging remains opt-in
+(`--prepare-schedule`), and no
+memory-saving claim is made. It adds reusable infrastructure for larger
+request-invariant computations; it does not address the dominant attention and
+large projection kernels in this workload.
+
+Reproduce with matching seed, prompt, weights, resolution and step count:
+
+```bash
+uv run --group qwen-bench python scripts/benchmark_qwen_image_2_1_rxla.py \
+  --batches 1,8 --steps 40 --seed 42 \
+  --output-dir .cache/qwen-image-2.1/staging-reference
+uv run --group qwen-bench python scripts/benchmark_qwen_image_2_1_rxla.py \
+  --batches 1,8 --steps 40 --seed 42 --prepare-schedule \
+  --output-dir .cache/qwen-image-2.1/staging-prepared \
+  --reference-dir .cache/qwen-image-2.1/staging-reference
+```
+
+The wrapper exports the last request's little-endian F32 latent and can record
+bit equality, maximum/mean absolute error and RMS error against a reference
+folder. Diagnostic latent download and PNG encoding are outside request timing.
+Actual experiment artifacts are in `staging-baseline-40steps/` (batch 1),
+`staging-baseline-batch8-40steps/` (batch 8), and `staging-latent-40steps/`
+(both staged batches), under `.cache/qwen-image-2.1/`.
+
 ## Next optimization target
 
 The primary remaining performance target is the resident DiT gap, not offload.

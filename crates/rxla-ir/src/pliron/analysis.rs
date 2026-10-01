@@ -22,6 +22,66 @@ pub struct SemanticProgram {
 }
 
 impl SemanticProgram {
+    /// Split a pure straight-line SSA program at explicitly selected values.
+    /// The preparation returns those values; the execution receives them as
+    /// new ABI arguments, allowing ordinary liveness pruning to remove their
+    /// producers. The source snapshot is never mutated.
+    pub fn split_at(&self, cuts: &[SsaId]) -> Result<(Self, Self, usize)> {
+        if cuts.is_empty() {
+            return Err(IrError::InvalidStage {
+                reason: "no intermediate values selected",
+            });
+        }
+        if self.nodes.iter().any(|node| {
+            matches!(
+                node.op,
+                Op::StateInput { .. }
+                    | Op::StateRead { .. }
+                    | Op::StateWrite { .. }
+                    | Op::If { .. }
+                    | Op::MultiResult { .. }
+                    | Op::CustomCall { .. }
+            )
+        }) {
+            return Err(IrError::InvalidStage {
+                reason: "only pure straight-line programs are supported",
+            });
+        }
+        let parameter_count = self
+            .nodes
+            .iter()
+            .filter_map(|node| match node.op {
+                Op::Parameter(number) => Some(number + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let mut seen = HashSet::new();
+        let mut execution = self.clone();
+        for (index, &cut) in cuts.iter().enumerate() {
+            let node = execution
+                .nodes
+                .get_mut(cut.index())
+                .ok_or(IrError::InvalidStage {
+                    reason: "intermediate value is out of bounds",
+                })?;
+            if !seen.insert(cut) || matches!(node.op, Op::Parameter(_)) {
+                return Err(IrError::InvalidStage {
+                    reason: "cuts must be distinct computed values",
+                });
+            }
+            node.op = Op::Parameter(parameter_count + index);
+            node.operands.clear();
+        }
+        execution.preserve_all_inputs = false;
+        let preparation = Self {
+            nodes: self.nodes.clone(),
+            outputs: cuts.to_vec(),
+            preserve_all_inputs: false,
+        };
+        Ok((preparation, execution, parameter_count))
+    }
+
     pub fn capture(ir: &ProgramIr, outputs: &[SsaId], preserve_all_inputs: bool) -> Result<Self> {
         for &output in outputs {
             ir.value_type(output)?;

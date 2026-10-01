@@ -10,7 +10,10 @@ use rxla_models::qwen_image_2_1::{
     QwenImage21Config, QwenImage21FlowScheduler, qwen_image_2_1_denoise, qwen_image_2_1_euler_step,
     qwen_image_2_1_vae_decoder, qwen_image_2_1_vae_decoder_raw,
 };
-use rxla_nn::{BoundModel, BufferProgram, Cx, MicroBatchPlan, Model, ModelInput};
+use rxla_nn::{
+    BoundModel, BoundModelStages, BufferProgram, Cx, MicroBatchPlan, Model, ModelInput,
+    PreparedModelValues,
+};
 use rxla_safetensors::{ResidentBoundModel, SafeTensors, WeightResidencyPool};
 use serde::Deserialize;
 use std::{
@@ -36,6 +39,10 @@ struct Args {
     conditioning: PathBuf,
     /// Output PNG.
     output: PathBuf,
+    /// Write final unnormalized latent as little-endian F32 for numerical A/B checks.
+    /// The download is outside reported request timings.
+    #[arg(long)]
+    latent_output: Option<PathBuf>,
     #[arg(long, default_value_t = 512)]
     width: u32,
     #[arg(long, default_value_t = 512)]
@@ -72,6 +79,9 @@ struct Args {
     /// host enqueue path remains faster on the currently tested CUDA plugin.
     #[arg(long)]
     device_loop: bool,
+    /// Prepare timestep-only intermediates once, using cuts in the model IR.
+    #[arg(long, conflicts_with_all = ["device_loop", "offload_transformer"])]
+    prepare_schedule: bool,
     /// Persistent serialized PJRT executable cache.
     #[arg(long)]
     cache_dir: Option<PathBuf>,
@@ -123,6 +133,7 @@ struct DenoiseOptions<'a> {
     steps: usize,
     batch_size: usize,
     device_loop: bool,
+    prepare_schedule: bool,
     cache_dir: Option<&'a PathBuf>,
     offload_transformer: bool,
     offload_headroom_bytes: usize,
@@ -146,6 +157,11 @@ fn cuda_offload_memories(client: &Client) -> Result<(Memory, Memory)> {
 enum DenoiseRunner {
     Device(BoundModel),
     Offloaded(ResidentBoundModel),
+    Staged {
+        runner: BoundModelStages,
+        prepared: Vec<PreparedModelValues>,
+        step_sizes: Vec<Buffer>,
+    },
 }
 
 struct Denoiser {
@@ -173,9 +189,24 @@ impl Denoiser {
             sample = match &self.runner {
                 DenoiseRunner::Device(runner) => runner.run((&sample, &self.context))?,
                 DenoiseRunner::Offloaded(runner) => runner.run((&sample, &self.context))?,
+                DenoiseRunner::Staged { .. } => {
+                    return Err("staging cannot use a device loop".into());
+                }
             };
         } else {
             for index in 0..self.schedule.len() {
+                if let DenoiseRunner::Staged {
+                    runner,
+                    prepared,
+                    step_sizes,
+                } = &self.runner
+                {
+                    sample = runner.run(
+                        (&sample, &step_sizes[index], &self.context),
+                        &prepared[index],
+                    )?;
+                    continue;
+                }
                 let step = self.schedule.step(index)?;
                 let timestep = self
                     .client
@@ -190,6 +221,7 @@ impl Denoiser {
                     DenoiseRunner::Offloaded(runner) => {
                         runner.run((&sample, &timestep, &step_size, &self.context))?
                     }
+                    DenoiseRunner::Staged { .. } => return Err("invalid staging dispatch".into()),
                 };
             }
         }
@@ -270,7 +302,19 @@ fn prepare_denoiser(client: &Client, options: &DenoiseOptions<'_>) -> Result<Den
     if !options.device_loop {
         compiler = compiler.with_compute_dtype(rxla_core::DType::BF16);
     }
-    let compiled = model.compile(&mut compiler)?;
+    let staged = if options.prepare_schedule {
+        Some(model.compile_staged(
+            &mut compiler,
+            &["schedule_modulation", "schedule_output_scale"],
+        )?)
+    } else {
+        None
+    };
+    let compiled = if staged.is_none() {
+        Some(model.compile(&mut compiler)?)
+    } else {
+        None
+    };
     let compile_time = compile_start.elapsed();
     let prefetch_wait_start = Instant::now();
     let prefetched = pending_prefetch.map(|pending| pending.wait()).transpose()?;
@@ -278,9 +322,44 @@ fn prepare_denoiser(client: &Client, options: &DenoiseOptions<'_>) -> Result<Den
         prefetched.block_until_ready()?;
     }
     let prefetch_wait_time = prefetch_wait_start.elapsed();
-    let runner = match (prefetched, resident) {
-        (Some(prefetched), None) => DenoiseRunner::Offloaded(prefetched.bind(&compiled)?),
-        (None, Some(resident)) => {
+    let runner = match (staged, compiled, prefetched, resident) {
+        (Some(staged), None, None, Some(resident)) => {
+            if staged.preparation_inputs() != [1] || staged.execution_inputs() != [0, 2, 3] {
+                return Err(
+                    "schedule preparation unexpectedly depends on dynamic model inputs".into(),
+                );
+            }
+            let runner = staged.bind_parameters(resident.bindings())?;
+            let start = Instant::now();
+            let mut prepared = Vec::with_capacity(schedule.len());
+            let mut step_sizes = Vec::with_capacity(schedule.len());
+            for index in 0..schedule.len() {
+                let step = schedule.step(index)?;
+                let timestep = client.buffer(&[batch], &vec![step.timestep; options.batch_size])?;
+                prepared.push(runner.prepare(&timestep)?);
+                step_sizes
+                    .push(client.buffer(&[batch], &vec![step.step_size; options.batch_size])?);
+            }
+            for values in &prepared {
+                for buffer in values.buffers() {
+                    buffer.block_until_ready()?;
+                }
+            }
+            eprintln!(
+                "schedule-preparation time={:.3?} steps={}",
+                start.elapsed(),
+                prepared.len()
+            );
+            DenoiseRunner::Staged {
+                runner,
+                prepared,
+                step_sizes,
+            }
+        }
+        (None, Some(compiled), Some(prefetched), None) => {
+            DenoiseRunner::Offloaded(prefetched.bind(&compiled)?)
+        }
+        (None, Some(compiled), None, Some(resident)) => {
             DenoiseRunner::Device(compiled.bind_parameters(resident.bindings())?)
         }
         _ => return Err("invalid transformer residency state".into()),
@@ -291,6 +370,8 @@ fn prepare_denoiser(client: &Client, options: &DenoiseOptions<'_>) -> Result<Den
         "denoiser-init mode={} residency={} batch={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} prefetch-launch={prefetch_launch_time:.3?} prefetch-tail={prefetch_wait_time:.3?} steps={}",
         if options.device_loop {
             "device-loop"
+        } else if options.prepare_schedule {
+            "prepared-schedule"
         } else {
             "host-enqueue"
         },
@@ -585,6 +666,7 @@ fn run(args: Args) -> Result<()> {
             steps: args.steps,
             batch_size: args.batch_size,
             device_loop: args.device_loop,
+            prepare_schedule: args.prepare_schedule,
             cache_dir: args.cache_dir.as_ref(),
             offload_transformer: args.offload_transformer,
             offload_headroom_bytes: args
@@ -671,6 +753,16 @@ fn run(args: Args) -> Result<()> {
             args.batch_size as f64 / request_time.as_secs_f64(),
         );
         request_times.push(request_time);
+        if request + 1 == args.requests
+            && let Some(path) = &args.latent_output
+        {
+            let bytes = latent
+                .to_vec::<f32>()?
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>();
+            fs::write(path, bytes)?;
+        }
         final_values = Some(values);
     }
     let pixels = final_values

@@ -455,7 +455,19 @@ pub fn qwen_image_2_1_transformer(
         false,
         config,
     )?;
+    let modulation = cx.tap("schedule_modulation", &modulation)?;
     let modulation = token_modulation(&modulation, *text_tokens, *image_tokens)?;
+
+    // Keep the small schedule-dependent vector as an explicit staging cut;
+    // image-token broadcasting remains in the execution stage.
+    let output_scale = linear(
+        cx.scope("norm_out")?.scope("linear")?,
+        &time.narrow(0, 0, *batch)?.silu()?,
+        config.hidden_size,
+        false,
+        config,
+    )?;
+    let output_scale = cx.tap("schedule_output_scale", &output_scale)?;
 
     let blocks = cx.scope("transformer_blocks")?;
     for index in 0..config.num_layers {
@@ -471,16 +483,10 @@ pub fn qwen_image_2_1_transformer(
     }
 
     let output = hidden.narrow(1, *text_tokens, *image_tokens)?;
-    let scale = linear(
-        cx.scope("norm_out")?.scope("linear")?,
-        &time.narrow(0, 0, *batch)?.silu()?,
-        config.hidden_size,
-        false,
-        config,
-    )?
-    .unsqueeze(1)?
-    .broadcast_to(output.shape())?
-    .add_scalar(1.0)?;
+    let scale = output_scale
+        .unsqueeze(1)?
+        .broadcast_to(output.shape())?
+        .add_scalar(1.0)?;
     let output = output
         .layer_norm(&[config.hidden_size], None, None, config.epsilon)?
         .mul(&scale)?;
@@ -569,6 +575,9 @@ pub fn qwen_image_2_1_denoise(
     )?;
     Ok(carry[1].clone())
 }
+
+#[cfg(test)]
+mod staging_tests;
 
 #[cfg(test)]
 mod tests {
