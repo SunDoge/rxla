@@ -8,13 +8,19 @@ fn prepared_schedule_matches_original_steps() -> std::result::Result<(), Box<dyn
 {
     let client = unsafe { Client::load(std::env::var("PJRT_CPU_PLUGIN_PATH")?) }?;
     let mut compiler = Compiler::new(client.clone(), CacheLimits::default());
-    for (batch, dtype) in [
-        (1, DType::F32),
-        (2, DType::F32),
-        (1, DType::BF16),
-        (2, DType::BF16),
+    for (batch, dtype, prefix) in [
+        (1, DType::F32, false),
+        (2, DType::F32, false),
+        (1, DType::BF16, false),
+        (2, DType::BF16, false),
+        (1, DType::F32, true),
+        (2, DType::F32, true),
+        (1, DType::BF16, true),
+        (2, DType::BF16, true),
     ] {
-        let config = QwenImage21Config::tiny(2, 3).compute_dtype(dtype);
+        let config = QwenImage21Config::tiny(2, 3)
+            .compute_dtype(dtype)
+            .factor_text_prefix(prefix);
         let model = Model::new(|cx: Cx, sample, timestep, step_size, context| {
             qwen_image_2_1_euler_step(cx, &sample, &timestep, &step_size, &context, &config)
         })
@@ -49,24 +55,50 @@ fn prepared_schedule_matches_original_steps() -> std::result::Result<(), Box<dyn
             })
             .collect::<std::result::Result<Vec<_>, Box<dyn std::error::Error>>>()?;
         let bindings = || weights.iter().map(|(name, buffer)| (name.as_str(), buffer));
-        let stages = model.compile_staged(
-            &mut compiler,
-            &["schedule_modulation", "schedule_output_scale"],
-        )?;
-        assert_eq!(stages.preparation_inputs(), [1]);
-        assert_eq!(stages.execution_inputs(), [0, 2, 3]);
+        let paths = if prefix {
+            config.text_prefix_taps()
+        } else {
+            vec![
+                "schedule_modulation".to_owned(),
+                "schedule_output_scale".to_owned(),
+            ]
+        };
+        let cuts = paths.iter().map(String::as_str).collect::<Vec<_>>();
+        let stages = model.compile_staged(&mut compiler, &cuts)?;
+        assert_eq!(stages.preparation_inputs(), if prefix { [3] } else { [1] });
+        assert_eq!(
+            stages.execution_inputs(),
+            if prefix { [0, 1, 2] } else { [0, 2, 3] }
+        );
         let staged = stages.bind_parameters(bindings())?;
         // Compiling the original after splitting also checks source immutability.
         let original = model.compile(&mut compiler)?.bind_parameters(bindings())?;
         let context = client.buffer(&[batch, 5, 24], &vec![0.2_f32; batch as usize * 120])?;
         let mut reference = client.buffer(&[batch, 6, 8], &vec![0.1_f32; batch as usize * 48])?;
         let mut actual = reference.clone();
+        let cached = if prefix {
+            Some(staged.prepare(&context)?)
+        } else {
+            None
+        };
         for time in [1000.0_f32, 700.0, 400.0, 100.0] {
             let timestep = client.buffer(&[batch], &vec![time; batch as usize])?;
             let step_size = client.buffer(&[batch], &vec![-0.25_f32; batch as usize])?;
-            let prepared = staged.prepare(&timestep)?;
+            let schedule_values = if prefix {
+                None
+            } else {
+                Some(staged.prepare(&timestep)?)
+            };
+            let prepared = cached
+                .as_ref()
+                .or(schedule_values.as_ref())
+                .ok_or("missing prepared values")?;
             reference = original.run((&reference, &timestep, &step_size, &context))?;
-            actual = staged.run((&actual, &step_size, &context), &prepared)?;
+            actual = if prefix {
+                staged.run((&actual, &timestep, &step_size), prepared)?
+            } else {
+                staged.run((&actual, &step_size, &context), prepared)?
+            };
             for (a, b) in actual
                 .to_vec::<f32>()?
                 .iter()
@@ -80,17 +112,14 @@ fn prepared_schedule_matches_original_steps() -> std::result::Result<(), Box<dyn
             assert!(staged.prepare((&timestep, &step_size)).is_err());
             assert!(
                 staged
-                    .run::<_, Buffer>((&actual, &step_size), &prepared)
+                    .run::<_, Buffer>((&actual, &step_size), prepared)
                     .is_err()
             );
             let other = model
-                .compile_staged(
-                    &mut compiler,
-                    &["schedule_modulation", "schedule_output_scale"],
-                )?
+                .compile_staged(&mut compiler, &cuts)?
                 .bind_parameters(bindings())?;
             assert!(matches!(
-                other.run::<_, Buffer>((&actual, &step_size, &context), &prepared),
+                other.run::<_, Buffer>((&actual, &step_size, &context), prepared),
                 Err(rxla_nn::Error::PreparedModelMismatch)
             ));
         }

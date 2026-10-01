@@ -16,6 +16,41 @@ fn trace(config: &QwenImage21Config) -> Result<AppliedModel> {
 }
 
 #[test]
+fn factored_prefix_has_the_same_leaves_and_typed_staging_cuts()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for config in [
+        QwenImage21Config::tiny(2, 3),
+        QwenImage21Config::tiny_w8(2, 3),
+    ] {
+        let original = trace(&config)?;
+        let config = config.factor_text_prefix(true);
+        let factored = trace(&config)?;
+        let schema = |model: &AppliedModel| {
+            model
+                .schema()
+                .parameters()
+                .iter()
+                .map(|p| (p.path().to_owned(), (p.shape().to_vec(), p.storage_dtype())))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        assert_eq!(schema(&original), schema(&factored));
+        let cuts = config
+            .text_prefix_taps()
+            .iter()
+            .map(|path| factored.tap(path).cloned())
+            .collect::<rxla_nn::Result<Vec<_>>>()?;
+        assert_eq!(cuts.len(), 4);
+        for cut in &cuts {
+            assert_eq!(cut.shape(), [2, 4, 5, 8]);
+        }
+        let (tracer, outputs) = factored.clone().into_parts();
+        tracer.stage_many(&outputs, &cuts)?;
+        factored.prepare()?;
+    }
+    Ok(())
+}
+
+#[test]
 fn fused_projections_preserve_schema_and_reduce_contractions()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     for config in [
@@ -103,10 +138,37 @@ fn fused_projections_match_original_on_cpu() -> std::result::Result<(), Box<dyn 
                 .bind_parameters(bindings())?;
             let reference: Buffer = runner.run((&input, &time, &step_size, &context))?;
             let reference = reference.to_vec::<f32>()?;
-            for (qkv, mlp) in [(true, false), (false, true), (true, true)] {
-                let fused = trace(&config.clone().fuse_qkv(qkv).fuse_mlp(mlp))?;
-                let runner = fused.compile(&mut compiler)?.bind_parameters(bindings())?;
-                let output: Buffer = runner.run((&input, &time, &step_size, &context))?;
+            for (qkv, mlp, prefix) in [
+                (true, false, false),
+                (false, true, false),
+                (true, true, false),
+                (false, false, true),
+            ] {
+                let config = config
+                    .clone()
+                    .fuse_qkv(qkv)
+                    .fuse_mlp(mlp)
+                    .factor_text_prefix(prefix);
+                let fused = trace(&config)?;
+                let output: Buffer = if prefix {
+                    let paths = config.text_prefix_taps();
+                    let staged = fused.compile_staged(
+                        &mut compiler,
+                        &paths.iter().map(String::as_str).collect::<Vec<_>>(),
+                    )?;
+                    assert_eq!(staged.preparation_inputs(), [3]);
+                    assert_eq!(staged.execution_inputs(), [0, 1, 2]);
+                    let runner = staged.bind_parameters(bindings())?;
+                    let prepared = runner.prepare(&context)?;
+                    assert_eq!(prepared.buffers().len(), 4);
+                    for buffer in prepared.buffers() {
+                        assert_eq!(buffer.dimensions()?, [2, 4, 5, 8]);
+                    }
+                    runner.run((&input, &time, &step_size), &prepared)?
+                } else {
+                    let runner = fused.compile(&mut compiler)?.bind_parameters(bindings())?;
+                    runner.run((&input, &time, &step_size, &context))?
+                };
                 let actual = output.to_vec::<f32>()?;
                 assert_eq!(actual.len(), reference.len());
                 assert!(
@@ -123,7 +185,7 @@ fn fused_projections_match_original_on_cpu() -> std::result::Result<(), Box<dyn 
                 let tolerance = if dtype == DType::F32 { 1e-5 } else { 2.5e-3 };
                 assert!(
                     error < tolerance,
-                    "quantized={quantized} dtype={dtype:?} qkv={qkv} mlp={mlp} error={error}"
+                    "quantized={quantized} dtype={dtype:?} qkv={qkv} mlp={mlp} prefix={prefix} error={error}"
                 );
             }
         }

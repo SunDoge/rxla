@@ -1,5 +1,7 @@
 # Qwen-Image-2.1 throughput experiments
 
+Follow-up: [causal text-prefix staging and kernel profiling](QWEN-IMAGE-2.1-PREFIX-CACHE.md).
+
 Measured 2026-10-01 on RTX 5080 16 GiB, with 1,036 MiB background GPU usage.
 RXLA grouped-W8 weights, BF16 compute, 512×512, cached `[1,43,4096]` prompt,
 conditional path, resident weights and VAE micro-batch limit 4. GPU runs are
@@ -151,5 +153,5 @@ uv run --group qwen-bench python scripts/benchmark_qwen_image_2_1_rxla.py \
 
 Current practical choices are small batches for latency, larger batches for
 queued throughput, and exact VAE tails. The next substantial compute target
-remains DiT. Request-invariant text-prefix computation/KV preparation deserves
-a separate experiment; it is not implemented by these projection changes.
+remains DiT. Request-invariant text-prefix computation/KV preparation is now
+implemented as a separate opt-in staging experiment; see the follow-up above.

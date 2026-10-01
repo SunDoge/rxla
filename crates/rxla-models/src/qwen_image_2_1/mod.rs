@@ -9,6 +9,7 @@ use super::{Error, ModelDefinitionError, Result};
 use rxla_core::{DType, RotaryLayout, Tensor};
 use rxla_nn::{Cx, Linear, QuantizedLinear, TensorApply};
 
+mod prefix;
 mod projections;
 mod scheduler;
 pub use scheduler::{QwenImage21FlowScheduler, QwenImage21FlowStep};
@@ -35,6 +36,7 @@ pub struct QwenImage21Config {
     quant_group_size: Option<i64>,
     fuse_qkv: bool,
     fuse_mlp: bool,
+    factor_text_prefix: bool,
 }
 
 impl QwenImage21Config {
@@ -58,6 +60,7 @@ impl QwenImage21Config {
             quant_group_size: None,
             fuse_qkv: false,
             fuse_mlp: false,
+            factor_text_prefix: false,
         }
     }
 
@@ -91,6 +94,7 @@ impl QwenImage21Config {
             quant_group_size: None,
             fuse_qkv: false,
             fuse_mlp: false,
+            factor_text_prefix: false,
         }
     }
 
@@ -120,6 +124,24 @@ impl QwenImage21Config {
     pub fn fuse_mlp(mut self, enabled: bool) -> Self {
         self.fuse_mlp = enabled;
         self
+    }
+
+    /// Separate the causal text prefix from the image branch for exact IR staging.
+    /// Compile cuts from `text_prefix_taps` and prepare them once per conditioning.
+    /// Factoring changes GEMM shapes and may change floating-point rounding.
+    pub fn factor_text_prefix(mut self, enabled: bool) -> Self {
+        self.factor_text_prefix = enabled;
+        self
+    }
+
+    /// K/V staging paths, available when `factor_text_prefix(true)` is selected.
+    pub fn text_prefix_taps(&self) -> Vec<String> {
+        (0..self.num_layers)
+            .flat_map(|index| {
+                ["prefix_key", "prefix_value"]
+                    .map(|name| format!("transformer_blocks.{index}.attn.{name}"))
+            })
+            .collect()
     }
 
     fn head_dim(&self) -> i64 {
@@ -293,12 +315,18 @@ fn token_modulation(value: &Tensor, text_tokens: i64, image_tokens: i64) -> Resu
     Ok(Tensor::concatenate(&[zero, real], 1)?)
 }
 
+enum AttentionRegion<'a> {
+    Joint(i64),
+    Text(&'a mut Option<(Tensor, Tensor)>),
+    Image { key: &'a Tensor, value: &'a Tensor },
+}
+
 fn attention(
     cx: Cx,
     input: &Tensor,
     angles: &Tensor,
     text_bias: &Tensor,
-    text_tokens: i64,
+    region: AttentionRegion<'_>,
     config: &QwenImage21Config,
 ) -> Result<Tensor> {
     let [batch, tokens, _] = input.shape() else {
@@ -343,19 +371,37 @@ fn attention(
     // that can attend to the complete prefix plus itself. Splitting the two
     // query regions avoids materializing a quadratic full-sequence mask and
     // leaves the large image attention mask-free for cuDNN/XLA fusion.
-    let text_attended = query
-        .narrow(2, 0, text_tokens)?
-        .scaled_dot_product_attention(
-            &key.narrow(2, 0, text_tokens)?,
-            &value.narrow(2, 0, text_tokens)?,
-            Some(text_bias),
-            None,
-        )?;
-    let image_tokens = *tokens - text_tokens;
-    let image_attended = query
-        .narrow(2, text_tokens, image_tokens)?
-        .scaled_dot_product_attention(&key, &value, None, None)?;
-    let attended = Tensor::concatenate(&[text_attended, image_attended], 2)?;
+    let attended = match region {
+        AttentionRegion::Text(prefix) => {
+            let key = cx.tap("prefix_key", &key)?;
+            let value = cx.tap("prefix_value", &value)?;
+            *prefix = Some((key.clone(), value.clone()));
+            query.scaled_dot_product_attention(&key, &value, Some(text_bias), None)?
+        }
+        AttentionRegion::Image {
+            key: prefix_key,
+            value: prefix_value,
+        } => {
+            let key = Tensor::concatenate(&[prefix_key.clone(), key], 2)?;
+            let value = Tensor::concatenate(&[prefix_value.clone(), value], 2)?;
+            query.scaled_dot_product_attention(&key, &value, None, None)?
+        }
+        AttentionRegion::Joint(text_tokens) => {
+            let text_attended = query
+                .narrow(2, 0, text_tokens)?
+                .scaled_dot_product_attention(
+                    &key.narrow(2, 0, text_tokens)?,
+                    &value.narrow(2, 0, text_tokens)?,
+                    Some(text_bias),
+                    None,
+                )?;
+            let image_tokens = *tokens - text_tokens;
+            let image_attended = query
+                .narrow(2, text_tokens, image_tokens)?
+                .scaled_dot_product_attention(&key, &value, None, None)?;
+            Tensor::concatenate(&[text_attended, image_attended], 2)?
+        }
+    };
     let attended =
         attended
             .transpose([0, 2, 1, 3])?
@@ -375,7 +421,7 @@ fn transformer_block(
     modulation: &Tensor,
     angles: &Tensor,
     text_bias: &Tensor,
-    text_tokens: i64,
+    region: AttentionRegion<'_>,
     config: &QwenImage21Config,
 ) -> Result<Tensor> {
     let parts = modulation.split(2, &[config.hidden_size * 2, config.hidden_size * 2])?;
@@ -392,7 +438,7 @@ fn transformer_block(
             &normalized,
             angles,
             text_bias,
-            text_tokens,
+            region,
             config,
         )?
         .mul(&gate)?,
@@ -477,7 +523,7 @@ pub fn qwen_image_2_1_transformer(
         config,
     )?;
     let context = text_projection(cx.scope("txt_in")?, context, config)?;
-    let mut hidden = Tensor::concatenate(&[context, image], 1)?;
+    let mut hidden = Tensor::concatenate(&[context.clone(), image.clone()], 1)?;
     let angles = rotary_angles(&cx, *text_tokens, config)?;
     let text_bias = text_causal_bias(&cx, *text_tokens)?;
 
@@ -510,20 +556,36 @@ pub fn qwen_image_2_1_transformer(
     )?;
     let output_scale = cx.tap("schedule_output_scale", &output_scale)?;
 
-    let blocks = cx.scope("transformer_blocks")?;
-    for index in 0..config.num_layers {
-        hidden = transformer_block(
-            blocks.scope(index.to_string())?,
-            &hidden,
+    if config.factor_text_prefix {
+        hidden = prefix::blocks(
+            &cx,
+            &image,
+            &context,
             &modulation,
             &angles,
             &text_bias,
-            *text_tokens,
             config,
         )?;
+    } else {
+        let blocks = cx.scope("transformer_blocks")?;
+        for index in 0..config.num_layers {
+            hidden = transformer_block(
+                blocks.scope(index.to_string())?,
+                &hidden,
+                &modulation,
+                &angles,
+                &text_bias,
+                AttentionRegion::Joint(*text_tokens),
+                config,
+            )?;
+        }
     }
 
-    let output = hidden.narrow(1, *text_tokens, *image_tokens)?;
+    let output = if config.factor_text_prefix {
+        hidden
+    } else {
+        hidden.narrow(1, *text_tokens, *image_tokens)?
+    };
     let scale = output_scale
         .unsqueeze(1)?
         .broadcast_to(output.shape())?

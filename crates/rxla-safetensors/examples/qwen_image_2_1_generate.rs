@@ -1,6 +1,6 @@
 //! Qwen-Image-2.1 W8 text-to-image generation from cached Qwen3-VL embeddings.
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use image::{ImageBuffer, Rgba};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -24,6 +24,39 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+mod support;
+use support::cuda_profiler::CudaProfiler;
+
+/// Explicit experimental policies, scoped to the DiT compiler and its cache key.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum GemmPolicy {
+    #[default]
+    Auto,
+    Library,
+    TritonV1,
+    Cublas,
+}
+
+impl GemmPolicy {
+    fn configure(self, compiler: Compiler) -> Compiler {
+        match self {
+            Self::Auto => compiler,
+            Self::Library => compiler
+                .with_xla_option("xla_gpu_enable_triton_gemm", false)
+                .with_experimental_cuda_gemm_fusion_v2(false),
+            Self::TritonV1 => compiler
+                .with_xla_option("xla_gpu_enable_triton_gemm", true)
+                .with_experimental_cuda_gemm_fusion_v2(false),
+            Self::Cublas => compiler
+                .with_xla_option("xla_gpu_enable_triton_gemm", false)
+                .with_xla_option(
+                    "xla_gpu_experimental_autotune_backends",
+                    "CUBLASLT,NATIVE_EMITTER",
+                )
+                .with_experimental_cuda_gemm_fusion_v2(false),
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(about = "Generate an RGBA image with Qwen-Image-2.1 W8")]
@@ -56,6 +89,12 @@ struct Args {
     /// final request is encoded; earlier requests measure steady-state serving.
     #[arg(long, default_value_t = 1)]
     requests: usize,
+    /// Capture only this zero-based request's DiT with the CUDA profiler API.
+    #[arg(long)]
+    profile_request: Option<usize>,
+    /// Trusted CUDA runtime library used only with --profile-request.
+    #[arg(long, default_value = "libcudart.so.13")]
+    cuda_runtime: PathBuf,
     /// Number of images generated together by the transformer and VAE.
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
@@ -86,12 +125,21 @@ struct Args {
     /// Prepare timestep-only intermediates once, using cuts in the model IR.
     #[arg(long, conflicts_with_all = ["device_loop", "offload_transformer"])]
     prepare_schedule: bool,
+    /// Prepare causal text K/V once per conditioning, rather than every step.
+    #[arg(long, conflicts_with_all = ["device_loop", "offload_transformer", "prepare_schedule"])]
+    prepare_text_prefix: bool,
+    /// Diagnostic: separate text/image branches, but recompute text every step.
+    #[arg(long, conflicts_with_all = ["device_loop", "offload_transformer", "prepare_schedule", "prepare_text_prefix"])]
+    factor_text_prefix: bool,
     /// Experimentally combine Q/K/V projections; checkpoint format is unchanged.
     #[arg(long)]
     fuse_qkv: bool,
     /// Experimentally combine MLP value/gate projections.
     #[arg(long)]
     fuse_mlp: bool,
+    /// Experimental GEMM backend policy for the transformer only.
+    #[arg(long, value_enum, default_value_t = GemmPolicy::Auto)]
+    gemm_policy: GemmPolicy,
     /// Persistent serialized PJRT executable cache.
     #[arg(long)]
     cache_dir: Option<PathBuf>,
@@ -144,8 +192,11 @@ struct DenoiseOptions<'a> {
     batch_size: usize,
     device_loop: bool,
     prepare_schedule: bool,
+    prepare_text_prefix: bool,
+    factor_text_prefix: bool,
     fuse_qkv: bool,
     fuse_mlp: bool,
+    gemm_policy: GemmPolicy,
     cache_dir: Option<&'a PathBuf>,
     offload_transformer: bool,
     offload_headroom_bytes: usize,
@@ -169,6 +220,10 @@ fn cuda_offload_memories(client: &Client) -> Result<(Memory, Memory)> {
 enum DenoiseRunner {
     Device(BoundModel),
     Offloaded(ResidentBoundModel),
+    Prefix {
+        runner: BoundModelStages,
+        prepared: PreparedModelValues,
+    },
     Staged {
         runner: BoundModelStages,
         prepared: Vec<PreparedModelValues>,
@@ -201,7 +256,7 @@ impl Denoiser {
             sample = match &self.runner {
                 DenoiseRunner::Device(runner) => runner.run((&sample, &self.context))?,
                 DenoiseRunner::Offloaded(runner) => runner.run((&sample, &self.context))?,
-                DenoiseRunner::Staged { .. } => {
+                DenoiseRunner::Staged { .. } | DenoiseRunner::Prefix { .. } => {
                     return Err("staging cannot use a device loop".into());
                 }
             };
@@ -234,6 +289,9 @@ impl Denoiser {
                         runner.run((&sample, &timestep, &step_size, &self.context))?
                     }
                     DenoiseRunner::Staged { .. } => return Err("invalid staging dispatch".into()),
+                    DenoiseRunner::Prefix { runner, prepared } => {
+                        runner.run((&sample, &timestep, &step_size), prepared)?
+                    }
                 };
             }
         }
@@ -252,7 +310,8 @@ fn prepare_denoiser(client: &Client, options: &DenoiseOptions<'_>) -> Result<Den
     let image_tokens = options.latent_height * options.latent_width;
     let config = QwenImage21Config::official_w8(options.latent_height, options.latent_width)
         .fuse_qkv(options.fuse_qkv)
-        .fuse_mlp(options.fuse_mlp);
+        .fuse_mlp(options.fuse_mlp)
+        .factor_text_prefix(options.prepare_text_prefix || options.factor_text_prefix);
     let schedule = QwenImage21FlowScheduler::new(options.steps, image_tokens as usize)?;
     let trace_start = Instant::now();
     let model = if options.device_loop {
@@ -313,10 +372,17 @@ fn prepare_denoiser(client: &Client, options: &DenoiseOptions<'_>) -> Result<Den
     let compile_start = Instant::now();
     let mut compiler =
         compiler(client, options.cache_dir, "qwen-image-2.1-dit-v1")?.with_cudnn_attention(true);
+    compiler = options.gemm_policy.configure(compiler);
     if !options.device_loop {
         compiler = compiler.with_compute_dtype(rxla_core::DType::BF16);
     }
-    let staged = if options.prepare_schedule {
+    let staged = if options.prepare_text_prefix {
+        let paths = config.text_prefix_taps();
+        Some(model.compile_staged(
+            &mut compiler,
+            &paths.iter().map(String::as_str).collect::<Vec<_>>(),
+        )?)
+    } else if options.prepare_schedule {
         Some(model.compile_staged(
             &mut compiler,
             &["schedule_modulation", "schedule_output_scale"],
@@ -336,7 +402,26 @@ fn prepare_denoiser(client: &Client, options: &DenoiseOptions<'_>) -> Result<Den
         prefetched.block_until_ready()?;
     }
     let prefetch_wait_time = prefetch_wait_start.elapsed();
+    let context_values = prompt.values.repeat(options.batch_size);
+    let context = client.buffer(&[batch, context_tokens, 4096], &context_values)?;
     let runner = match (staged, compiled, prefetched, resident) {
+        (Some(staged), None, None, Some(resident)) if options.prepare_text_prefix => {
+            if staged.preparation_inputs() != [3] || staged.execution_inputs() != [0, 1, 2] {
+                return Err("text prefix preparation depends on non-conditioning inputs".into());
+            }
+            let runner = staged.bind_parameters(resident.bindings())?;
+            let start = Instant::now();
+            let prepared = runner.prepare(&context)?;
+            for buffer in prepared.buffers() {
+                buffer.block_until_ready()?;
+            }
+            eprintln!(
+                "text-prefix-preparation time={:.3?} buffers={}",
+                start.elapsed(),
+                prepared.buffers().len()
+            );
+            DenoiseRunner::Prefix { runner, prepared }
+        }
         (Some(staged), None, None, Some(resident)) => {
             if staged.preparation_inputs() != [1] || staged.execution_inputs() != [0, 2, 3] {
                 return Err(
@@ -378,14 +463,14 @@ fn prepare_denoiser(client: &Client, options: &DenoiseOptions<'_>) -> Result<Den
         }
         _ => return Err("invalid transformer residency state".into()),
     };
-    let context_values = prompt.values.repeat(options.batch_size);
-    let context = client.buffer(&[batch, context_tokens, 4096], &context_values)?;
     eprintln!(
         "denoiser-init mode={} residency={} batch={} trace={trace_time:.3?} weights={load_time:.3?} compile={compile_time:.3?} prefetch-launch={prefetch_launch_time:.3?} prefetch-tail={prefetch_wait_time:.3?} steps={}",
         if options.device_loop {
             "device-loop"
         } else if options.prepare_schedule {
             "prepared-schedule"
+        } else if options.prepare_text_prefix {
+            "prepared-text-prefix"
         } else {
             "host-enqueue"
         },
@@ -662,6 +747,12 @@ fn run(args: Args) -> Result<()> {
     if args.batch_size == 0 || args.vae_batch_size == 0 || args.requests == 0 {
         return Err("batch sizes and requests must be positive".into());
     }
+    if args
+        .profile_request
+        .is_some_and(|request| request >= args.requests)
+    {
+        return Err("profile request must be less than --requests".into());
+    }
     if args.width == 0
         || args.height == 0
         || !args.width.is_multiple_of(16)
@@ -701,8 +792,11 @@ fn run(args: Args) -> Result<()> {
             batch_size: args.batch_size,
             device_loop: args.device_loop,
             prepare_schedule: args.prepare_schedule,
+            prepare_text_prefix: args.prepare_text_prefix,
+            factor_text_prefix: args.factor_text_prefix,
             fuse_qkv: args.fuse_qkv,
             fuse_mlp: args.fuse_mlp,
+            gemm_policy: args.gemm_policy,
             cache_dir: args.cache_dir.as_ref(),
             offload_transformer: args.offload_transformer,
             offload_headroom_bytes: args
@@ -745,12 +839,21 @@ fn run(args: Args) -> Result<()> {
     let mut final_values = None;
     let mut request_times = Vec::with_capacity(args.requests);
     for request in 0..args.requests {
+        let profiler = if args.profile_request == Some(request) {
+            Some(CudaProfiler::start(&args.cuda_runtime)?)
+        } else {
+            None
+        };
         let request_start = Instant::now();
         let seed = args
             .seed
             .checked_add(u64::try_from(request)?)
             .ok_or("request seed overflow")?;
         let (latent, denoise_time) = denoiser.run(seed)?;
+        if let Some(profiler) = profiler {
+            latent.block_until_ready()?;
+            profiler.finish()?;
+        }
         let vae_start = Instant::now();
         let values = if let Some(decoder) = &vae_decoder {
             decoder.run(&latent)?
@@ -893,6 +996,29 @@ mod tests {
         assert!(Args::try_parse_from(base.into_iter().chain(["--exact-vae-tail"]))?.exact_vae_tail);
         let fusion = Args::try_parse_from(base.into_iter().chain(["--fuse-qkv", "--fuse-mlp"]))?;
         assert!(fusion.fuse_qkv && fusion.fuse_mlp);
+        let prefix = Args::try_parse_from(base.into_iter().chain(["--prepare-text-prefix"]))?;
+        assert!(prefix.prepare_text_prefix && !prefix.factor_text_prefix);
+        for conflicting in [
+            "--device-loop",
+            "--offload-transformer",
+            "--prepare-schedule",
+            "--factor-text-prefix",
+        ] {
+            assert!(
+                Args::try_parse_from(
+                    base.into_iter()
+                        .chain(["--prepare-text-prefix", conflicting])
+                )
+                .is_err()
+            );
+        }
+        assert!(matches!(
+            Args::try_parse_from(base)?.gemm_policy,
+            GemmPolicy::Auto
+        ));
+        assert!(
+            Args::try_parse_from(base.into_iter().chain(["--gemm-policy", "unknown"])).is_err()
+        );
         Ok(())
     }
 
