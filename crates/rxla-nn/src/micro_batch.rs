@@ -24,7 +24,8 @@ impl MicroBatchChunk {
 }
 
 /// A reusable static split/pad plan for executing a large logical batch with
-/// one smaller compiled model shape.
+/// smaller compiled model shapes. Callers can pad to one reusable shape or
+/// compile an exact-size executable for the tail.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MicroBatchPlan {
     batch_size: usize,
@@ -71,9 +72,9 @@ impl MicroBatchPlan {
         &self.chunks
     }
 
-    /// Split one symbolic tensor and zero-pad the final slice to the compiled
-    /// micro-batch shape. Padding stays in IR and therefore on the device.
-    pub fn split_zero_padded(&self, input: &Tensor, axis: usize) -> Result<Vec<Tensor>> {
+    /// Split without padding. The final chunk retains its actual shape, for
+    /// callers that compile an additional tail-batch executable.
+    pub fn split_exact(&self, input: &Tensor, axis: usize) -> Result<Vec<Tensor>> {
         let Some(&actual) = input.shape().get(axis) else {
             return Err(Error::MicroBatchAxis {
                 axis,
@@ -90,7 +91,7 @@ impl MicroBatchPlan {
         self.chunks
             .iter()
             .map(|chunk| {
-                let value = input.narrow(
+                Ok(input.narrow(
                     axis,
                     i64::try_from(chunk.start).map_err(|_| Error::MicroBatchDimension {
                         axis,
@@ -102,7 +103,19 @@ impl MicroBatchPlan {
                         actual,
                         expected: self.batch_size,
                     })?,
-                )?;
+                )?)
+            })
+            .collect()
+    }
+
+    /// Split one symbolic tensor and zero-pad the final slice to the compiled
+    /// micro-batch shape. Padding stays in IR and therefore on the device.
+    pub fn split_zero_padded(&self, input: &Tensor, axis: usize) -> Result<Vec<Tensor>> {
+        self.split_exact(input, axis)?
+            .into_iter()
+            .zip(&self.chunks)
+            .map(|(value, chunk)| {
+                let actual = input.shape()[axis];
                 if chunk.padding == 0 {
                     return Ok(value);
                 }
@@ -127,6 +140,26 @@ impl MicroBatchPlan {
 mod tests {
     use super::*;
     use crate::{Cx, Model, ModelInput};
+
+    #[test]
+    fn exact_split_keeps_tail_shape_and_validates_axis() -> Result<()> {
+        let plan = MicroBatchPlan::new(6, 4)?;
+        let model = Model::new(|_: Cx, input: Tensor| plan.split_exact(&input, 0))
+            .inputs(ModelInput::new([6, 3]))
+            .trace()?;
+        assert_eq!(
+            model
+                .outputs()
+                .iter()
+                .map(Tensor::shape)
+                .collect::<Vec<_>>(),
+            [&[4, 3], &[2, 3]]
+        );
+        model.prepare()?;
+        assert!(plan.split_exact(&model.outputs()[0], 0).is_err());
+        assert!(plan.split_exact(&model.outputs()[0], 2).is_err());
+        Ok(())
+    }
 
     #[test]
     fn split_zero_pads_only_the_final_micro_batch() {

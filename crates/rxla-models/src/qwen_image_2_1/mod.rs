@@ -9,6 +9,7 @@ use super::{Error, ModelDefinitionError, Result};
 use rxla_core::{DType, RotaryLayout, Tensor};
 use rxla_nn::{Cx, Linear, QuantizedLinear, TensorApply};
 
+mod projections;
 mod scheduler;
 pub use scheduler::{QwenImage21FlowScheduler, QwenImage21FlowStep};
 mod vae;
@@ -32,6 +33,8 @@ pub struct QwenImage21Config {
     parameter_dtype: DType,
     compute_dtype: DType,
     quant_group_size: Option<i64>,
+    fuse_qkv: bool,
+    fuse_mlp: bool,
 }
 
 impl QwenImage21Config {
@@ -53,6 +56,8 @@ impl QwenImage21Config {
             parameter_dtype: DType::BF16,
             compute_dtype: DType::BF16,
             quant_group_size: None,
+            fuse_qkv: false,
+            fuse_mlp: false,
         }
     }
 
@@ -84,6 +89,8 @@ impl QwenImage21Config {
             parameter_dtype: DType::F32,
             compute_dtype: DType::F32,
             quant_group_size: None,
+            fuse_qkv: false,
+            fuse_mlp: false,
         }
     }
 
@@ -99,6 +106,19 @@ impl QwenImage21Config {
     /// for numerical diagnostics.
     pub fn compute_dtype(mut self, dtype: DType) -> Self {
         self.compute_dtype = dtype;
+        self
+    }
+
+    /// Experimentally combine the three attention projections into one GEMM.
+    /// Checkpoint paths and parameter storage remain unchanged.
+    pub fn fuse_qkv(mut self, enabled: bool) -> Self {
+        self.fuse_qkv = enabled;
+        self
+    }
+
+    /// Experimentally combine the MLP value and gate projections into one GEMM.
+    pub fn fuse_mlp(mut self, enabled: bool) -> Self {
+        self.fuse_mlp = enabled;
         self
     }
 
@@ -294,9 +314,19 @@ fn attention(
             ])?,
         )
     };
-    let mut query = project("to_q")?;
-    let mut key = project("to_k")?;
-    let value = project("to_v")?;
+    let (mut query, mut key, value) = if config.fuse_qkv {
+        let [query, key, value] =
+            projections::ProjectionGroup::new(["to_q", "to_k", "to_v"], config.hidden_size, config)
+                .apply(&cx, input)?;
+        let shape = [*batch, *tokens, config.num_heads, config.head_dim()];
+        (
+            query.reshape(shape)?,
+            key.reshape(shape)?,
+            value.reshape(shape)?,
+        )
+    } else {
+        (project("to_q")?, project("to_k")?, project("to_v")?)
+    };
     let query_scale = cx.scope("norm_q")?.param("weight", [config.head_dim()])?;
     let key_scale = cx.scope("norm_k")?.param("weight", [config.head_dim()])?;
     query = query.rms_norm(&query_scale, config.epsilon)?;
@@ -369,22 +399,33 @@ fn transformer_block(
     )?;
     let (normalized, gate) = apply_modulation(&hidden, &parts[1])?;
     let mlp = cx.scope("img_mlp")?;
-    let projected = linear(
-        mlp.scope("proj")?,
-        &normalized,
-        config.hidden_size * config.mlp_ratio,
-        false,
-        config,
-    )?;
-    let gated = linear(
-        mlp.scope("gate_layer")?,
-        &normalized,
-        config.hidden_size * config.mlp_ratio,
-        false,
-        config,
-    )?
-    .silu()?
-    .mul(&projected)?;
+    let (projected, gate_projection) = if config.fuse_mlp {
+        let [projected, gate_projection] = projections::ProjectionGroup::new(
+            ["proj", "gate_layer"],
+            config.hidden_size * config.mlp_ratio,
+            config,
+        )
+        .apply(&mlp, &normalized)?;
+        (projected, gate_projection)
+    } else {
+        (
+            linear(
+                mlp.scope("proj")?,
+                &normalized,
+                config.hidden_size * config.mlp_ratio,
+                false,
+                config,
+            )?,
+            linear(
+                mlp.scope("gate_layer")?,
+                &normalized,
+                config.hidden_size * config.mlp_ratio,
+                false,
+                config,
+            )?,
+        )
+    };
+    let gated = gate_projection.silu()?.mul(&projected)?;
     let delta = linear(mlp.scope("out")?, &gated, config.hidden_size, false, config)?;
     Ok(hidden.add(&delta.mul(&gate)?)?)
 }
@@ -576,6 +617,8 @@ pub fn qwen_image_2_1_denoise(
     Ok(carry[1].clone())
 }
 
+#[cfg(test)]
+mod projection_tests;
 #[cfg(test)]
 mod staging_tests;
 

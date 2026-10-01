@@ -32,6 +32,9 @@ class Args(TypedArgs):
     width: Annotated[int, Arg("--width")] = 512
     height: Annotated[int, Arg("--height")] = 512
     prepare_schedule: Annotated[bool, Arg("--prepare-schedule", action="store_true")] = False
+    fuse_qkv: Annotated[bool, Arg("--fuse-qkv", action="store_true")] = False
+    fuse_mlp: Annotated[bool, Arg("--fuse-mlp", action="store_true")] = False
+    pad_vae_tail: Annotated[bool, Arg("--pad-vae-tail", action="store_true")] = False
     seed: Annotated[int, Arg("--seed")] = 42
     reference_dir: Annotated[Path | None, Arg("--reference-dir")] = None
 
@@ -66,9 +69,14 @@ def benchmark(args: Args, batch: int) -> dict:
         "--memory-fraction", "0.9", "--preallocate", "false",
         "--cache-dir", str(root / "compile-cache"),
         "--latent-output", str(args.output_dir / f"batch{batch}.latent.f32"),
+        "--exact-vae-tail", str(not args.pad_vae_tail).lower(),
     ]
     if args.prepare_schedule:
         command.append("--prepare-schedule")
+    if args.fuse_qkv:
+        command.append("--fuse-qkv")
+    if args.fuse_mlp:
+        command.append("--fuse-mlp")
     baseline = gpu_memory_mib()
     samples = [baseline]
     sampler_errors: list[str] = []
@@ -103,6 +111,8 @@ def benchmark(args: Args, batch: int) -> dict:
     report = {
         "backend": "rxla", "weight_format": "grouped-w8", "compute_dtype": "bf16",
         "prepare_schedule": args.prepare_schedule,
+        "fuse_qkv": args.fuse_qkv, "fuse_mlp": args.fuse_mlp,
+        "exact_vae_tail": not args.pad_vae_tail,
         "seed": args.seed, "final_seed": args.seed + args.warmup + args.iterations - 1,
         "cached_prompt_embeddings": True, "width": args.width, "height": args.height,
         "steps": args.steps, "batch_size": batch, "warmup": args.warmup,

@@ -2,6 +2,8 @@
 
 The original results below use four steps. See [40-step measurements](#40-step-measurements)
 for the 2026-10-01 default-step workload and a weight-matched PyTorch reference.
+See [throughput experiments](QWEN-IMAGE-2.1-THROUGHPUT.md) for the batch sweep,
+exact VAE tail optimization and projection-fusion A/B results.
 
 Measured on 2026-09-29 on an NVIDIA GeForce RTX 5080 (16 GiB). Another
 long-lived process occupied about 1 GiB during every run. Both implementations

@@ -17,6 +17,7 @@ use rxla_nn::{
 use rxla_safetensors::{ResidentBoundModel, SafeTensors, WeightResidencyPool};
 use serde::Deserialize;
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -63,6 +64,9 @@ struct Args {
     /// allocation.
     #[arg(long, default_value_t = 4)]
     vae_batch_size: usize,
+    /// Compile a smaller VAE executable for the tail instead of zero padding it.
+    #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
+    exact_vae_tail: bool,
     /// VAE tile side in output pixels. Larger images are decoded as overlapping tiles.
     #[arg(long, default_value_t = 1024)]
     vae_tile: u32,
@@ -82,6 +86,12 @@ struct Args {
     /// Prepare timestep-only intermediates once, using cuts in the model IR.
     #[arg(long, conflicts_with_all = ["device_loop", "offload_transformer"])]
     prepare_schedule: bool,
+    /// Experimentally combine Q/K/V projections; checkpoint format is unchanged.
+    #[arg(long)]
+    fuse_qkv: bool,
+    /// Experimentally combine MLP value/gate projections.
+    #[arg(long)]
+    fuse_mlp: bool,
     /// Persistent serialized PJRT executable cache.
     #[arg(long)]
     cache_dir: Option<PathBuf>,
@@ -134,6 +144,8 @@ struct DenoiseOptions<'a> {
     batch_size: usize,
     device_loop: bool,
     prepare_schedule: bool,
+    fuse_qkv: bool,
+    fuse_mlp: bool,
     cache_dir: Option<&'a PathBuf>,
     offload_transformer: bool,
     offload_headroom_bytes: usize,
@@ -238,7 +250,9 @@ fn prepare_denoiser(client: &Client, options: &DenoiseOptions<'_>) -> Result<Den
     let context_tokens = prompt.shape[1];
     let batch = i64::try_from(options.batch_size)?;
     let image_tokens = options.latent_height * options.latent_width;
-    let config = QwenImage21Config::official_w8(options.latent_height, options.latent_width);
+    let config = QwenImage21Config::official_w8(options.latent_height, options.latent_width)
+        .fuse_qkv(options.fuse_qkv)
+        .fuse_mlp(options.fuse_mlp);
     let schedule = QwenImage21FlowScheduler::new(options.steps, image_tokens as usize)?;
     let trace_start = Instant::now();
     let model = if options.device_loop {
@@ -401,6 +415,7 @@ struct DecodeOptions<'a> {
     latent_width: i64,
     batch_size: usize,
     max_batch_size: usize,
+    exact_tail: bool,
     cache_dir: Option<&'a PathBuf>,
 }
 
@@ -418,7 +433,11 @@ fn prepare_vae_bridge(
             .broadcast_to(latent.shape())?;
         let std = cx.constant([1, 1, 64], std)?.broadcast_to(latent.shape())?;
         let normalized = latent.mul(&std)?.add(&mean)?;
-        plan.split_zero_padded(&normalized, 0)
+        if options.exact_tail {
+            plan.split_exact(&normalized, 0)
+        } else {
+            plan.split_zero_padded(&normalized, 0)
+        }
     })
     .inputs(ModelInput::new([
         i64::try_from(options.batch_size)?,
@@ -438,7 +457,8 @@ fn prepare_vae_bridge(
 
 struct VaeDecoder {
     bridge: BufferProgram,
-    decoder: BoundModel,
+    decoders: BTreeMap<usize, BoundModel>,
+    padded_batch: Option<usize>,
     actual_batches: Vec<usize>,
     values_per_image: usize,
     batch_size: usize,
@@ -449,7 +469,11 @@ impl VaeDecoder {
         let latent_batches: Vec<Buffer> = self.bridge.run(latent)?;
         let mut images = Vec::with_capacity(self.values_per_image * self.batch_size);
         for (latent, &actual_batch) in latent_batches.iter().zip(&self.actual_batches) {
-            let image: Buffer = self.decoder.run(latent)?;
+            let decoder = self
+                .decoders
+                .get(&self.padded_batch.unwrap_or(actual_batch))
+                .ok_or("missing VAE batch-shape executable")?;
+            let image: Buffer = decoder.run(latent)?;
             let values = image.to_vec::<f32>()?;
             images.extend_from_slice(&values[..self.values_per_image * actual_batch]);
         }
@@ -466,28 +490,38 @@ fn prepare_vae_decoder(
     let (bridge, actual_batches) = prepare_vae_bridge(client, mean, std, options)?;
     let image_tokens = options.latent_height * options.latent_width;
     let decode_batch_size = options.batch_size.min(options.max_batch_size);
-    let model = Model::new(|cx: Cx, latent| {
-        qwen_image_2_1_vae_decoder(cx, &latent, options.latent_height, options.latent_width)
-    })
-    .inputs(ModelInput::new([
-        i64::try_from(decode_batch_size)?,
-        image_tokens,
-        64,
-    ]))
-    .trace()?;
+    let trace = |decode_batch_size: usize| -> Result<_> {
+        Ok(Model::new(|cx: Cx, latent| {
+            qwen_image_2_1_vae_decoder(cx, &latent, options.latent_height, options.latent_width)
+        })
+        .inputs(ModelInput::new([
+            i64::try_from(decode_batch_size)?,
+            image_tokens,
+            64,
+        ]))
+        .trace()?)
+    };
+    let model = trace(decode_batch_size)?;
     let mut checkpoint = SafeTensors::open(options.checkpoint_path)?;
     let parameters = checkpoint.load_parameter_schema(client, model.schema())?;
-    let compiled = model.compile(&mut compiler(
-        client,
-        options.cache_dir,
-        "qwen-image-2.1-vae-v1",
-    )?)?;
+    let mut compiler = compiler(client, options.cache_dir, "qwen-image-2.1-vae-v1")?;
+    let compiled = model.compile(&mut compiler)?;
     let decoder = compiled.bind_parameters(parameters.bindings())?;
+    let mut decoders = BTreeMap::from([(decode_batch_size, decoder)]);
+    if options.exact_tail {
+        let tail = *actual_batches.last().ok_or("empty VAE batch plan")?;
+        if tail != decode_batch_size {
+            let model = trace(tail)?;
+            let compiled = model.compile(&mut compiler)?;
+            decoders.insert(tail, compiled.bind_parameters(parameters.bindings())?);
+        }
+    }
     let values_per_image =
         usize::try_from(options.latent_height * 16 * options.latent_width * 16 * 4)?;
     Ok(VaeDecoder {
         bridge,
-        decoder,
+        decoders,
+        padded_batch: (!options.exact_tail).then_some(decode_batch_size),
         actual_batches,
         values_per_image,
         batch_size: options.batch_size,
@@ -667,6 +701,8 @@ fn run(args: Args) -> Result<()> {
             batch_size: args.batch_size,
             device_loop: args.device_loop,
             prepare_schedule: args.prepare_schedule,
+            fuse_qkv: args.fuse_qkv,
+            fuse_mlp: args.fuse_mlp,
             cache_dir: args.cache_dir.as_ref(),
             offload_transformer: args.offload_transformer,
             offload_headroom_bytes: args
@@ -685,6 +721,7 @@ fn run(args: Args) -> Result<()> {
         latent_width,
         batch_size: args.batch_size,
         max_batch_size: args.vae_batch_size,
+        exact_tail: args.exact_vae_tail,
         cache_dir: args.cache_dir.as_ref(),
     };
     let tiled = args.width > args.vae_tile || args.height > args.vae_tile;
@@ -780,8 +817,10 @@ fn run(args: Args) -> Result<()> {
             .ok_or("VAE output does not match requested dimensions")?;
         image.save(output)?;
     }
+    // This summary includes every request. The Python benchmark wrapper
+    // separately excludes explicitly configured warmup requests.
     println!(
-        "batch={} requests={} pipeline_init={initialization_time:.3?} median_request={:.3?} steady_images_per_second={:.3} saved {}",
+        "batch={} requests={} pipeline_init={initialization_time:.3?} median_request={:.3?} median_images_per_second={:.3} saved {}",
         args.batch_size,
         args.requests,
         median_duration(&request_times),
@@ -798,7 +837,12 @@ fn run(args: Args) -> Result<()> {
 fn median_duration(values: &[std::time::Duration]) -> std::time::Duration {
     let mut values = values.to_vec();
     values.sort_unstable();
-    values[values.len() / 2]
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        (values[middle - 1] + values[middle]) / 2
+    } else {
+        values[middle]
+    }
 }
 
 fn output_paths(output: &Path, batch_size: usize) -> Vec<PathBuf> {
@@ -829,6 +873,45 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_defaults_to_exact_tail_and_can_restore_padding() -> Result<()> {
+        let base = [
+            "qwen",
+            "plugin.so",
+            "transformer.safetensors",
+            "vae.safetensors",
+            "vae.json",
+            "prompt.safetensors",
+            "output.png",
+        ];
+        assert!(Args::try_parse_from(base)?.exact_vae_tail);
+        assert!(
+            !Args::try_parse_from(base.into_iter().chain(["--exact-vae-tail", "false"]))?
+                .exact_vae_tail
+        );
+        assert!(Args::try_parse_from(base.into_iter().chain(["--exact-vae-tail"]))?.exact_vae_tail);
+        let fusion = Args::try_parse_from(base.into_iter().chain(["--fuse-qkv", "--fuse-mlp"]))?;
+        assert!(fusion.fuse_qkv && fusion.fuse_mlp);
+        Ok(())
+    }
+
+    #[test]
+    fn duration_median_averages_the_two_middle_samples() {
+        use std::time::Duration;
+        assert_eq!(
+            median_duration(&[Duration::from_secs(4), Duration::from_secs(2)]),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            median_duration(&[
+                Duration::from_secs(4),
+                Duration::from_secs(2),
+                Duration::from_secs(9)
+            ]),
+            Duration::from_secs(4)
+        );
+    }
 
     #[test]
     fn feathered_tiles_cover_irregular_final_stride_with_unit_weight() {
