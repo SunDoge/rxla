@@ -24,6 +24,7 @@ pub use inputs::{
 pub use staging::{BoundModelStages, CompiledModelStages, PreparedModelValues};
 mod initializer;
 pub use initializer::Initializer;
+pub use rxla_nn_macros::model;
 mod layers;
 pub use layers::{
     BatchNorm, Conv2d, Embedding, GroupNorm, ImageLayout, Layer, LayerNorm, Linear, LoraLinear,

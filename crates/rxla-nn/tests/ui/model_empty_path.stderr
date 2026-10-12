@@ -1,0 +1,5 @@
+error: #[layer] requires at least one explicit path segment
+ --> tests/ui/model_empty_path.rs:3:5
+  |
+3 |     #[layer()]
+  |     ^^^^^^^^^^

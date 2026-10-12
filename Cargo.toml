@@ -8,6 +8,7 @@ members = [
   "crates/rxla-log",
   "crates/rxla-models",
   "crates/rxla-nn",
+  "crates/rxla-nn-macros",
   "crates/rxla-onnx",
   "crates/rxla-pjrt",
   "crates/rxla-train",

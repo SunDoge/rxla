@@ -8,6 +8,10 @@ readme.workspace = true
 description = "Scoped parameter effects and neural-network layers for RXLA"
 
 [dependencies]
+rxla-nn-macros = { path = "../rxla-nn-macros", version = "=0.1.0-alpha.1" }
 derive_setters = { workspace = true }
 rxla-core = { path = "../rxla-core", version = "=0.1.0-alpha.1", default-features = false }
 snafu = { workspace = true }
+
+[dev-dependencies]
+trybuild = "1"

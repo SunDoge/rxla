@@ -32,6 +32,10 @@ name = "rxla-core"
 version_group = "rxla"
 
 [[package]]
+name = "rxla-nn-macros"
+version_group = "rxla"
+
+[[package]]
 name = "rxla-nn"
 version_group = "rxla"
 

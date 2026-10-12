@@ -1,0 +1,5 @@
+error: #[layer] cannot capture context across a closure or nested item; use an explicit Cx there
+ --> tests/ui/model_nested_closure.rs:4:9
+  |
+4 |         #[layer("conv")]
+  |         ^^^^^^^^^^^^^^^^

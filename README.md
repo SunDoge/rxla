@@ -83,6 +83,9 @@ runtime inputs and named parameters and reconstructs typed outputs. See the
 [parameter-effect design](docs/PARAMETER-EFFECT-DESIGN.md) for the effect and
 ABI invariants.
 
+For explicit layer paths without a visible `Cx` argument, see
+[`#[model]` and `#[layer]`](docs/MODEL-ATTRIBUTES.md).
+
 ## Architecture
 
 RXLA separates the frontend from execution without maintaining two competing
@@ -122,6 +125,7 @@ The foundational crates are:
 - `rxla-log`: indexed Protobuf/MCAP logs shared by Rust and Python.
 - `rxla-nn`: typed model handlers, parameter/state effects, schemas, and
   neural-network operations.
+- `rxla-nn-macros`: model-function and explicit layer-path syntax.
 
 Experimental integration crates include `rxla-onnx`, `rxla-safetensors`,
 `rxla-train`, and `rxla-models`. They remain workspace-tested but use

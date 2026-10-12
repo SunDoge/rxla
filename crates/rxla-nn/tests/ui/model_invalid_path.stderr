@@ -1,0 +1,5 @@
+error: layer names must be nonempty single path segments without '.' or '/'
+ --> tests/ui/model_invalid_path.rs:3:13
+  |
+3 |     #[layer("block.conv")]
+  |             ^^^^^^^^^^^^
