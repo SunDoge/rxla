@@ -123,10 +123,7 @@ impl Importer<'_> {
                 for &axis in axes.iter().rev() {
                     reduced_shape.remove(axis);
                 }
-                let reduced_ty = TensorType {
-                    dims: dims(&reduced_shape),
-                    dtype: DType::F32,
-                };
+                let reduced_ty = TensorType::static_shape(dims(&reduced_shape), DType::F32);
                 let sum = self.append(
                     Op::Reduce {
                         kind: Reduction::Sum,
@@ -240,10 +237,7 @@ impl Importer<'_> {
                 permutation: vec![2, 3, 1, 0],
             },
             &[ids[1]],
-            &TensorType {
-                dims: dims(&transposed_shape),
-                dtype: DType::F32,
-            },
+            &TensorType::static_shape(dims(&transposed_shape), DType::F32),
         )?;
         let padding = [
             [conv.config.padding[0] as i64; 2],
@@ -295,10 +289,7 @@ impl Importer<'_> {
         let reshaped = self.append(
             Op::Reshape,
             &[input],
-            &TensorType {
-                dims: dims(&expanded),
-                dtype: DType::F32,
-            },
+            &TensorType::static_shape(dims(&expanded), DType::F32),
         )?;
         let broadcast = vec![old[0], old[2], scales[0], old[3], scales[1], old[1]];
         let expanded = self.append(
@@ -306,10 +297,7 @@ impl Importer<'_> {
                 axes: vec![0, 1, 2, 3, 4, 5],
             },
             &[reshaped],
-            &TensorType {
-                dims: dims(&broadcast),
-                dtype: DType::F32,
-            },
+            &TensorType::static_shape(dims(&broadcast), DType::F32),
         )?;
         self.append(Op::Reshape, &[expanded], result)
     }
@@ -411,10 +399,7 @@ impl Importer<'_> {
         let id = self.append(
             Op::Parameter(number),
             &[],
-            &TensorType {
-                dims: dims(shape),
-                dtype: DType::F32,
-            },
+            &TensorType::static_shape(dims(shape), DType::F32),
         )?;
         if let Some(values) = values {
             self.parameters.push(Parameter {
@@ -430,10 +415,7 @@ impl Importer<'_> {
         self.append(
             Op::ConstantF32(Arc::from([value])),
             &[],
-            &TensorType {
-                dims: vec![],
-                dtype: DType::F32,
-            },
+            &TensorType::static_shape(vec![], DType::F32),
         )
     }
 
@@ -484,10 +466,10 @@ impl Importer<'_> {
             .context(crate::error::IrSnafu)
     }
     fn physical_ty(&self, name: &str) -> Result<TensorType> {
-        Ok(TensorType {
-            dims: dims(&self.physical_shape(name)?),
-            dtype: DType::F32,
-        })
+        Ok(TensorType::static_shape(
+            dims(&self.physical_shape(name)?),
+            DType::F32,
+        ))
     }
     fn physical_shape(&self, name: &str) -> Result<Vec<usize>> {
         Ok(physical_shape(self.shape(name)?))
@@ -511,10 +493,7 @@ impl Importer<'_> {
                 permutation: vec![0, 2, 3, 1],
             },
             &[id],
-            &TensorType {
-                dims: dims(&physical_shape(shape)),
-                dtype: DType::F32,
-            },
+            &TensorType::static_shape(dims(&physical_shape(shape)), DType::F32),
         )
     }
     fn transpose_to_nchw(&mut self, id: SsaId, shape: Vec<usize>) -> Result<SsaId> {
@@ -526,10 +505,7 @@ impl Importer<'_> {
                 permutation: vec![0, 3, 1, 2],
             },
             &[id],
-            &TensorType {
-                dims: dims(&shape),
-                dtype: DType::F32,
-            },
+            &TensorType::static_shape(dims(&shape), DType::F32),
         )
     }
     fn shape(&self, name: &str) -> Result<&Vec<usize>> {

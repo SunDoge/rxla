@@ -13,7 +13,6 @@ members = [
   "crates/rxla-pjrt",
   "crates/rxla-train",
   "crates/rxla-safetensors",
-  "crates/rxla-tfrecord",
   "crates/rxla-xla-proto",
   "xtask",
 ]
@@ -35,14 +34,12 @@ derive_setters = "0.1.9"
 enumset = "1.1"
 fast_image_resize = "6.1.0"
 half = { version = "2.7.1", default-features = false }
-fory = "=1.7.3"
 rayon = "1.11.0"
 image = { version = "0.25.10", default-features = false }
 memmap2 = "0.9.11"
 mcap = "0.25.0"
 prost = "0.14"
 snafu = "0.9.2"
-tfrecord-lite = { version = "0.1.0", path = "../tfrecord-fast" }
 zune-core = "0.5.3"
 zune-jpeg = "0.5.15"
 

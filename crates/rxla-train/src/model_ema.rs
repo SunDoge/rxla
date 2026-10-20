@@ -294,9 +294,9 @@ mod tests {
     use rxla_nn::{Cx, Linear, Model, Result, TensorApply};
 
     fn linear_loss(cx: Cx) -> Result<Tensor> {
-        let input = cx.input(&[1, 1])?;
+        let input = cx.input([1, 1])?;
         let prediction = input.apply(&cx.named_layer("linear", Linear::new(1).bias(false))?)?;
-        Ok(prediction.square()?.sum(&[0, 1], false)?)
+        Ok(prediction.square()?.sum([0, 1], false)?)
     }
 
     #[test]

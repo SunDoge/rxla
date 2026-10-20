@@ -257,7 +257,7 @@ fn resnet18(cx: Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor,
     let batch_size = images.shape()[0];
     let mut augmentation_rng = cx.rng("augmentation")?;
     let flips =
-        augmentation_rng.bernoulli(&[batch_size, 1, 1, 1], if training { 0.5 } else { 0.0 })?;
+        augmentation_rng.bernoulli([batch_size, 1, 1, 1], if training { 0.5 } else { 0.0 })?;
     let images = images.cast(DType::F32)?.mul_scalar(1.0 / 255.0)?;
     let images = flips
         .broadcast_to(images.shape())?
@@ -292,16 +292,16 @@ fn resnet18(cx: Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tensor,
             hidden = basic_block(block_cx, &hidden, channels, stride)?;
         }
     }
-    let features = hidden.mean(&[1, 2], false)?;
+    let features = hidden.mean([1, 2], false)?;
     let logits = features.through(path!(cx / "fc")?, Linear::new(CLASSES))?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
-        .mean(&[0], false)?;
+        .mean([0], false)?;
     let predicted = logits.argmax(1, false)?;
     let correct = predicted
         .le_mask(&labels)?
         .mul(&labels.le_mask(&predicted)?)?
-        .sum(&[0], false)?;
+        .sum([0], false)?;
     Ok((loss, logits, correct))
 }
 

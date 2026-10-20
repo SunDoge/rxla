@@ -142,7 +142,7 @@ fn lower(node: &Node, input: &[Tensor]) -> Result<Tensor> {
             if x.shape().len() != 4 {
                 return Err("expected NCHW".into());
             }
-            x.mean(&[2, 3], true)?
+            x.mean([2, 3], true)?
         }
         "ReduceMean" => {
             let axes: Vec<usize> = integers(a, "axes", &[])?
@@ -156,9 +156,9 @@ fn lower(node: &Node, input: &[Tensor]) -> Result<Tensor> {
         }
         "Concat" => Tensor::concatenate(input, usize::try_from(integer(a, "axis", 1)?)?)?,
         "Resize" => x
-            .transpose(&[0, 2, 3, 1])?
+            .transpose([0, 2, 3, 1])?
             .upsample_nearest2d(pair(a, "scales", [1, 1])?)?
-            .transpose(&[0, 3, 1, 2])?,
+            .transpose([0, 3, 1, 2])?,
         "Conv" | "ConvTranspose" | "MaxPool" => {
             if x.shape().len() != 4 {
                 return Err("expected NCHW".into());
@@ -167,7 +167,7 @@ fn lower(node: &Node, input: &[Tensor]) -> Result<Tensor> {
             let dilation = pair(a, "dilations", [1, 1])?;
             let kernel = pair(a, "kernel_shape", [1, 1])?;
             let pads = padding(a, &x.shape()[2..], kernel, strides, dilation)?;
-            let x = x.transpose(&[0, 2, 3, 1])?;
+            let x = x.transpose([0, 2, 3, 1])?;
             let mut y = if node.op == "MaxPool" {
                 if integer(a, "ceil_mode", 0)? != 0 {
                     return Err("ceil mode unsupported".into());
@@ -182,7 +182,7 @@ fn lower(node: &Node, input: &[Tensor]) -> Result<Tensor> {
                 if w.shape().len() != 4 || w.shape()[2..] != kernel {
                     return Err("kernel shape mismatch".into());
                 }
-                let w = w.transpose(&[2, 3, 1, 0])?;
+                let w = w.transpose([2, 3, 1, 0])?;
                 let groups = integer(a, "group", 1)?;
                 if node.op == "Conv" {
                     x.conv2d(
@@ -218,7 +218,7 @@ fn lower(node: &Node, input: &[Tensor]) -> Result<Tensor> {
                 }
                 y = y.add(&input[2].broadcast_to(y.shape())?)?;
             }
-            y.transpose(&[0, 3, 1, 2])?
+            y.transpose([0, 3, 1, 2])?
         }
         op => return Err(format!("unsupported operation: {op}").into()),
     })

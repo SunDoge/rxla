@@ -199,11 +199,11 @@ fn classifier(cx: Cx, images: Tensor, labels: Tensor) -> NnResult<(Tensor, Tenso
             hidden = basic_block(block_cx, &hidden, channels, stride)?;
         }
     }
-    let features = hidden.mean(&[1, 2], false)?;
+    let features = hidden.mean([1, 2], false)?;
     let logits = features.through(path!(cx / "fc")?, Linear::new(CLASSES))?;
     let loss = logits
         .cross_entropy_with_indices(&labels, 1)?
-        .mean(&[0], false)?;
+        .mean([0], false)?;
     Ok((loss, logits))
 }
 

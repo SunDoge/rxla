@@ -1804,7 +1804,7 @@ mod tests {
     fn model_state_updates_can_be_gated_by_a_scalar_effect() {
         let mut applied = Model::new(|cx: Cx, mask: Tensor| -> Result<_> {
             let steps = cx.state("steps", [], DType::F32)?;
-            steps.add_(&cx, &cx.constant(&[], &[1.0])?)?;
+            steps.add_(&cx, &cx.constant([], [1.0])?)?;
             Ok(mask)
         })
         .inputs(ModelInput::new([]))
@@ -1833,7 +1833,7 @@ mod tests {
         .unwrap();
         let mut applied = Model::new(|cx: Cx, mask: Tensor| -> Result<_> {
             let steps = cx.state("steps", [], DType::F32)?;
-            steps.add_(&cx, &cx.constant(&[], &[1.0])?)?;
+            steps.add_(&cx, &cx.constant([], [1.0])?)?;
             Ok(mask)
         })
         .inputs(ModelInput::new([]))

@@ -22,7 +22,7 @@ pub use residency::{
 };
 #[cfg(feature = "model")]
 use rxla_pjrt::DType;
-use rxla_pjrt::{Buffer, BufferDestination, Client};
+use rxla_pjrt::{Buffer, BufferDestination};
 use safetensors::tensor::Metadata;
 pub use safetensors::tensor::{Dtype, TensorInfo};
 use snafu::Snafu;

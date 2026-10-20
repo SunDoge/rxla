@@ -5,7 +5,6 @@ use fast_image_resize::{
     FilterType as FastFilterType, PixelType, ResizeAlg, ResizeOptions, Resizer,
     images::{Image as FastImage, ImageRef},
 };
-use fory::{ForyRow, from_row};
 use image::{Rgb, RgbImage};
 use rayon::prelude::*;
 #[cfg(feature = "disk-cache")]
@@ -20,7 +19,6 @@ use rxla_models::{
 };
 use rxla_nn::{AppliedModel, Cx, Model, ModelInput};
 use rxla_safetensors::{SafeTensors, save_buffers_new, save_model_new, save_training_state_new};
-use rxla_tfrecord::Reader as TfrecordReader;
 use rxla_train::{
     BoundedPipeline, DataRng, DetectionTarget, ModelEma, SampleRng, SgdOptions, ShufflePool,
     YoloLrSchedule, apply_model_ema, apply_model_ema_when,
@@ -211,8 +209,6 @@ enum DataSource {
         /// COCO image ID at which to start iterating.
         image_id: u64,
     },
-    /// Stream TFRecord-framed Apache Fory Standard Rows.
-    Tfrecord { input: PathBuf },
 }
 
 #[derive(Deserialize)]
@@ -243,27 +239,6 @@ struct CocoAnnotation {
 #[derive(Deserialize)]
 struct CocoCategory {
     id: u64,
-}
-
-#[derive(Deserialize)]
-struct ForyManifest {
-    codec: String,
-    container: String,
-    #[serde(default)]
-    annotation_policy: String,
-    schema_sha256: String,
-    samples: usize,
-}
-
-#[derive(ForyRow)]
-struct DetectionRecord {
-    // PyFory Standard Row canonicalizes dataclass fields lexically.
-    boxes: Vec<f32>,
-    height: i32,
-    image: Vec<u8>,
-    labels: Vec<i32>,
-    sample_id: String,
-    width: i32,
 }
 
 struct DetectionSample {
@@ -383,12 +358,6 @@ enum TrainingSource {
         rollover_position: usize,
         annotations: HashMap<u64, Vec<usize>>,
         categories: BTreeMap<u64, usize>,
-    },
-    Tfrecord {
-        reader: TfrecordReader<std::io::BufReader<std::fs::File>>,
-        input: PathBuf,
-        categories: BTreeMap<u64, usize>,
-        samples: usize,
     },
 }
 
@@ -1608,7 +1577,7 @@ fn decode_sample(sample: &DetectionSample) -> std::result::Result<RgbImage, Stri
         .dimensions
         .is_some_and(|dimensions| dimensions != [image.width(), image.height()])
     {
-        return Err("image dimensions do not match Fory metadata".to_owned());
+        return Err("image dimensions do not match dataset metadata".to_owned());
     }
     Ok(image)
 }
@@ -2015,36 +1984,12 @@ impl TrainingSource {
                     categories,
                 })
             }
-            DataSource::Tfrecord { input } => {
-                let manifest_path = PathBuf::from(format!("{}.json", input.display()));
-                let manifest: ForyManifest = serde_json::from_reader(std::io::BufReader::new(
-                    std::fs::File::open(&manifest_path)?,
-                ))?;
-                if manifest.codec != "apache-fory-standard-row-1.7"
-                    || manifest.container != "tfrecord"
-                    || manifest.annotation_policy != "yolox-coco-v1"
-                    || manifest.schema_sha256 != DETECTION_SCHEMA_SHA256
-                {
-                    return Err(format!(
-                        "incompatible TFRecord/Fory manifest {}",
-                        manifest_path.display()
-                    )
-                    .into());
-                }
-                Ok(Self::Tfrecord {
-                    reader: TfrecordReader::open(&input)?,
-                    input,
-                    categories: category_map(COCO_CATEGORY_IDS),
-                    samples: manifest.samples,
-                })
-            }
         }
     }
 
     fn sample_count(&self) -> usize {
         match self {
             Self::Coco { document, .. } => document.images.len(),
-            Self::Tfrecord { samples, .. } => *samples,
         }
     }
 
@@ -2088,65 +2033,6 @@ impl TrainingSource {
                     id: image.id.to_string(),
                     encoded_image: std::fs::read(images.join(&image.file_name))?,
                     dimensions: None,
-                    boxes,
-                    classes,
-                }))
-            }
-            Self::Tfrecord {
-                reader,
-                input,
-                categories,
-                ..
-            } => {
-                let payload = if let Some(payload) = reader.read_record()? {
-                    payload
-                } else {
-                    *reader = TfrecordReader::open(&*input)?;
-                    let Some(payload) = reader.read_record()? else {
-                        return Ok(None);
-                    };
-                    payload
-                };
-                let row = from_row::<DetectionRecord>(payload)?;
-                let boxes = row.boxes()?;
-                let labels = row.labels()?;
-                if boxes.len() != labels.len() * 4 {
-                    return Err("Fory detection row has inconsistent boxes and labels".into());
-                }
-                let dimensions = [u32::try_from(row.width()?)?, u32::try_from(row.height()?)?];
-                let decoded_boxes = (0..labels.len())
-                    .map(|index| {
-                        Ok([
-                            boxes.get(index * 4)?,
-                            boxes.get(index * 4 + 1)?,
-                            boxes.get(index * 4 + 2)?,
-                            boxes.get(index * 4 + 3)?,
-                        ])
-                    })
-                    .collect::<std::result::Result<Vec<_>, fory::Error>>()?;
-                let decoded_classes = labels
-                    .iter()
-                    .map(|label| {
-                        let label = u64::try_from(label.map_err(|error| error.to_string())?)
-                            .map_err(|error| error.to_string())?;
-                        categories
-                            .get(&label)
-                            .copied()
-                            .ok_or_else(|| format!("unknown COCO category {label}"))
-                    })
-                    .collect::<std::result::Result<Vec<_>, String>>()?;
-                let mut boxes = Vec::with_capacity(decoded_boxes.len());
-                let mut classes = Vec::with_capacity(decoded_classes.len());
-                for (bbox, class) in decoded_boxes.into_iter().zip(decoded_classes) {
-                    if let Some(bbox) = clean_xyxy_bbox(bbox, dimensions) {
-                        boxes.push(bbox);
-                        classes.push(class);
-                    }
-                }
-                Ok(Some(DetectionSample {
-                    id: row.sample_id()?.to_owned(),
-                    encoded_image: row.image()?.to_vec(),
-                    dimensions: Some(dimensions),
                     boxes,
                     classes,
                 }))
@@ -2195,16 +2081,6 @@ fn category_map(ids: impl IntoIterator<Item = u64>) -> BTreeMap<u64, usize> {
         .map(|(index, id)| (id, index))
         .collect()
 }
-
-const COCO_CATEGORY_IDS: [u64; 80] = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28,
-    31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
-    56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 67, 70, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84,
-    85, 86, 87, 88, 89, 90,
-];
-
-const DETECTION_SCHEMA_SHA256: &str =
-    "237f2fa5b001dbed66bc326f618b90fdeba67d2d284357a38274612d007d455f";
 
 fn padded_targets(
     batch: usize,
@@ -2304,6 +2180,16 @@ mod tests {
         assert_eq!((args.random_size_min, args.random_size_max), (10, 20));
         assert_eq!(args.mosaic_probability, 1.0);
         assert_eq!(args.mixup_probability, 0.0);
+        assert!(
+            Args::try_parse_from([
+                "yolox_coco_train_step",
+                "plugin.so",
+                "weights.safetensors",
+                "tfrecord",
+                "train.tfrecord",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

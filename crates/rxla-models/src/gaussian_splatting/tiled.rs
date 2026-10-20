@@ -1,5 +1,5 @@
 //! Portable tiled rasterization following the algorithmic structure of the
-//! MIT-licensed JAX-GS renderer: https://github.com/ghif/jax-gs.
+//! MIT-licensed JAX-GS renderer: <https://github.com/ghif/jax-gs>.
 
 use super::*;
 use rxla_core::DType;

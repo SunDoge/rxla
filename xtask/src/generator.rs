@@ -110,7 +110,7 @@ fn generate(root: &Path, vendor: &Path, output: &Path) -> Result<()> {
     log_config.protoc_executable(&protoc);
     log_config.out_dir(output.join(LOG_PROTOS));
     log_config.file_descriptor_set_path(output.join(LOG_DESCRIPTOR));
-    log_config.compile_protos(&[log_proto.clone()], &[log_include])?;
+    log_config.compile_protos(std::slice::from_ref(&log_proto), &[log_include])?;
 
     fs::create_dir_all(output.join(PYTHON_LOG).join("schema"))?;
     let status = Command::new(protoc)

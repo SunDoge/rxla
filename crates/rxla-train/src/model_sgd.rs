@@ -562,9 +562,9 @@ mod tests {
     use rxla_nn::{Cx, Linear, Model, Result, TensorApply};
 
     fn linear_loss(cx: Cx) -> Result<Tensor> {
-        let input = cx.input(&[2, 3])?;
+        let input = cx.input([2, 3])?;
         let prediction = input.apply(&cx.named_layer("linear", Linear::new(1).bias(false))?)?;
-        Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
+        Ok(prediction.mul(&prediction)?.sum([0, 1], false)?)
     }
 
     #[test]
@@ -624,11 +624,11 @@ mod tests {
     #[test]
     fn stateful_sgd_retains_state_writes_as_hidden_roots() {
         fn stateful_loss(cx: Cx) -> Result<Tensor> {
-            let input = cx.input(&[1, 1])?;
-            let steps = cx.state("steps", &[], DType::F32)?;
-            steps.add_(&cx, &cx.constant(&[], &[1.0])?)?;
+            let input = cx.input([1, 1])?;
+            let steps = cx.state("steps", [], DType::F32)?;
+            steps.add_(&cx, &cx.constant([], [1.0])?)?;
             let prediction = input.apply(&cx.named_layer("linear", Linear::new(1).bias(false))?)?;
-            Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
+            Ok(prediction.mul(&prediction)?.sum([0, 1], false)?)
         }
 
         let model = Model::new(stateful_loss).trace().unwrap();
@@ -722,11 +722,11 @@ mod tests {
     #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
     fn accumulating_nesterov_matches_two_microbatch_reference() {
         fn regression_loss(cx: Cx) -> Result<Tensor> {
-            let input = cx.input(&[1, 1])?;
-            let target = cx.input(&[1, 1])?;
+            let input = cx.input([1, 1])?;
+            let target = cx.input([1, 1])?;
             let prediction = input.apply(&cx.named_layer("linear", Linear::new(1).bias(false))?)?;
             let error = prediction.sub(&target)?;
-            Ok(error.square()?.sum(&[0, 1], false)?)
+            Ok(error.square()?.sum([0, 1], false)?)
         }
 
         let client = unsafe {
@@ -827,11 +827,11 @@ mod tests {
     #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
     fn resident_nesterov_matches_three_step_reference() {
         fn regression_loss(cx: Cx) -> Result<Tensor> {
-            let input = cx.input(&[1, 1])?;
-            let target = cx.input(&[1, 1])?;
+            let input = cx.input([1, 1])?;
+            let target = cx.input([1, 1])?;
             let prediction = input.apply(&cx.named_layer("linear", Linear::new(1).bias(false))?)?;
             let error = prediction.sub(&target)?;
-            Ok(error.mul(&error)?.sum(&[0, 1], false)?)
+            Ok(error.mul(&error)?.sum([0, 1], false)?)
         }
 
         let client = unsafe {
@@ -896,11 +896,11 @@ mod tests {
     #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
     fn stateful_sgd_executes_update_and_state_transition_together() {
         fn stateful_loss(cx: Cx) -> Result<Tensor> {
-            let input = cx.input(&[1, 1])?;
-            let steps = cx.state("steps", &[], DType::F32)?;
-            steps.add_(&cx, &cx.constant(&[], &[1.0])?)?;
+            let input = cx.input([1, 1])?;
+            let steps = cx.state("steps", [], DType::F32)?;
+            steps.add_(&cx, &cx.constant([], [1.0])?)?;
             let prediction = input.apply(&cx.named_layer("linear", Linear::new(1).bias(false))?)?;
-            Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
+            Ok(prediction.mul(&prediction)?.sum([0, 1], false)?)
         }
 
         let client = unsafe {
@@ -933,11 +933,11 @@ mod tests {
     #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
     fn linear_sgd_executes_as_one_device_program() {
         fn regression_loss(cx: Cx) -> Result<Tensor> {
-            let input = cx.input(&[1, 1])?;
-            let target = cx.input(&[1, 1])?;
+            let input = cx.input([1, 1])?;
+            let target = cx.input([1, 1])?;
             let prediction = input.apply(&cx.named_layer("linear", Linear::new(1).bias(false))?)?;
             let error = prediction.sub(&target)?;
-            Ok(error.mul(&error)?.sum(&[0, 1], false)?)
+            Ok(error.mul(&error)?.sum([0, 1], false)?)
         }
 
         let client = unsafe {
@@ -1006,9 +1006,9 @@ mod tests {
     #[ignore = "requires trusted PJRT_CPU_PLUGIN_PATH"]
     fn resident_linear_sgd_initializes_once_and_commits_in_session() {
         fn regression_loss(cx: Cx) -> Result<Tensor> {
-            let input = cx.input(&[1, 1])?;
+            let input = cx.input([1, 1])?;
             let prediction = input.apply(&cx.named_layer("linear", Linear::new(1).bias(false))?)?;
-            Ok(prediction.mul(&prediction)?.sum(&[0, 1], false)?)
+            Ok(prediction.mul(&prediction)?.sum([0, 1], false)?)
         }
 
         let client = unsafe {

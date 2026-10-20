@@ -322,13 +322,13 @@ fn real_loaded_weights_in_linear_layer() {
     assert_eq!(checkpoint.stats().uploaded_bytes, 36);
     drop(checkpoint);
     let g = Tracer::default();
-    let x = g.input(&[1, 2]).unwrap();
-    let w = g.input(&[2, 3]).unwrap();
-    let b = g.input(&[3]).unwrap();
+    let x = g.input([1, 2]).unwrap();
+    let w = g.input([2, 3]).unwrap();
+    let b = g.input([3]).unwrap();
     let y = x
         .matmul(&w)
         .unwrap()
-        .add(&b.broadcast_to(&[1, 3]).unwrap())
+        .add(&b.broadcast_to([1, 3]).unwrap())
         .unwrap();
     let executable = g.compile(&client, &y).unwrap();
     let input = client.buffer(&[1, 2], &[1., 2.]).unwrap();

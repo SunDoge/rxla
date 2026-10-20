@@ -127,7 +127,7 @@ fn validate_dynamic_indices(
 
 impl Tensor {
     /// Construct I32 coordinates in this tensor's trace. This is the Tensor-first
-    /// form of [`Graph::iota_i32`] for library code that intentionally does not
+    /// form of `Graph::iota_i32` for library code that intentionally does not
     /// expose or carry a graph handle.
     pub fn iota_i32(&self, dims: &[i64], axis: usize) -> Result<Tensor> {
         self.graph().iota_i32(dims, axis)
@@ -160,7 +160,7 @@ impl Tensor {
             .graph()
             .scalar_i32(length as i32)?
             .broadcast_to(needles.shape())?;
-        let iterations = (i32::BITS - (length as u32).leading_zeros()) as usize;
+        let iterations = (u32::BITS - (length as u32).leading_zeros()) as usize;
         for _ in 0..iterations {
             let middle = low.wrapping_add(&high)?.shift_right_logical(1)?;
             let values = self.take(&middle, 0)?;

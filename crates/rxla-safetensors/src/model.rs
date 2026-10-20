@@ -2,7 +2,7 @@
 
 use super::*;
 use rxla_nn::{CompiledModelSessionBuilder, ModelSchema, ModelSessionBuilder, ParameterSelection};
-use rxla_pjrt::Memory;
+use rxla_pjrt::{Client, Memory};
 use std::{collections::HashMap, sync::Arc};
 
 /// Weight buffers keyed by the stable paths in a parameter-effect schema.

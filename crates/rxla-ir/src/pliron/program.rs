@@ -1,7 +1,7 @@
 //! Ownership, identity, ABI, and lowering orchestration for one Pliron program.
 
 use super::*;
-use cranelift_entity::{PrimaryMap, entity_impl};
+use cranelift_entity::PrimaryMap;
 
 fn join_ids(values: &[SsaId]) -> String {
     values
@@ -31,11 +31,17 @@ mod thread_safety_tests {
     }
 }
 
-/// Graph-local identity of a canonical Pliron SSA value.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SsaId(u32);
+// cranelift-entity 0.134's macro expands deprecated `core::u32::MAX` paths.
+// Keep the upstream compatibility allowance local to that generated identity.
+#[allow(deprecated)]
+mod identity {
+    /// Graph-local identity of a canonical Pliron SSA value.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct SsaId(u32);
 
-entity_impl!(SsaId, "ssa");
+    cranelift_entity::entity_impl!(SsaId, "ssa");
+}
+pub use identity::SsaId;
 
 impl SsaId {
     pub fn from_index(index: usize) -> Self {

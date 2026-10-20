@@ -23,10 +23,12 @@ publishing its dependants:
 
 ```sh
 cargo publish --registry crates-io -p rxla-cache
+cargo publish --registry crates-io -p rxla-log
 cargo publish --registry crates-io -p rxla-pjrt
 cargo publish --registry crates-io -p rxla-xla-proto
 cargo publish --registry crates-io -p rxla-ir
 cargo publish --registry crates-io -p rxla-core
+cargo publish --registry crates-io -p rxla-nn-macros
 cargo publish --registry crates-io -p rxla-nn
 cargo publish --registry crates-io -p rxla
 ```

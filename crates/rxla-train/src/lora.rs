@@ -22,7 +22,7 @@ mod tests {
     use rxla_nn::{Cx, LoraLinear, Model, Result, TensorApply};
 
     fn adapter(cx: Cx) -> Result<Tensor> {
-        let input = cx.input(&[2, 4])?;
+        let input = cx.input([2, 4])?;
         let block = cx.scope("block")?;
         input.apply(&block.named_layer("proj", LoraLinear::new(3, 2).bias(false))?)
     }

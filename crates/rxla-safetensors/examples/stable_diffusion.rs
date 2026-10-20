@@ -425,7 +425,8 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
          timestep: Tensor,
          context: Tensor,
          history: Vec<Tensor>,
-         coefficients: Tensor| {
+         coefficients: Tensor|
+         -> Result<[Tensor; 2]> {
             let doubled = Tensor::concatenate(&[model_sample.clone(), model_sample.clone()], 0)?;
             let noise = unet(cx, &doubled, &timestep, &context, &unet_config)?;
             let split = noise.split(0, &[1, 1])?;
@@ -465,7 +466,7 @@ fn build(args: &Args) -> Result<(Pipeline, Duration, CacheStats)> {
     };
 
     let vae_config = args.preset.vae();
-    let vae_model = Model::new(|cx: Cx, latent: Tensor| -> rxla_nn::Result<Tensor> {
+    let vae_model = Model::new(|cx: Cx, latent: Tensor| -> Result<Tensor> {
         Ok(autoencoder_kl_decoder(cx, &latent, &vae_config)?
             .mul_scalar(0.5)?
             .add_scalar(0.5)?

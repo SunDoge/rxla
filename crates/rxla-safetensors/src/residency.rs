@@ -20,7 +20,7 @@ impl Budget {
     fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Reservation> {
         let result = self
             .reserved
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |reserved| {
                 reserved
                     .checked_add(bytes)
                     .filter(|&next| next <= self.limit)

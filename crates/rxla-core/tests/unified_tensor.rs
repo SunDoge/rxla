@@ -31,7 +31,8 @@ fn unified_dtype_validation_and_shape_operations() {
     assert!(float.sum([0, 1], false).unwrap().grad(&[integer]).is_err());
     assert!(float.vjp(&[], &compatibility).is_err());
     let bf16 = g.input_dtype([2, 3], DType::BF16).unwrap();
-    assert!(bf16.mul(&bf16).is_err());
+    assert_eq!(bf16.mul(&bf16).unwrap().dtype(), DType::BF16);
+    assert!(bf16.mul(&float).is_err());
     assert_eq!(bf16.to_f32().unwrap().dtype(), DType::F32);
     assert!(
         float
@@ -98,6 +99,10 @@ fn real_managed_integer_and_bf16_graphs() -> Result<(), Box<dyn std::error::Erro
     assert_eq!(
         compiler.execute_bound(&b.to_f32()?, &[&b])?[0].to_vec::<f32>()?,
         [-0., 1., -2.]
+    );
+    assert_eq!(
+        compiler.execute_bound(&b.mul(&b)?.to_f32()?, &[&b])?[0].to_vec::<f32>()?,
+        [0., 1., 4.]
     );
     Ok(())
 }

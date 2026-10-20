@@ -227,7 +227,15 @@ SimOTA assignments are discontinuous, so multi-step loss trajectories remain a
 diagnostic rather than a numerical oracle; the fixed-assignment one-step oracle
 is the authoritative gradient and update check.
 
-For sequential training, COCO can instead be stored as standard TFRecord
+### Historical TFRecord experiments (reader removed)
+
+As of 2026-10-20, the Rust TFRecord/Fory reader and `rxla-tfrecord` crate are
+removed. The commands and TFRecord measurements below are historical, not
+supported input commands for the current example. Use the `coco ANNOTATIONS
+IMAGES IMAGE_ID` subcommand for current training. Future packed dataset
+integration will target shardpack; no shardpack reader is connected yet.
+
+For the earlier sequential-training experiments, COCO was stored as standard TFRecord
 framing with Apache Fory Standard Row payloads. The JPEG remains compressed;
 Fory provides typed, borrowed views of its bytes and the box/label arrays.
 
