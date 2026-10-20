@@ -5,6 +5,7 @@ tag_prefix = "v"
 feat = { changelog_title = "Features" }
 fix = { changelog_title = "Bug Fixes" }
 perf = { changelog_title = "Performance" }
+bench = { changelog_title = "Benchmarks", omit_from_changelog = true }
 refactor = { changelog_title = "Refactoring" }
 docs = { changelog_title = "Documentation" }
 test = { changelog_title = "Tests", omit_from_changelog = true }
@@ -12,4 +13,3 @@ build = { changelog_title = "Build", omit_from_changelog = true }
 ci = { changelog_title = "CI", omit_from_changelog = true }
 chore = { changelog_title = "Chores", omit_from_changelog = true }
 style = { changelog_title = "Style", omit_from_changelog = true }
-
